@@ -74,6 +74,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
 | `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm |
+| `--same-net-pad-clearance` | -1.0 | Edge-to-edge clearance (mm) between stitching vias and same-net pads. `-1` allows via-in-pad placement (the default for the CLI). Any value `>= 0` forces vias to be placed outside same-net pads with that clearance |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
 | `--layer-costs` | 1.0 per layer (4+) or F.Cu=1.0/B.Cu=3.0 (2-layer) | Per-layer routing cost multipliers (1.0-1000) |
 
@@ -185,11 +186,17 @@ The tool classifies each pad on the target net into three categories:
 For each pad needing a via, the algorithm:
 
 1. **Check for nearby existing via** - If a via on the same net exists within `--max-via-reuse-radius`, reuse it
-2. **Try pad center first** - If the pad center is not blocked, place via there (no trace needed)
+2. **Try pad center first** - If the pad center is not blocked, place via there (no trace needed). Skipped when `--same-net-pad-clearance >= 0`, in which case same-net pads are treated as obstacles and vias are always placed outside the pad with the requested edge-to-edge clearance.
 3. **Spiral search outward** - Search in expanding rings for a valid position that:
    - Has clearance from existing vias, tracks, and pads on ALL copper layers
    - Can be routed to the pad using A* pathfinding
 4. **Fallback to farther via** - If no new via position works, try reusing any existing via within `--max-search-radius`
+
+#### Same-net pad clearance / via-in-pad
+
+By default the CLI keeps the legacy "via-in-pad" behavior — `--same-net-pad-clearance -1` means same-net pads are not added as via-placement obstacles, so a stitching via lands on the pad center whenever possible (no trace needed). Set `--same-net-pad-clearance` to a non-negative value to force vias outside same-net pads with that edge-to-edge clearance. For example, `--same-net-pad-clearance 0.25` keeps the same edge-to-edge gap as the global `--clearance`.
+
+In the GUI Planes tab, the **Same-net Pad Clearance** spin control defaults to the main `Clearance` value (so the GUI default is to avoid via-in-pad). Tick **Allow via-in-pad (override clearance)** to restore the legacy behavior — this disables the spin control and passes `-1` to the CLI; unticking re-enables the spin control and resumes using its value.
 
 ### Via Obstacle Checking
 

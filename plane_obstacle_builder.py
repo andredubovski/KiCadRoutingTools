@@ -168,7 +168,8 @@ def build_via_obstacle_map(
     pcb_data: PCBData,
     config: GridRouteConfig,
     exclude_net_id: int,
-    verbose: bool = True
+    verbose: bool = True,
+    same_net_pad_clearance: float = -1.0,
 ) -> GridObstacleMap:
     """
     Build obstacle map for via placement.
@@ -179,6 +180,11 @@ def build_via_obstacle_map(
     - Tracks on all layers (except target net)
     - Board edge clearance
     - Through-hole pad drills (hole-to-hole clearance)
+
+    Args:
+        same_net_pad_clearance: If >= 0, also block target-net pads as via obstacles
+            using this edge-to-edge clearance (in mm) in place of config.clearance.
+            -1 (default) leaves same-net pads unblocked, allowing via-in-pad placement.
     """
     import time
     t_start = time.time()
@@ -231,14 +237,16 @@ def build_via_obstacle_map(
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
 
-    # Add pads as obstacles (excluding target net pads)
+    # Add pads as obstacles (excluding target net pads, unless same_net_pad_clearance >= 0)
     t0 = time.time()
     pad_count = 0
     for net_id, pads in pcb_data.pads_by_net.items():
-        if net_id == exclude_net_id:
+        is_target_net = (net_id == exclude_net_id)
+        if is_target_net and same_net_pad_clearance < 0:
             continue
+        pad_clearance = same_net_pad_clearance if is_target_net else None
         for pad in pads:
-            _add_pad_via_obstacle(obstacles, pad, coord, config)
+            _add_pad_via_obstacle(obstacles, pad, coord, config, clearance_override=pad_clearance)
             pad_count += 1
     if verbose:
         print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
@@ -274,13 +282,19 @@ def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
 
 
 def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
-                           coord: GridCoord, config: GridRouteConfig):
-    """Add a pad as via blocking obstacle using rectangular shape with rounded corners."""
+                           coord: GridCoord, config: GridRouteConfig,
+                           clearance_override: float = None):
+    """Add a pad as via blocking obstacle using rectangular shape with rounded corners.
+
+    clearance_override: if not None, use this edge-to-edge clearance instead of
+        config.clearance (used for same-net pads when same_net_pad_clearance is set).
+    """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     # Add half grid step buffer to account for grid quantization errors
-    margin = config.via_size / 2 + config.clearance + config.grid_step / 2
+    clearance = config.clearance if clearance_override is None else clearance_override
+    margin = config.via_size / 2 + clearance + config.grid_step / 2
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)

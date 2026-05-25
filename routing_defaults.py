@@ -114,6 +114,10 @@ PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
 PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
 PLANE_TRACK_VIA_CLEARANCE = 0.8  # mm - clearance from track center to other nets' via centers
+SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and same-net pads
+                               # when placing plane stitching vias. -1 disables (allow via-in-pad).
+                               # Any value >= 0 forces vias to be placed outside same-net pads
+                               # with that much edge-to-edge clearance.
 
 # Repair disconnected planes defaults (route_disconnected_planes.py)
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
@@ -175,6 +179,7 @@ PARAM_RANGES = {
     'plane_max_search_radius': {'min': 1.0, 'max': 50.0, 'inc': 1.0, 'digits': 1},
     'plane_max_via_reuse_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'plane_max_rip_nets': {'min': 1, 'max': 10},
+    'same_net_pad_clearance': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 2},
     # Repair planes parameters
     'repair_max_track_width': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
     'repair_min_track_width': {'min': 0.05, 'max': 5.0, 'inc': 0.05, 'digits': 2},

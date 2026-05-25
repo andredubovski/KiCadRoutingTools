@@ -1206,7 +1206,8 @@ def create_plane(
     power_nets_widths: Optional[List[float]] = None,
     add_teardrops: bool = False,
     pcb_data: Optional[PCBData] = None,
-    return_results: bool = False
+    return_results: bool = False,
+    same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1226,6 +1227,9 @@ def create_plane(
         board_edge_clearance: Clearance from board edge for zone polygons (mm).
         voronoi_seed_interval: Sample interval for Voronoi seed points along routes (mm).
         plane_max_iterations: Max A* iterations for routing plane connections.
+        same_net_pad_clearance: Edge-to-edge clearance (mm) between stitching vias and
+            same-net pads. -1 (default) allows via-in-pad placement. Any value >= 0
+            forces vias to be placed outside same-net pads with that much clearance.
 
     Returns:
         (total_vias_placed, total_traces_added, total_pads_needing_vias)
@@ -1389,7 +1393,8 @@ def create_plane(
         # Step 7: Build obstacle map for via placement (exclude current net)
         if pads_need_via > 0:
             print("\nBuilding obstacle map for via placement...")
-            obstacles = build_via_obstacle_map(pcb_data, config, net_id)
+            obstacles = build_via_obstacle_map(pcb_data, config, net_id,
+                                               same_net_pad_clearance=same_net_pad_clearance)
             # Also block positions of vias we've already placed in previous nets
             for placed_via in all_new_vias:
                 block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
@@ -1543,13 +1548,16 @@ def create_plane(
             # Next, try to place via within pad boundary (preferred - no trace needed)
             # This avoids creating long traces that block other signals
             # Search from pad center outward within pad bounds
+            # Skipped when same_net_pad_clearance >= 0 (caller wants vias outside same-net pads).
             pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
             pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
             pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
 
             via_in_pad = None
+            if same_net_pad_clearance >= 0:
+                pass  # via-in-pad disabled by same_net_pad_clearance
             # Check pad center first
-            if not obstacles.is_via_blocked(pad_gx, pad_gy):
+            elif not obstacles.is_via_blocked(pad_gx, pad_gy):
                 via_in_pad = (pad.global_x, pad.global_y)
             else:
                 # Spiral search within pad boundary for closest unblocked position
@@ -2019,6 +2027,13 @@ Examples:
     parser.add_argument("--board-edge-clearance", type=float, default=0.5,
                         help="Clearance from board edge for zones in mm (default: 0.5)")
 
+    # Same-net pad clearance (avoid via-in-pad)
+    parser.add_argument("--same-net-pad-clearance", type=float,
+                        default=defaults.SAME_NET_PAD_CLEARANCE,
+                        help="Edge-to-edge clearance (mm) between stitching vias and same-net pads. "
+                             "-1 (default) allows via-in-pad placement; any value >= 0 forces vias "
+                             "outside same-net pads with that clearance.")
+
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
@@ -2117,7 +2132,8 @@ Examples:
         layer_costs=args.layer_costs,
         power_nets=args.power_nets,
         power_nets_widths=args.power_nets_widths,
-        add_teardrops=args.add_teardrops
+        add_teardrops=args.add_teardrops,
+        same_net_pad_clearance=args.same_net_pad_clearance,
     )
 
     # Add GND return vias if requested

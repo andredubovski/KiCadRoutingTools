@@ -45,10 +45,14 @@ class PlaneAssignmentPanel(wx.Panel):
         """Create the panel UI."""
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Assignment list
+        # Assignment list - capped at ~3 visible rows; scrolls internally when overflowing.
         self.assignment_list = wx.ListBox(self, style=wx.LB_EXTENDED)
         self.assignment_list.SetToolTip("Net → Layer assignments. Select and click Remove to delete.")
-        sizer.Add(self.assignment_list, 1, wx.EXPAND | wx.BOTTOM, 5)
+        row_h = self.assignment_list.GetCharHeight() + 2
+        list_h = row_h * 3 + 8  # 3 rows + a little frame padding
+        self.assignment_list.SetMinSize((-1, list_h))
+        self.assignment_list.SetMaxSize((-1, list_h))
+        sizer.Add(self.assignment_list, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Layer selection with checkboxes
         layer_label = wx.StaticText(self, label="Target Layers:")
@@ -203,7 +207,29 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.max_search_radius.SetToolTip("Maximum radius to search for valid via placement")
         grid.Add(self.max_search_radius, 0, wx.EXPAND)
 
+        # Same-net pad clearance (default = main clearance; checkbox below overrides to via-in-pad)
+        grid.Add(wx.StaticText(self, label="Same-net Pad Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['same_net_pad_clearance']
+        self.same_net_pad_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                        initial=defaults.CLEARANCE, inc=r['inc'])
+        self.same_net_pad_clearance.SetDigits(r['digits'])
+        self.same_net_pad_clearance.SetToolTip(
+            "Edge-to-edge clearance between stitching vias and same-net pads. "
+            "Disabled if 'Allow via-in-pad' is checked.")
+        grid.Add(self.same_net_pad_clearance, 0, wx.EXPAND)
+
         zone_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
+
+        # Via-in-pad override: when checked, vias may be placed inside same-net pads
+        # (and Same-net Pad Clearance is disabled / passed as -1).
+        self.via_in_pad_check = wx.CheckBox(self, label="Allow via-in-pad (override clearance)")
+        self.via_in_pad_check.SetToolTip(
+            "When checked, stitching vias may be placed on top of same-net pads, "
+            "ignoring 'Same-net Pad Clearance'.")
+        self.via_in_pad_check.SetValue(False)
+        self.via_in_pad_check.Bind(wx.EVT_CHECKBOX, self._on_via_in_pad_toggle)
+        zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Rip-up options
@@ -250,8 +276,16 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         self.SetSizer(sizer)
 
+    def _on_via_in_pad_toggle(self, event):
+        """Enable/disable the same-net pad clearance spin ctrl based on the via-in-pad checkbox."""
+        self.same_net_pad_clearance.Enable(not self.via_in_pad_check.GetValue())
+
     def get_config(self):
         """Get the configuration values."""
+        if self.via_in_pad_check.GetValue():
+            same_net_clr = -1.0  # via-in-pad allowed
+        else:
+            same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
             'zone_clearance': self.zone_clearance.GetValue(),
             'max_search_radius': self.max_search_radius.GetValue(),
@@ -260,6 +294,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
+            'same_net_pad_clearance': same_net_clr,
         }
 
 
@@ -427,20 +462,33 @@ class PlanesTab(wx.Panel):
         )
         self.assign_sizer.Add(self.assignment_panel, 1, wx.EXPAND | wx.ALL, 5)
 
-        right_sizer.Add(self.assign_sizer, 1, wx.EXPAND | wx.BOTTOM, 5)
+        right_sizer.Add(self.assign_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+
+        # Scrollable container for the mode-specific options panels.
+        # Spans the available height between Net→Layer Assignments and Status
+        # so when the active options panel doesn't fit, a vertical scrollbar
+        # appears here instead of squashing or pushing other sections offscreen.
+        self.options_scroll = wx.ScrolledWindow(self, style=wx.VSCROLL | wx.TAB_TRAVERSAL)
+        options_scroll_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Create options panel
-        self.create_options = CreatePlanesOptionsPanel(self)
-        right_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
+        self.create_options = CreatePlanesOptionsPanel(self.options_scroll)
+        options_scroll_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Repair options panel (initially hidden)
         def get_track_width():
             if self.get_shared_params:
                 return self.get_shared_params().get('track_width', defaults.TRACK_WIDTH)
             return defaults.TRACK_WIDTH
-        self.repair_options = RepairPlanesOptionsPanel(self, get_track_width=get_track_width)
-        right_sizer.Add(self.repair_options, 0, wx.EXPAND | wx.BOTTOM, 5)
+        self.repair_options = RepairPlanesOptionsPanel(
+            self.options_scroll, get_track_width=get_track_width)
+        options_scroll_sizer.Add(self.repair_options, 0, wx.EXPAND | wx.BOTTOM, 5)
         self.repair_options.Hide()
+
+        self.options_scroll.SetSizer(options_scroll_sizer)
+        self.options_scroll.SetScrollRate(0, 10)
+        self.options_scroll.FitInside()
+        right_sizer.Add(self.options_scroll, 1, wx.EXPAND | wx.BOTTOM, 5)
 
         # Status
         status_box = wx.StaticBox(self, label="Status")
@@ -468,9 +516,6 @@ class PlanesTab(wx.Panel):
 
         right_sizer.Add(btn_sizer, 0, wx.EXPAND)
 
-        # Add spacer
-        right_sizer.AddStretchSpacer(1)
-
         main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
@@ -486,6 +531,10 @@ class PlanesTab(wx.Panel):
             self.create_options.Hide()
             self.repair_options.Show()
             self.action_btn.SetLabel("Repair")
+        # Re-layout the scroll container so it recomputes the virtual size,
+        # then the outer tab so the scrollbar appears/disappears as needed.
+        self.options_scroll.Layout()
+        self.options_scroll.FitInside()
         self.Layout()
 
     def _on_cancel_or_close(self, event):
@@ -644,6 +693,7 @@ class PlanesTab(wx.Panel):
                 pcb_data=self.pcb_data,
                 return_results=True,
                 layer_nets=layer_nets,
+                same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
             )
 
             total_vias = vias
