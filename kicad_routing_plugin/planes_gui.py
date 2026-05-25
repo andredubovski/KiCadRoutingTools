@@ -762,6 +762,7 @@ class PlanesTab(wx.Panel):
             'total_traces': total_traces,
             'total_pads': total_pads,
             'cancelled': self._cancel_requested,
+            'affected_nets': sorted(set(expanded_nets)),
         }
 
     def _run_repair_planes(self, config):
@@ -813,6 +814,7 @@ class PlanesTab(wx.Panel):
                 'routes_added': routes_added,
                 'regions_connected': regions_connected,
                 'cancelled': self._cancel_requested,
+                'affected_nets': sorted(set(net_names)),
             }
 
         except Exception as e:
@@ -879,9 +881,15 @@ class PlanesTab(wx.Panel):
         msg += "\nUse Edit -> Undo to revert changes."
         wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
 
-        # Callback
+        # Callback - hand the parent the nets that were just touched so it
+        # can invalidate their connectivity cache entries.
         if self.on_planes_complete:
-            self.on_planes_complete()
+            affected = result.get('affected_nets') or []
+            try:
+                self.on_planes_complete(affected_nets=affected)
+            except TypeError:
+                # Older callbacks (no kwarg) - fall back to no-arg call.
+                self.on_planes_complete()
 
         # Refresh net list
         self.net_panel.refresh()

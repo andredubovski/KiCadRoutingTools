@@ -236,6 +236,17 @@ class RoutingDialog(wx.Dialog):
             # Replace pcb_data segments and vias with what's in pcbnew
             self.pcb_data.segments = new_segments
             self.pcb_data.vias = new_vias
+
+            # Also sync zones - the connectivity check uses pcb_data.zones to
+            # determine which nets are connected via copper pours. Without
+            # this, a freshly-created plane is invisible to "hide connected"
+            # until the GUI reopens.
+            try:
+                from kicad_parser import _extract_zones_from_pcbnew
+                self.pcb_data.zones = _extract_zones_from_pcbnew(
+                    board, pcbnew.ToMM, get_layer_name)
+            except Exception as e:
+                print(f"Warning: Error syncing zones from board: {e}")
         except Exception as e:
             print(f"Warning: Error syncing tracks from board: {e}")
 
@@ -1392,12 +1403,22 @@ class RoutingDialog(wx.Dialog):
             return is_conn
         return is_connected
 
-    def _on_tab_operation_complete(self):
+    def _on_tab_operation_complete(self, affected_nets=None):
         """Handle completion of tab operations (fanout, planes, etc.).
 
         Syncs board data, refreshes connectivity cache, and updates net lists.
+        If `affected_nets` is provided, those nets' cached connectivity
+        results are dropped first so they're re-checked (otherwise nets that
+        were "disconnected" before the operation would stay flagged that way
+        in the cache even after the operation connected them).
         """
         self._sync_pcb_data_from_board()
+        if affected_nets:
+            name_to_id = {net.name: net.net_id for net in self.pcb_data.nets.values()}
+            for name in affected_nets:
+                net_id = name_to_id.get(name)
+                if net_id is not None:
+                    self._connectivity_cache.pop(net_id, None)
         self._check_connectivity_with_progress()
         self._update_net_list()
 
