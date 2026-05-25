@@ -1061,7 +1061,7 @@ class FanoutTab(wx.Panel):
         try:
             from bga_fanout import generate_bga_fanout
 
-            tracks, vias_to_add, vias_to_remove = generate_bga_fanout(
+            tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
                 footprint,
                 self.pcb_data,
                 net_filter=net_patterns,
@@ -1080,7 +1080,14 @@ class FanoutTab(wx.Panel):
                 no_inner_top_layer=config['no_inner_top_layer'],
             )
 
-            self._apply_fanout_results(tracks, vias_to_add)
+            self._apply_fanout_results(
+                tracks, vias_to_add,
+                failed_nets=failed_nets,
+                fanout_config={
+                    'track_width': track_width, 'clearance': clearance,
+                    'via_size': via_size, 'via_drill': via_drill,
+                    'exit_margin': config.get('exit_margin'),
+                })
 
         except Exception as e:
             import traceback
@@ -1137,8 +1144,19 @@ class FanoutTab(wx.Panel):
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
-    def _apply_fanout_results(self, tracks, vias):
-        """Apply fanout results to the pcbnew board."""
+    def _apply_fanout_results(self, tracks, vias, failed_nets=None, fanout_config=None):
+        """Apply fanout results to the pcbnew board.
+
+        Args:
+            tracks: list of track dicts to add
+            vias: list of via dicts to add
+            failed_nets: optional list of net names that couldn't be fanned
+                out - used to build a suggestion block in the completion
+                dialog.
+            fanout_config: optional dict of the parameters used (track_width,
+                clearance, via_size, via_drill, exit_margin) so suggestions
+                can reference the user's actual values.
+        """
         import pcbnew
         from .swig_gui import _build_layer_mappings
 
@@ -1206,6 +1224,26 @@ class FanoutTab(wx.Panel):
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} tracks\n"
         msg += f"  {vias_added} vias\n"
+        if failed_nets:
+            msg += f"\nFailed nets ({len(failed_nets)}):\n"
+            for name in failed_nets[:8]:
+                msg += f"  - {name}\n"
+            if len(failed_nets) > 8:
+                msg += f"  ... and {len(failed_nets) - 8} more (see Log tab)\n"
+            try:
+                from routing_diagnostics import (
+                    suggest_bga_fanout_adjustments, format_suggestions_for_dialog)
+                # Estimate "total" - we don't know the input count here, just
+                # use failed + tracks_added as a rough denominator.
+                rough_total = max(len(failed_nets) + tracks_added, len(failed_nets))
+                suggestions = suggest_bga_fanout_adjustments(
+                    failed=len(failed_nets), total=rough_total,
+                    config=fanout_config or {})
+                block = format_suggestions_for_dialog(suggestions)
+                if block:
+                    msg += "\n" + block + "\n"
+            except Exception as e:
+                print(f"Warning: failed to build fanout suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)

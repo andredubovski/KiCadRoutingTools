@@ -2409,6 +2409,18 @@ class RoutingDialog(wx.Dialog):
             msg += f"  {text_moved} text items moved to silkscreen\n"
         if debug_lines_added > 0:
             msg += f"  {debug_lines_added} debug lines\n"
+        # If any nets failed, append heuristic suggestions for what to tweak.
+        if failed > 0:
+            try:
+                from routing_diagnostics import (
+                    suggest_route_adjustments, format_suggestions_for_dialog)
+                suggestions = suggest_route_adjustments(
+                    failed=failed, total=successful + failed, config=config)
+                block = format_suggestions_for_dialog(suggestions)
+                if block:
+                    msg += "\n" + block + "\n"
+            except Exception as e:
+                print(f"Warning: failed to build routing suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)

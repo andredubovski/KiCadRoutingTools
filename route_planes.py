@@ -1310,7 +1310,7 @@ def create_plane(
         if not should_continue:
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
             if return_results:
-                return (0, 0, 0, [], [], [])
+                return (0, 0, 0, [], [], [], 0)
             return (0, 0, 0)
         should_create_zones.append(should_create)
         if zone_to_replace:
@@ -1994,7 +1994,8 @@ def create_plane(
         )
 
     if return_results:
-        return (total_vias_placed, total_traces_added, total_pads_needing_vias, all_new_vias, all_new_segments, all_zone_data)
+        return (total_vias_placed, total_traces_added, total_pads_needing_vias,
+                all_new_vias, all_new_segments, all_zone_data, total_failed_pads)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 

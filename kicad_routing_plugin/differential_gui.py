@@ -634,6 +634,7 @@ class DifferentialTab(wx.Panel):
                 'failed': failed,
                 'total_time': total_time,
                 'results_data': results_data,
+                'config': config,
             }
 
         except Exception as e:
@@ -701,6 +702,18 @@ class DifferentialTab(wx.Panel):
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
+        if failed > 0:
+            try:
+                from routing_diagnostics import (
+                    suggest_diff_pair_adjustments, format_suggestions_for_dialog)
+                suggestions = suggest_diff_pair_adjustments(
+                    failed=failed, total=successful + failed,
+                    config=result.get('config', {}))
+                block = format_suggestions_for_dialog(suggestions)
+                if block:
+                    msg += "\n" + block + "\n"
+            except Exception as e:
+                print(f"Warning: failed to build diff pair suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
         wx.MessageBox(msg, "Routing Complete", wx.OK | wx.ICON_INFORMATION)

@@ -666,7 +666,7 @@ def generate_bga_fanout(footprint: Footprint,
     grid = analyze_bga_grid(footprint)
     if grid is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a BGA")
-        return [], [], []
+        return [], [], [], []
 
     print(f"BGA Grid Analysis for {footprint.reference}:")
     print(f"  Pitch: {grid.pitch_x:.2f} x {grid.pitch_y:.2f} mm")
@@ -1430,7 +1430,7 @@ def generate_bga_fanout(footprint: Footprint,
     print_route_statistics(routes)
 
     if not routes:
-        return [], [], []
+        return [], [], [], []
 
     # Connect adjacent same-net pads directly (before layer assignment)
     neighbor_connections = connect_adjacent_same_net_pads(routes, grid, track_width, clearance)
@@ -1462,6 +1462,7 @@ def generate_bga_fanout(footprint: Footprint,
     # Validate no collisions
     min_spacing = track_width + clearance
     collision_count, collision_pairs = detect_collisions(tracks, existing_tracks, min_spacing)
+    failed_nets: List = []  # populated by resolve_collisions if there are collisions
 
     if collision_count > 0:
         print(f"  INFO: {collision_count} potential collisions detected (will attempt to resolve)")
@@ -1510,7 +1511,7 @@ def generate_bga_fanout(footprint: Footprint,
         routes, pcb_data, layers[0], via_size, via_drill, clearance
     )
 
-    return tracks, vias_to_add, vias_to_remove
+    return tracks, vias_to_add, vias_to_remove, list(failed_nets)
 
 
 def main():
@@ -1589,7 +1590,7 @@ def main():
     print(f"  Rotation: {footprint.rotation}deg")
     print(f"  Pads: {len(footprint.pads)}")
 
-    tracks, vias_to_add, vias_to_remove = generate_bga_fanout(
+    tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
         net_filter=args.nets,

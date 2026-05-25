@@ -668,8 +668,10 @@ class PlanesTab(wx.Panel):
             print("No net/layer assignments to process")
             return
 
+        failed_pads = 0
         try:
-            vias, traces, pads_needing, new_vias, new_segments, new_zones = create_plane(
+            (vias, traces, pads_needing, new_vias, new_segments, new_zones,
+             failed_pads) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -761,8 +763,10 @@ class PlanesTab(wx.Panel):
             'total_vias': total_vias,
             'total_traces': total_traces,
             'total_pads': total_pads,
+            'failed_pads': failed_pads,
             'cancelled': self._cancel_requested,
             'affected_nets': sorted(set(expanded_nets)),
+            'config': config,
         }
 
     def _run_repair_planes(self, config):
@@ -871,12 +875,33 @@ class PlanesTab(wx.Panel):
             msg = f"Plane creation complete!\n\n"
             msg += f"Vias placed: {result.get('total_vias', 0)}\n"
             msg += f"Traces added: {result.get('total_traces', 0)}\n"
-            self.status_text.SetLabel(f"Created: {result.get('total_vias', 0)} vias, {result.get('total_traces', 0)} traces")
+            failed_pads = result.get('failed_pads', 0)
+            if failed_pads:
+                msg += f"Failed pads (no via placed): {failed_pads}\n"
+            self.status_text.SetLabel(
+                f"Created: {result.get('total_vias', 0)} vias, "
+                f"{result.get('total_traces', 0)} traces, "
+                f"{failed_pads} failed")
         else:
             msg = f"Plane repair complete!\n\n"
             msg += f"Routes added: {result.get('routes_added', 0)}\n"
             msg += f"Regions connected: {result.get('regions_connected', 0)}\n"
             self.status_text.SetLabel(f"Repaired: {result.get('routes_added', 0)} routes")
+
+        # If any pads failed to get a via, append heuristic suggestions.
+        if result['mode'] == 'create' and result.get('failed_pads', 0) > 0:
+            try:
+                from routing_diagnostics import (
+                    suggest_plane_adjustments, format_suggestions_for_dialog)
+                suggestions = suggest_plane_adjustments(
+                    failed_pads=result.get('failed_pads', 0),
+                    total_pads=result.get('total_pads', 0),
+                    config=result.get('config', {}))
+                block = format_suggestions_for_dialog(suggestions)
+                if block:
+                    msg += "\n" + block + "\n"
+            except Exception as e:
+                print(f"Warning: failed to build plane suggestions: {e}")
 
         msg += "\nUse Edit -> Undo to revert changes."
         wx.MessageBox(msg, "Operation Complete", wx.OK | wx.ICON_INFORMATION)
