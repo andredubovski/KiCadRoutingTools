@@ -291,6 +291,51 @@ def suggest_bga_fanout_adjustments(failed: int, total: int,
     return suggestions
 
 
+def suggest_qfn_fanout_adjustments(failed: int, total: int,
+                                   config: Dict[str, Any]) -> List[str]:
+    """Suggestions for the Fanout tab (QFN/QFP) when stub endpoints collide.
+
+    QFN failure mode: stub endpoints land closer than `track_width + extension`
+    to a neighbouring net's stub endpoint. Useful adjustments:
+      - Increase Extension so stubs fan out further before bending.
+      - Narrow Track Width.
+    """
+    if failed <= 0:
+        return []
+
+    suggestions: List[str] = []
+
+    track_width = _g(config, 'track_width')
+    extension = _g(config, 'extension')
+
+    if extension is not None and extension < 0.4:
+        suggestions.append(
+            f"Increase Extension (currently {extension:.2f} mm) toward "
+            f"0.3-0.6 mm - the 45-degree segment then has more room to "
+            f"spread stub endpoints apart."
+        )
+    elif extension is not None:
+        suggestions.append(
+            f"Try a larger Extension (currently {extension:.2f} mm) - the "
+            f"minimum endpoint spacing scales with this value."
+        )
+
+    if track_width is not None and track_width > 0.12:
+        suggestions.append(
+            f"Reduce Track Width (currently {track_width:.2f} mm) toward "
+            f"0.08-0.12 mm - narrower stubs need less endpoint spacing."
+        )
+
+    if not suggestions:
+        suggestions.append(
+            "Try increasing Extension and/or reducing Track Width. The "
+            "minimum allowed endpoint spacing is roughly "
+            "(track_width + extension)."
+        )
+
+    return suggestions
+
+
 def format_suggestions_for_dialog(suggestions: List[str]) -> str:
     """Turn the suggestion list into a 'Suggested adjustments:' block.
 

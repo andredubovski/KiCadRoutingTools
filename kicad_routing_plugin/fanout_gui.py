@@ -1121,7 +1121,7 @@ class FanoutTab(wx.Panel):
             # Use the component's layer (F.Cu for top, B.Cu for bottom)
             component_layer = footprint.layer if hasattr(footprint, 'layer') else 'F.Cu'
 
-            tracks, vias = generate_qfn_fanout(
+            tracks, vias, failed_nets = generate_qfn_fanout(
                 footprint,
                 self.pcb_data,
                 net_filter=net_patterns,
@@ -1130,7 +1130,14 @@ class FanoutTab(wx.Panel):
                 extension=extension,
             )
 
-            self._apply_fanout_results(tracks, vias)
+            self._apply_fanout_results(
+                tracks, vias,
+                failed_nets=failed_nets,
+                fanout_config={
+                    'track_width': track_width,
+                    'extension': extension,
+                },
+                fanout_kind='qfn')
 
         except Exception as e:
             import traceback
@@ -1144,18 +1151,21 @@ class FanoutTab(wx.Panel):
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
-    def _apply_fanout_results(self, tracks, vias, failed_nets=None, fanout_config=None):
+    def _apply_fanout_results(self, tracks, vias, failed_nets=None,
+                              fanout_config=None, fanout_kind='bga'):
         """Apply fanout results to the pcbnew board.
 
         Args:
             tracks: list of track dicts to add
             vias: list of via dicts to add
             failed_nets: optional list of net names that couldn't be fanned
-                out - used to build a suggestion block in the completion
-                dialog.
-            fanout_config: optional dict of the parameters used (track_width,
-                clearance, via_size, via_drill, exit_margin) so suggestions
-                can reference the user's actual values.
+                out (BGA) or whose stub endpoints landed too close to
+                another net's (QFN) - used to build a suggestion block in
+                the completion dialog.
+            fanout_config: optional dict of the parameters used so
+                suggestions can reference the user's actual values.
+            fanout_kind: 'bga' or 'qfn' - selects which suggestion helper
+                to use when displaying parameter advice.
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -1225,18 +1235,26 @@ class FanoutTab(wx.Panel):
         msg += f"  {tracks_added} tracks\n"
         msg += f"  {vias_added} vias\n"
         if failed_nets:
-            msg += f"\nFailed nets ({len(failed_nets)}):\n"
+            if fanout_kind == 'qfn':
+                msg += f"\nNets whose stubs are too close to neighbours ({len(failed_nets)}):\n"
+            else:
+                msg += f"\nFailed nets ({len(failed_nets)}):\n"
             for name in failed_nets[:8]:
                 msg += f"  - {name}\n"
             if len(failed_nets) > 8:
                 msg += f"  ... and {len(failed_nets) - 8} more (see Log tab)\n"
             try:
                 from routing_diagnostics import (
-                    suggest_bga_fanout_adjustments, format_suggestions_for_dialog)
+                    suggest_bga_fanout_adjustments,
+                    suggest_qfn_fanout_adjustments,
+                    format_suggestions_for_dialog)
+                suggest_fn = (suggest_qfn_fanout_adjustments
+                              if fanout_kind == 'qfn'
+                              else suggest_bga_fanout_adjustments)
                 # Estimate "total" - we don't know the input count here, just
                 # use failed + tracks_added as a rough denominator.
                 rough_total = max(len(failed_nets) + tracks_added, len(failed_nets))
-                suggestions = suggest_bga_fanout_adjustments(
+                suggestions = suggest_fn(
                     failed=len(failed_nets), total=rough_total,
                     config=fanout_config or {})
                 block = format_suggestions_for_dialog(suggestions)

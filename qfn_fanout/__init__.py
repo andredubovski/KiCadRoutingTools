@@ -57,7 +57,7 @@ def generate_qfn_fanout(footprint: Footprint,
                         net_filter: Optional[List[str]] = None,
                         layer: str = "F.Cu",
                         track_width: float = 0.1,
-                        extension: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
+                        extension: float = 0.1) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -77,12 +77,16 @@ def generate_qfn_fanout(footprint: Footprint,
         extension: Extension past pad edge before bend (mm)
 
     Returns:
-        (tracks, vias) - tracks are the segments, vias is empty
+        (tracks, vias, failed_nets) - tracks are the segments, vias is empty.
+        failed_nets is the deduplicated list of net names whose stubs landed
+        too close to another net's stub (endpoint spacing < track_width +
+        extension); those tracks are still emitted but flagged as failing
+        clearance so the GUI can surface them.
     """
     layout = analyze_qfn_layout(footprint)
     if layout is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
-        return [], []
+        return [], [], []
 
     print(f"QFN/QFP Layout Analysis for {footprint.reference}:")
     print(f"  Center: ({layout.center_x:.2f}, {layout.center_y:.2f})")
@@ -125,7 +129,7 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"  Sample pad geometry: {sample.pad_length:.2f} x {sample.pad_width:.2f} mm")
 
     if not pad_infos:
-        return [], []
+        return [], [], []
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -184,15 +188,24 @@ def generate_qfn_fanout(footprint: Footprint,
     min_spacing = track_width + extension
     collisions = check_endpoint_spacing(stubs, min_spacing)
 
+    failed_nets: List[str] = []
     if collisions:
         print(f"  WARNING: {len(collisions)} endpoint pairs too close!")
         for i, j, dist in collisions[:5]:
             print(f"    {stubs[i].pad.net_name} <-> {stubs[j].pad.net_name}: {dist:.3f}mm")
         print(f"  Consider increasing extension")
+        # Collect the deduplicated set of nets involved in any collision -
+        # these are the "failed" nets the GUI surfaces.
+        seen = set()
+        for i, j, _dist in collisions:
+            for name in (stubs[i].pad.net_name, stubs[j].pad.net_name):
+                if name and name not in seen:
+                    seen.add(name)
+                    failed_nets.append(name)
     else:
         print(f"  Validated: No endpoint collisions")
 
-    return tracks, []
+    return tracks, [], failed_nets
 
 
 def main():
@@ -245,7 +258,7 @@ def main():
     print(f"  Rotation: {footprint.rotation}deg")
     print(f"  Pads: {len(footprint.pads)}")
 
-    tracks, vias = generate_qfn_fanout(
+    tracks, vias, _failed_nets = generate_qfn_fanout(
         footprint,
         pcb_data,
         net_filter=args.nets,
