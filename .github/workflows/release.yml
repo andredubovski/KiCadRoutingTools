@@ -164,9 +164,12 @@ jobs:
           # Attach: raw binaries, PCM zips, and the patched metadata.json
           # (so a maintainer can grab the exact metadata.json that matches
           # the published zips for submission to gitlab.com/kicad/addons).
+          # The package job uploaded the zips under dist/, and merge-multiple
+          # strips the artifact name but preserves the in-artifact path, so
+          # they land at artifacts/dist/.
           files: |
             artifacts/grid_router-*
-            artifacts/KiCadRoutingTools-*.zip
+            artifacts/dist/KiCadRoutingTools-*.zip
             artifacts/metadata.json
           generate_release_notes: true
           fail_on_unmatched_files: true
