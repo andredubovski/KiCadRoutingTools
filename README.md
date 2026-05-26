@@ -182,14 +182,15 @@ The installer automatically detects your KiCad installation directory (supports 
 - **Linux**: `~/.local/share/kicad/<version>/3rdparty/plugins/`
 - **Windows**: `~/Documents/KiCad/<version>/3rdparty/plugins/`
 
-### Building a PCM Package (maintainers)
+### Releasing a new version (maintainers)
 
-The release workflow at `.github/workflows/release.yml` builds platform-specific PCM zips and patches `metadata.json` automatically when a `vX.Y.Z` tag is pushed:
+The full release flow — version bump, GitHub Release, and the merge request to the official KiCad PCM repository — is documented step by step in **[docs/release-pipeline.md](docs/release-pipeline.md)**.
 
-1. Bump `VERSION` and the matching version entries in `metadata.json`.
-2. `git tag v0.15.4 && git push --tags`.
-3. CI builds the Rust binary on each supported platform, runs `package_pcm.py` to produce a single `KiCadRoutingTools-<ver>.zip` that bundles all 4 binaries (KiCad PCM rejects duplicate version strings, so we ship one cross-platform zip), patches `metadata.json` with sha256/size values, and attaches everything to the GitHub Release.
-4. Download the patched `metadata.json` from the Release page and submit it as a merge request to <https://gitlab.com/kicad/addons/repository> at `packages/com.github.drandyhaas.kicadroutingtools.json`. See the [KiCad addon submission docs](https://dev-docs.kicad.org/en/addons/#_submitting_your_package) for the merge-request workflow.
+Short version:
+
+1. Bump `VERSION` and the `versions[]` entry in `metadata.json`.
+2. `git tag v0.15.6 && git push --tags` — CI builds all 4 platform binaries, packages a single `KiCadRoutingTools-<ver>.zip` (the PCM validator rejects duplicate version strings, so we ship one cross-platform zip), patches `metadata.json` with real sha256/size values, and attaches everything to the GitHub Release.
+3. Append the new version to the metadata file in your fork of `gitlab.com/kicad/addons/metadata` and open an MR. See the docs page for the exact commands.
 
 To build a zip locally for testing:
 
@@ -456,6 +457,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [High-Speed Net Analysis](#6-high-speed-net-analysis) | Signal speed classification, GND return via recommendations |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
+| [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
 ## Project Structure
 
