@@ -157,7 +157,18 @@ The KiCad PCM repository at `gitlab.com/kicad/addons/repository` is **read-only*
      --description "..."
    ```
 
-A KiCad maintainer will review. After it merges, expect up to one day for the package to appear in PCM (the public `kicad/addons/repository` is regenerated on a schedule).
+8. **Smoke-test the package** end-to-end before maintainers review. The successful `build` CI job on the MR exposes a temporary PCM repository URL. Find it with:
+
+   ```bash
+   PIPE_ID=<the head_pipeline id from the MR>
+   BUILD_JOB=$(glab api projects/<your-fork-id>/pipelines/$PIPE_ID/jobs \
+     | python3 -c "import sys,json; print([j['id'] for j in json.load(sys.stdin) if j['name']=='build'][0])")
+   glab api projects/<your-fork-id>/jobs/$BUILD_JOB/trace | grep "Repository should be available"
+   ```
+
+   The URL looks like `https://gitlab.com/<you>/metadata/-/jobs/<id>/artifacts/raw/artifacts/repository.json`. Add it to KiCad: **Plugin Manager → Manage… → +**, paste the URL, install the package, and verify the plugin loads and works on Pcbnew.
+
+A KiCad maintainer will then review. After it merges, expect up to one day for the package to appear in the public PCM catalogue (the public `kicad/addons/repository` is regenerated on a schedule).
 
 ### Updating an existing PCM submission (subsequent releases)
 
@@ -183,8 +194,15 @@ After the initial MR is merged, the metadata file `packages/com.github.drandyhaa
 - **Duplicate `version` strings in `versions[]`** — PCM rejects two entries with the same version string regardless of their `platforms` arrays. Ship one zip per version that supports multiple platforms via runtime resolver, not one zip per platform.
 - **Inner `metadata.json` with `download_*` fields** — the `metadata.json` *inside* the PCM zip must have exactly one version entry and no `download_*` fields. `package_pcm.py` strips these automatically; don't bypass it.
 - **4-part `VERSION`** (e.g. `0.15.3.1`) — PCM regex rejects this. Use 3-part versions.
-- **GitLab pipeline fails before any job runs** — usually means the GitLab account is not identity-verified for shared compute. Verify in `gitlab.com/-/profile/account`.
-- **`schema-v2.json` showing up in your commits** — the local validator overwrites this when running. Always `git checkout target/main -- schema-v2.json` before committing.
+- **GitLab pipeline fails before any job runs** (status `failed`, no jobs, no `started_at`) — the GitLab account isn't identity-verified for shared compute yet. Try <https://gitlab.com/-/identity_verification>. After verifying, retrigger with a force-push (see next item).
+- **MR widget keeps showing the old failed pipeline** — GitLab's MR `head_pipeline` only updates when a new `merge_request_event`-source pipeline runs. Manually creating a pipeline via `POST /projects/<id>/pipeline?ref=...` produces a `push`-source pipeline that does *not* update the MR widget. To get a fresh head_pipeline, force-push the same commit with a new timestamp:
+
+  ```bash
+  git commit --amend --no-edit --date=now
+  git push --force-with-lease origin <branch>
+  ```
+
+- **`schema-v2.json` showing up in your commits** — the local validator overwrites this when running. Always `git checkout target/main -- schema-v2.json` (or stash it) before committing.
 - **macOS x86_64 runners stuck queued** — `macos-13` runners are scarce. The workflow cross-compiles x86_64 from `macos-14` (arm64) instead.
 
 ---
