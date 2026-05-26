@@ -116,16 +116,13 @@ jobs:
       - name: List downloaded binaries
         run: ls -la artifacts
 
-      - name: Build PCM zip for each platform
-        run: |
-          python3 package_pcm.py --platform linux   --binary-dir artifacts
-          python3 package_pcm.py --platform macos   --binary-dir artifacts
-          python3 package_pcm.py --platform windows --binary-dir artifacts
+      - name: Build PCM zip
+        run: python3 package_pcm.py --binary-dir artifacts
 
       - name: Patch metadata.json with sha256 / sizes
         run: |
           python3 update_metadata.py \
-            --sidecars 'dist/*.meta.json' \
+            --sidecar dist/KiCadRoutingTools-*.zip.meta.json \
             --repo '${{ github.repository }}'
 
       - name: List PCM artifacts

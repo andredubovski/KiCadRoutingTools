@@ -188,13 +188,13 @@ The release workflow at `.github/workflows/release.yml` builds platform-specific
 
 1. Bump `VERSION` and the matching version entries in `metadata.json`.
 2. `git tag v0.15.4 && git push --tags`.
-3. CI builds the Rust binary for each platform, runs `package_pcm.py` to produce one `KiCadRoutingTools-<ver>-<platform>.zip` per platform, patches `metadata.json` with sha256/size values, and attaches everything to the GitHub Release.
+3. CI builds the Rust binary on each supported platform, runs `package_pcm.py` to produce a single `KiCadRoutingTools-<ver>.zip` that bundles all 4 binaries (KiCad PCM rejects duplicate version strings, so we ship one cross-platform zip), patches `metadata.json` with sha256/size values, and attaches everything to the GitHub Release.
 4. Download the patched `metadata.json` from the Release page and submit it as a merge request to <https://gitlab.com/kicad/addons/repository> at `packages/com.github.drandyhaas.kicadroutingtools.json`. See the [KiCad addon submission docs](https://dev-docs.kicad.org/en/addons/#_submitting_your_package) for the merge-request workflow.
 
 To build a zip locally for testing:
 
 ```bash
-python package_pcm.py --platform macos --binary-dir ./path/to/release/artifacts
+python package_pcm.py --binary-dir ./path/to/release/artifacts
 ```
 
 ### Usage

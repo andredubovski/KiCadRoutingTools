@@ -9,32 +9,36 @@ The KiCad PCM expects a zip with this layout (see go.kicad.org/pcm/schemas/v1):
     plugins/__init__.py
     plugins/...everything else...
 
-This script stages the existing plugin tree into a `plugins/` folder, drops
-in the platform-specific Rust binary (downloaded from the GitHub Release),
-and zips it up alongside metadata.json and resources/icon.png.
+KiCad PCM's metadata schema rejects multiple `versions[]` entries with the
+same `version` string, so we ship ONE zip per version that bundles binaries
+for all supported platforms (linux x86_64, macOS arm64, macOS x86_64, windows
+x86_64) under platform-suffix filenames. The plugin's root __init__.py
+picks the right binary at startup.
+
+The metadata.json inside the zip is also constrained: it must have exactly
+one version entry and no download_* fields. This script generates that
+"inner" metadata from the repository-style metadata.json automatically.
 
 Usage:
-    python package_pcm.py --platform linux
-    python package_pcm.py --platform macos
-    python package_pcm.py --platform windows
+    # Use already-downloaded binaries from a directory:
+    python package_pcm.py --binary-dir ./artifacts
 
-    # Use already-downloaded binaries from a directory instead of fetching:
-    python package_pcm.py --platform macos --binary-dir ./artifacts
+    # Or download all 4 binaries from the matching GitHub Release:
+    python package_pcm.py
 
-    # Set the package version (default: read from VERSION file)
-    python package_pcm.py --platform linux --version 0.15.4
+    # Override the version (default: read from VERSION file)
+    python package_pcm.py --version 0.15.5
 
-The output zip is `dist/KiCadRoutingTools-<version>-<platform>.zip`. The
-script also prints sha256, download_size, and install_size so they can be
-patched into metadata.json before submission.
+Output: dist/KiCadRoutingTools-<version>.zip plus a .meta.json sidecar
+containing sha256/download_size/install_size for metadata.json patching.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -46,7 +50,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 GITHUB_REPO = "drandyhaas/KiCadRoutingTools"
 
 # Files at the repo root that ship inside plugins/. Anything not listed is
-# excluded. Mirrors install_plugin.copy_plugin's ignore logic but explicit.
+# excluded.
 PLUGIN_FILES_KEEP = {
     "__init__.py",
     "VERSION",
@@ -56,30 +60,24 @@ PLUGIN_FILES_KEEP = {
 # Directories at the repo root to include under plugins/.
 PLUGIN_DIRS_KEEP = {
     "kicad_routing_plugin",
-    "rust_router",  # binary is placed here separately
+    "rust_router",  # binaries are placed here separately
 }
-# Plus every *.py at the repo root that isn't this script or build/install
-# scripts.
+# Build/install scripts that should NOT ship inside the plugin.
 ROOT_SCRIPTS_EXCLUDE = {
     "build_router.py",
     "install_plugin.py",
     "package_pcm.py",
+    "update_metadata.py",
 }
 
-
-# Per-platform: list of release-asset filenames to bundle into rust_router/.
-# Linux/Windows: a single binary, renamed to the canonical name so
-# `import grid_router` works without any resolver. macOS: ship both arm64 and
-# x86_64 binaries under their platform-suffix names; the root __init__.py
-# resolves which to use at startup.
-PLATFORM_BINARIES = {
-    "linux": [("grid_router-linux-x86_64.so", "grid_router.so")],
-    "windows": [("grid_router-windows-x86_64.pyd", "grid_router.pyd")],
-    "macos": [
-        ("grid_router-macos-arm64.so", "grid_router-macos-arm64.so"),
-        ("grid_router-macos-x86_64.so", "grid_router-macos-x86_64.so"),
-    ],
-}
+# All binaries bundled in every PCM zip. The startup resolver in the root
+# __init__.py picks the right one based on sys.platform + machine.
+ALL_BINARIES = [
+    "grid_router-linux-x86_64.so",
+    "grid_router-macos-arm64.so",
+    "grid_router-macos-x86_64.so",
+    "grid_router-windows-x86_64.pyd",
+]
 
 
 def read_version():
@@ -95,18 +93,15 @@ def stage_plugins(stage_root: Path):
     plugins_dir = stage_root / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
-    # Root-level files
     for name in PLUGIN_FILES_KEEP:
         src = SCRIPT_DIR / name
         if src.exists():
             shutil.copy2(src, plugins_dir / name)
 
-    # All root-level python modules except the build/install scripts
     for entry in SCRIPT_DIR.iterdir():
         if entry.is_file() and _is_py_module(entry.name):
             shutil.copy2(entry, plugins_dir / entry.name)
 
-    # Subdirectories we keep
     for dirname in PLUGIN_DIRS_KEEP:
         src = SCRIPT_DIR / dirname
         if not src.is_dir():
@@ -137,32 +132,51 @@ def _download_asset(version: str, asset_name: str, dest: Path):
         shutil.copyfileobj(resp, f)
 
 
-def install_binary(plugins_dir: Path, platform_key: str, version: str,
-                   binary_dir: Path | None):
-    """Place the platform-specific Rust binary into plugins/rust_router/."""
+def install_binaries(plugins_dir: Path, version: str, binary_dir: Path | None):
+    """Place ALL platform Rust binaries into plugins/rust_router/ under their
+    platform-suffix names. The plugin's startup resolver picks the right one.
+    """
     rust_dir = plugins_dir / "rust_router"
     rust_dir.mkdir(parents=True, exist_ok=True)
-    for asset_name, install_name in PLATFORM_BINARIES[platform_key]:
-        src: Path
+    for name in ALL_BINARIES:
+        dst = rust_dir / name
         if binary_dir is not None:
-            src = binary_dir / asset_name
+            src = binary_dir / name
             if not src.exists():
-                raise FileNotFoundError(
-                    f"Expected {src} (asset name from release). Use --binary-dir "
-                    f"with the GitHub Release artifacts, or omit it to download."
-                )
-            shutil.copy2(src, rust_dir / install_name)
+                raise FileNotFoundError(f"Expected {src}")
+            shutil.copy2(src, dst)
         else:
-            _download_asset(version, asset_name, rust_dir / install_name)
+            _download_asset(version, name, dst)
 
 
-def write_top_level(stage_root: Path):
-    """Copy metadata.json and resources/icon.png into the staging root."""
-    shutil.copy2(SCRIPT_DIR / "metadata.json", stage_root / "metadata.json")
+def write_top_level(stage_root: Path, version: str):
+    """Place metadata.json (stripped to one version, no download_* fields)
+    and resources/icon.png at the zip root.
+    """
+    repo_meta = json.loads((SCRIPT_DIR / "metadata.json").read_text())
+
+    # Find the version entry that matches the package version, then strip it
+    # of download_* fields. The PCM repo's validator requires the in-package
+    # metadata.json to have exactly one version entry and no download_*.
+    matches = [v for v in repo_meta["versions"] if v.get("version") == version]
+    if not matches:
+        raise ValueError(
+            f"metadata.json has no version entry for {version}; "
+            f"available: {[v.get('version') for v in repo_meta['versions']]}"
+        )
+    inner_version = copy.deepcopy(matches[0])
+    for key in ("download_url", "download_sha256", "download_size", "install_size"):
+        inner_version.pop(key, None)
+
+    inner_meta = copy.deepcopy(repo_meta)
+    inner_meta["versions"] = [inner_version]
+
+    (stage_root / "metadata.json").write_text(
+        json.dumps(inner_meta, indent=2) + "\n"
+    )
 
     resources = stage_root / "resources"
     resources.mkdir(exist_ok=True)
-    # PCM requires 64x64; we already ship icon_64.png in kicad_routing_plugin/.
     icon_src = SCRIPT_DIR / "kicad_routing_plugin" / "icon_64.png"
     if not icon_src.exists():
         raise FileNotFoundError(f"Missing icon: {icon_src}")
@@ -170,7 +184,7 @@ def write_top_level(stage_root: Path):
 
 
 def make_zip(stage_root: Path, out_zip: Path):
-    """Zip the staging tree to out_zip with stable mtimes."""
+    """Zip the staging tree."""
     if out_zip.exists():
         out_zip.unlink()
     install_size = 0
@@ -193,10 +207,9 @@ def sha256_of(path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--platform", required=True,
-                        choices=sorted(PLATFORM_BINARIES.keys()))
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", default=None,
                         help="Override version (default: read VERSION file)")
     parser.add_argument("--binary-dir", default=None,
@@ -210,15 +223,15 @@ def main():
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_name = f"KiCadRoutingTools-{version}-{args.platform}.zip"
+    zip_name = f"KiCadRoutingTools-{version}.zip"
     out_zip = out_dir / zip_name
 
     print(f"Building PCM package: {zip_name}")
     with tempfile.TemporaryDirectory(prefix="kicadrt-pcm-") as tmp:
         stage_root = Path(tmp)
         plugins_dir = stage_plugins(stage_root)
-        install_binary(plugins_dir, args.platform, version, binary_dir)
-        write_top_level(stage_root)
+        install_binaries(plugins_dir, version, binary_dir)
+        write_top_level(stage_root, version)
         install_size = make_zip(stage_root, out_zip)
 
     download_size = out_zip.stat().st_size
@@ -230,10 +243,8 @@ def main():
     print(f"  download_size:   {download_size}")
     print(f"  install_size:    {install_size}")
 
-    # Emit a JSON sidecar so CI can patch metadata.json deterministically.
     sidecar = out_dir / f"{zip_name}.meta.json"
     sidecar.write_text(json.dumps({
-        "platform": args.platform,
         "version": version,
         "filename": zip_name,
         "download_sha256": digest,
