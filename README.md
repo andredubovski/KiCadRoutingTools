@@ -64,9 +64,27 @@ cd KiCadRoutingTools
 
 Or [download the ZIP](https://github.com/drandyhaas/KiCadRoutingTools/archive/refs/heads/main.zip) and extract it.
 
-### 2. Install Rust
+### 2. Install the Rust Router
 
-If you don't have Rust installed, install it from [rustup.rs](https://rustup.rs/):
+```bash
+python build_router.py
+```
+
+By default this downloads a prebuilt binary for your OS from the project's
+[GitHub Releases](https://github.com/drandyhaas/KiCadRoutingTools/releases) —
+**no Rust toolchain required**. Prebuilts are published for:
+
+- Linux x86_64
+- macOS arm64 (Apple Silicon)
+- Windows x86_64
+
+If a prebuilt isn't available for your platform (e.g. Intel Mac, Linux arm64)
+or the download fails, the script falls back to building locally with cargo.
+
+#### Building from source (optional)
+
+If you'd rather build locally — or you're on a platform without a prebuilt —
+install Rust from [rustup.rs](https://rustup.rs/):
 
 ```bash
 # macOS / Linux
@@ -75,15 +93,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Windows: Download and run rustup-init.exe from https://rustup.rs/
 ```
 
-After installation, restart your terminal or run `source ~/.cargo/env`.
-
-### 3. Build the Rust Router
+After installation, restart your terminal or run `source ~/.cargo/env`, then:
 
 ```bash
-python build_router.py
+python build_router.py --from-source     # build locally instead of downloading
+python build_router.py --tag v0.15.0     # download a specific release
+python build_router.py --clean           # remove all build artifacts
 ```
 
-### 4. Choose Your Interface
+### 3. Choose Your Interface
 
 **Option A: KiCad Plugin (Recommended for interactive use)**
 
@@ -897,7 +915,7 @@ Features:
 - numpy (`pip3 install numpy`)
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
-- Rust toolchain (for building the router module)
+- Rust toolchain — only needed if you build the router from source (`python build_router.py --from-source`); not required when using the prebuilt binary
 - pygame-ce (optional, for visualizer: `pip3 install pygame-ce`)
 
 ## Limitations

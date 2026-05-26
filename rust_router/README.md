@@ -20,7 +20,32 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 - **Via exclusion zones** to prevent routes from conflicting with their own vias (for diff pair P/N offset tracks)
 - ~10x speedup vs Python implementation
 
-## Building
+## Installing
+
+Most users do **not** need to build this themselves. From the project root:
+
+```bash
+python build_router.py
+```
+
+This downloads a prebuilt binary for your OS (Linux x86_64, macOS arm64, or
+Windows x86_64) from the project's
+[GitHub Releases](https://github.com/drandyhaas/KiCadRoutingTools/releases)
+and drops it into `rust_router/`. Prebuilts use PyO3's `abi3-py39`, so one
+binary works for any Python 3.9+ interpreter.
+
+Useful flags:
+
+```bash
+python build_router.py --from-source   # build locally instead of downloading
+python build_router.py --tag v0.15.0   # pin to a specific release
+python build_router.py --clean         # remove all build artifacts
+```
+
+## Building from source
+
+If a prebuilt isn't available for your platform, or you're hacking on the
+router, build with cargo via `python build_router.py --from-source`.
 
 ### Prerequisites
 
@@ -35,19 +60,18 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 1. Install Rust from https://rustup.rs/
 2. Ensure you have a C compiler (gcc/clang) installed
 
-### Build Commands
+## Release process (maintainers)
 
-**Recommended: Use the build script from the parent directory:**
+Tagging a commit `vX.Y.Z` triggers `.github/workflows/release.yml`, which
+builds the router on three runners and attaches the binaries to a GitHub
+Release of the same name:
+
 ```bash
-python build_router.py
+git tag v0.15.0
+git push origin v0.15.0
 ```
 
-This builds the Rust module, copies the library to the correct location, and verifies the version.
-
-To clean all build artifacts and compiled libraries:
-```bash
-python build_router.py --clean
-```
+`build_router.py` then serves that release to users automatically.
 
 **Manual build (alternative):**
 ```bash
