@@ -122,6 +122,9 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add board edge clearance
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
 
+    # Block keep-out rule areas (tracks/vias not-allowed zones), per-layer
+    add_keepout_obstacles(obstacles, pcb_data, config)
+
     # Add hole-to-hole clearance blocking for existing drills
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set)
 
@@ -205,6 +208,103 @@ def point_to_polygon_edge_distance(x: float, y: float, polygon: List[Tuple[float
         min_dist = min(min_dist, dist)
 
     return min_dist
+
+
+def add_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                          config: GridRouteConfig,
+                          layers: Optional[List[str]] = None):
+    """Block tracks/vias inside KiCad keep-out rule areas.
+
+    Each keepout (parsed from `(zone ... (keepout ...))`) blocks track cells on its
+    listed copper layers where tracks are not allowed, and via placement where vias
+    are not allowed. Mirrors _add_cutout_obstacles but is per-layer and gated on the
+    keepout flags. A keepout with no layer list applies to all routing layers.
+
+    Cells whose centre is inside the polygon are blocked, as are cells just outside
+    whose track/via copper (half-width plus clearance) would intrude past the keep-out
+    boundary, so the copper itself stays out of the region rather than just the centre.
+    """
+    keepouts = getattr(pcb_data.board_info, 'keepouts', None)
+    if not keepouts:
+        return
+
+    coord = GridCoord(config.grid_step)
+    layer_list = layers if layers is not None else config.layers
+    layer_map = build_layer_map(layer_list)
+    track_clear = config.clearance + config.track_width / 2
+    via_clear = config.clearance + config.via_size / 2
+
+    for ko in keepouts:
+        poly = ko.get('polygon') or []
+        if len(poly) < 3:
+            continue
+        block_tracks = not ko.get('tracks_allowed', True)
+        block_vias = not ko.get('vias_allowed', True)
+        if not (block_tracks or block_vias):
+            continue
+
+        ko_layers = ko.get('layers') or set()
+        if ko_layers:
+            layer_idxs = [layer_map[ln] for ln in ko_layers if ln in layer_map]
+        else:
+            layer_idxs = list(range(len(layer_list)))
+        if block_tracks and not layer_idxs:
+            block_tracks = False
+        if not (block_tracks or block_vias):
+            continue
+
+        poly_arr = np.array(poly, dtype=np.float64)
+        x1 = poly_arr[:, 0][np.newaxis, :]
+        y1 = poly_arr[:, 1][np.newaxis, :]
+        x2 = np.roll(poly_arr[:, 0], -1)[np.newaxis, :]
+        y2 = np.roll(poly_arr[:, 1], -1)[np.newaxis, :]
+
+        # Bounding box with a clearance margin so we also catch cells just outside
+        # the polygon whose track/via copper would still intrude past the boundary.
+        margin = max(track_clear, via_clear) + coord.grid_step
+        cmin_x, cmax_x = poly_arr[:, 0].min() - margin, poly_arr[:, 0].max() + margin
+        cmin_y, cmax_y = poly_arr[:, 1].min() - margin, poly_arr[:, 1].max() + margin
+        gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
+        gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
+        gx_grid, gy_grid = np.meshgrid(np.arange(gx_lo, gx_hi + 1, dtype=np.int32),
+                                       np.arange(gy_lo, gy_hi + 1, dtype=np.int32))
+        gx_flat = gx_grid.ravel()
+        gy_flat = gy_grid.ravel()
+        px = gx_flat.astype(np.float64) * coord.grid_step
+        py = gy_flat.astype(np.float64) * coord.grid_step
+        px_col = px[:, np.newaxis]
+        py_col = py[:, np.newaxis]
+
+        # Vectorized ray-cast point-in-polygon (same as _add_cutout_obstacles).
+        cond_y = (y1 > py_col) != (y2 > py_col)
+        dy = y2 - y1
+        safe_dy = np.where(dy == 0, 1.0, dy)
+        x_int = (x2 - x1) * (py_col - y1) / safe_dy + x1
+        inside = (np.sum(cond_y & (px_col < x_int), axis=1) % 2) == 1
+
+        # Distance from each cell centre to the nearest polygon edge, so cells just
+        # outside whose copper would cross the boundary can be blocked too.
+        dx_e = x2 - x1
+        dy_e = y2 - y1
+        seg_len_sq = dx_e * dx_e + dy_e * dy_e
+        safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
+        t = np.clip(((px_col - x1) * dx_e + (py_col - y1) * dy_e) / safe_len_sq, 0.0, 1.0)
+        closest_x = x1 + t * dx_e
+        closest_y = y1 + t * dy_e
+        edge_dist = np.sqrt(np.min((px_col - closest_x) ** 2 + (py_col - closest_y) ** 2, axis=1))
+
+        if block_tracks:
+            track_mask = inside | (edge_dist < track_clear)
+            t_cells = np.column_stack([gx_flat[track_mask], gy_flat[track_mask]])
+            if t_cells.shape[0]:
+                for li in layer_idxs:
+                    lc = np.full((t_cells.shape[0], 1), li, dtype=np.int32)
+                    obstacles.add_blocked_cells_batch(np.hstack([t_cells, lc]))
+        if block_vias:
+            via_mask = inside | (edge_dist < via_clear)
+            v_cells = np.column_stack([gx_flat[via_mask], gy_flat[via_mask]])
+            if v_cells.shape[0]:
+                obstacles.add_blocked_vias_batch(v_cells)
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
