@@ -223,6 +223,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 - Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
 - **Guide corridor** - draw a polyline on a User layer (e.g. `User.1`) and tick "Follow User-layer guide path" to route the selected nets along it (waypoints, avoiding obstacles, packed non-overlapping)
 - **Keepout zones** - draw one or more closed polygons on a User layer (e.g. `User.2`) and tick "Keep out of User-layer polygon(s)" to keep routed tracks out of those areas (hard keepout, all routed nets)
+- **Clear guide/keepout layers** - optional "Clear guide layer after routing" / "Clear keepout layer after routing" checkboxes (unchecked by default) delete the drawn guide/keepout graphics from their User layer after a successful route, so you can draw fresh ones for the next run
 
 **Advanced Tab:**
 - Swappable nets configuration for target swap optimization

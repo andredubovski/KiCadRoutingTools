@@ -184,6 +184,10 @@ Notes:
   meant for open board area.
 - Unlike a guide corridor (which is best-effort), a keepout is absolute — if a zone walls off the
   only path to a pad, that net will fail to route. With the flag off, routing is unchanged.
+- **Plugin only:** the Basic tab has optional "Clear guide layer after routing" / "Clear keepout
+  layer after routing" checkboxes (unchecked by default). When ticked, a *successful* route deletes
+  the drawn guide/keepout graphics from that User layer so you can draw fresh ones — it only acts
+  for the feature it pairs with, and never runs if nothing routed.
 - Tested by `tests/test_keepout.py` — flag-off regression, single-net detour, multi-net avoidance,
   and a real bundled board (`kicad_files/lvds_converter_dualclk.kicad_pcb`).
 

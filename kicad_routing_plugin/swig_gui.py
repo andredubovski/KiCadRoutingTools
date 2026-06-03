@@ -720,6 +720,13 @@ class RoutingDialog(wx.Dialog):
         gc_sizer.Add(self.guide_corridor_spacing_ctrl, 0)
         options_inner.Add(gc_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        self.clear_guide_layer_check = wx.CheckBox(options_scroll, label="Clear guide layer after routing")
+        self.clear_guide_layer_check.SetValue(False)
+        self.clear_guide_layer_check.SetToolTip(
+            "After a successful route, delete the guide graphics from the guide layer so you "
+            "can draw new ones. Only acts when 'Follow User-layer guide path' is enabled.")
+        options_inner.Add(self.clear_guide_layer_check, 0, wx.ALL, 3)
+
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
         self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
@@ -734,6 +741,13 @@ class RoutingDialog(wx.Dialog):
         self.keepout_layer_ctrl.SetToolTip("User layer the keepout polygons are drawn on (e.g., User.2)")
         ko_sizer.Add(self.keepout_layer_ctrl, 0)
         options_inner.Add(ko_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        self.clear_keepout_layer_check = wx.CheckBox(options_scroll, label="Clear keepout layer after routing")
+        self.clear_keepout_layer_check.SetValue(False)
+        self.clear_keepout_layer_check.SetToolTip(
+            "After a successful route, delete the keepout polygons from the keepout layer so you "
+            "can draw new ones. Only acts when 'Keep out of User-layer polygon(s)' is enabled.")
+        options_inner.Add(self.clear_keepout_layer_check, 0, wx.ALL, 3)
 
         # Power nets
         power_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -1782,6 +1796,9 @@ class RoutingDialog(wx.Dialog):
             # Keepout zone (issue #27)
             'keepout_enabled': self.keepout_check.GetValue(),
             'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
+            # Clear User-layer graphics after a successful route (plugin-only)
+            'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
+            'clear_keepout_layer': self.clear_keepout_layer_check.GetValue(),
             'verbose': self.verbose_check.GetValue(),
             'skip_routing': self.skip_routing_check.GetValue(),
             'debug_memory': self.debug_memory_check.GetValue(),
@@ -2451,6 +2468,29 @@ class RoutingDialog(wx.Dialog):
             self.progress_bar.Pulse()  # Indeterminate progress
             self.status_text.SetLabel(step_name)
 
+    def _clear_user_layer_graphics(self, board, layer_name):
+        """Remove graphic shapes (lines/polys/rects) on a User layer from the board.
+
+        Used to clear guide/keepout drawings after a successful route so the user
+        can draw fresh ones. Returns the number of shapes removed.
+        """
+        try:
+            layer_id = board.GetLayerID(layer_name)
+        except Exception:
+            return 0
+        if layer_id is None or layer_id < 0:
+            return 0
+        to_remove = []
+        for d in board.GetDrawings():
+            try:
+                if d.GetLayer() == layer_id and d.GetClass() in ("PCB_SHAPE", "DRAWSEGMENT"):
+                    to_remove.append(d)
+            except Exception:
+                continue
+        for d in to_remove:
+            board.Remove(d)
+        return len(to_remove)
+
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
@@ -2509,6 +2549,19 @@ class RoutingDialog(wx.Dialog):
         # Add debug visualization lines if enabled
         if config.get('debug_lines', False):
             debug_lines_added = self._add_debug_lines(board, results_data)
+
+        # Clear guide/keepout User-layer graphics after a successful route, if
+        # requested (only for features that were actually enabled this run).
+        if successful > 0:
+            cleared = 0
+            if config.get('clear_guide_layer') and config.get('guide_corridor_enabled'):
+                cleared += self._clear_user_layer_graphics(
+                    board, config.get('guide_corridor_layer', 'User.1'))
+            if config.get('clear_keepout_layer') and config.get('keepout_enabled'):
+                cleared += self._clear_user_layer_graphics(
+                    board, config.get('keepout_layer', 'User.2'))
+            if cleared:
+                print(f"Cleared {cleared} graphic(s) from the guide/keepout User layer(s)")
 
         # Build connectivity to register new items properly
         board.BuildConnectivity()
