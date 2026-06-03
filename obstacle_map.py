@@ -123,7 +123,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
 
     # Add user-drawn User-layer keepout polygons (issue #27) - block all copper layers
-    add_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
+    add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
 
     # Block KiCad native keep-out rule areas (zone (keepout ...)), per-layer (PR #25)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
@@ -134,46 +134,81 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     return obstacles
 
 
-def _polygon_grid_cells(points_mm, coord: GridCoord):
-    """Rasterize a closed polygon (mm vertices) to the set of interior grid cells.
+def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
+    """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
 
-    Vectorized even-odd ray casting over the polygon's grid bounding box (same
-    approach as the board-cutout fill above). Returns a set of (gx, gy) tuples.
+    Shared geometry kernel for the polygon obstacle passes (board cutouts, KiCad
+    keep-out rule areas, and user-drawn keepout zones). Returns four parallel
+    numpy arrays for the candidate cells:
+        gx_flat, gy_flat : int32 grid coordinates
+        inside           : bool, cell centre inside the polygon (even-odd ray cast)
+        edge_dist        : float, mm distance from the cell centre to the nearest edge
+    Returns ``(None, None, None, None)`` if the polygon is degenerate (< 3 points)
+    or the bounding box is empty. Callers threshold ``edge_dist`` by their own
+    clearance to decide which cells to block.
     """
-    if len(points_mm) < 3:
-        return set()
-    poly = np.array(points_mm, dtype=np.float64)
-    x1 = poly[:, 0]
-    y1 = poly[:, 1]
-    x2 = np.roll(x1, -1)
-    y2 = np.roll(y1, -1)
+    if len(poly_points) < 3:
+        return None, None, None, None
+    poly = np.array(poly_points, dtype=np.float64)
+    x1 = poly[:, 0][np.newaxis, :]
+    y1 = poly[:, 1][np.newaxis, :]
+    x2 = np.roll(poly[:, 0], -1)[np.newaxis, :]
+    y2 = np.roll(poly[:, 1], -1)[np.newaxis, :]
 
-    gx_lo, gy_lo = coord.to_grid(poly[:, 0].min(), poly[:, 1].min())
-    gx_hi, gy_hi = coord.to_grid(poly[:, 0].max(), poly[:, 1].max())
+    cmin_x, cmax_x = poly[:, 0].min() - margin, poly[:, 0].max() + margin
+    cmin_y, cmax_y = poly[:, 1].min() - margin, poly[:, 1].max() + margin
+    gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
+    gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
     gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
     gy_range = np.arange(gy_lo, gy_hi + 1, dtype=np.int32)
     if gx_range.size == 0 or gy_range.size == 0:
-        return set()
+        return None, None, None, None
 
     gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
     gx_flat = gx_grid.ravel()
     gy_flat = gy_grid.ravel()
-    px = gx_flat.astype(np.float64) * coord.grid_step
-    py = gy_flat.astype(np.float64) * coord.grid_step
+    px_col = (gx_flat.astype(np.float64) * coord.grid_step)[:, np.newaxis]
+    py_col = (gy_flat.astype(np.float64) * coord.grid_step)[:, np.newaxis]
 
-    py_col, px_col = py[:, np.newaxis], px[:, np.newaxis]
-    y1r, y2r = y1[np.newaxis, :], y2[np.newaxis, :]
-    x1r, x2r = x1[np.newaxis, :], x2[np.newaxis, :]
-    cond_y = (y1r > py_col) != (y2r > py_col)
-    safe_dy = np.where(y2r - y1r == 0, 1.0, y2r - y1r)
-    x_intercept = (x2r - x1r) * (py_col - y1r) / safe_dy + x1r
-    crossings = np.sum(cond_y & (px_col < x_intercept), axis=1)
-    inside = (crossings % 2) == 1
+    # Even-odd ray cast: is the cell centre inside the polygon?
+    cond_y = (y1 > py_col) != (y2 > py_col)
+    safe_dy = np.where(y2 - y1 == 0, 1.0, y2 - y1)
+    x_intercept = (x2 - x1) * (py_col - y1) / safe_dy + x1
+    inside = (np.sum(cond_y & (px_col < x_intercept), axis=1) % 2) == 1
+
+    # Distance from each cell centre to the nearest polygon edge (vertex distance
+    # for degenerate zero-length edges, via the clamped projection parameter t).
+    dx_e, dy_e = x2 - x1, y2 - y1
+    seg_len_sq = dx_e * dx_e + dy_e * dy_e
+    safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
+    t = np.clip(((px_col - x1) * dx_e + (py_col - y1) * dy_e) / safe_len_sq, 0.0, 1.0)
+    closest_x = x1 + t * dx_e
+    closest_y = y1 + t * dy_e
+    edge_dist = np.sqrt(np.min((px_col - closest_x) ** 2 + (py_col - closest_y) ** 2, axis=1))
+
+    return gx_flat, gy_flat, inside, edge_dist
+
+
+def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, layer_idxs):
+    """Block the masked (gx, gy) cells on each layer in `layer_idxs`."""
+    if not mask.any():
+        return
+    cells = np.column_stack([gx_flat[mask], gy_flat[mask]])
+    for li in layer_idxs:
+        layer_col = np.full((cells.shape[0], 1), li, dtype=np.int32)
+        obstacles.add_blocked_cells_batch(np.hstack([cells, layer_col]))
+
+
+def _polygon_grid_cells(points_mm, coord: GridCoord):
+    """Return the set of (gx, gy) grid cells whose centre is inside the polygon."""
+    gx_flat, gy_flat, inside, _ = _rasterize_polygon(points_mm, coord, margin=0.0)
+    if gx_flat is None:
+        return set()
     return set(zip(gx_flat[inside].tolist(), gy_flat[inside].tolist()))
 
 
-def add_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                          config: GridRouteConfig, coord: GridCoord, num_layers: int):
+def add_user_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
+                               config: GridRouteConfig, coord: GridCoord, num_layers: int):
     """Block all grid cells inside user-drawn keepout polygons on every copper layer.
 
     Keepout zones (issue #27) are hard blocks: routed tracks cannot enter them. The
@@ -321,58 +356,21 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if not (block_tracks or block_vias):
             continue
 
-        poly_arr = np.array(poly, dtype=np.float64)
-        x1 = poly_arr[:, 0][np.newaxis, :]
-        y1 = poly_arr[:, 1][np.newaxis, :]
-        x2 = np.roll(poly_arr[:, 0], -1)[np.newaxis, :]
-        y2 = np.roll(poly_arr[:, 1], -1)[np.newaxis, :]
-
-        # Bounding box with a clearance margin so we also catch cells just outside
+        # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
         margin = max(track_clear, via_clear) + coord.grid_step
-        cmin_x, cmax_x = poly_arr[:, 0].min() - margin, poly_arr[:, 0].max() + margin
-        cmin_y, cmax_y = poly_arr[:, 1].min() - margin, poly_arr[:, 1].max() + margin
-        gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
-        gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
-        gx_grid, gy_grid = np.meshgrid(np.arange(gx_lo, gx_hi + 1, dtype=np.int32),
-                                       np.arange(gy_lo, gy_hi + 1, dtype=np.int32))
-        gx_flat = gx_grid.ravel()
-        gy_flat = gy_grid.ravel()
-        px = gx_flat.astype(np.float64) * coord.grid_step
-        py = gy_flat.astype(np.float64) * coord.grid_step
-        px_col = px[:, np.newaxis]
-        py_col = py[:, np.newaxis]
-
-        # Vectorized ray-cast point-in-polygon (same as _add_cutout_obstacles).
-        cond_y = (y1 > py_col) != (y2 > py_col)
-        dy = y2 - y1
-        safe_dy = np.where(dy == 0, 1.0, dy)
-        x_int = (x2 - x1) * (py_col - y1) / safe_dy + x1
-        inside = (np.sum(cond_y & (px_col < x_int), axis=1) % 2) == 1
-
-        # Distance from each cell centre to the nearest polygon edge, so cells just
-        # outside whose copper would cross the boundary can be blocked too.
-        dx_e = x2 - x1
-        dy_e = y2 - y1
-        seg_len_sq = dx_e * dx_e + dy_e * dy_e
-        safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
-        t = np.clip(((px_col - x1) * dx_e + (py_col - y1) * dy_e) / safe_len_sq, 0.0, 1.0)
-        closest_x = x1 + t * dx_e
-        closest_y = y1 + t * dy_e
-        edge_dist = np.sqrt(np.min((px_col - closest_x) ** 2 + (py_col - closest_y) ** 2, axis=1))
+        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin)
+        if gx_flat is None:
+            continue
 
         if block_tracks:
-            track_mask = inside | (edge_dist < track_clear)
-            t_cells = np.column_stack([gx_flat[track_mask], gy_flat[track_mask]])
-            if t_cells.shape[0]:
-                for li in layer_idxs:
-                    lc = np.full((t_cells.shape[0], 1), li, dtype=np.int32)
-                    obstacles.add_blocked_cells_batch(np.hstack([t_cells, lc]))
+            _block_cells_on_layers(obstacles, gx_flat, gy_flat,
+                                   inside | (edge_dist < track_clear), layer_idxs)
         if block_vias:
             via_mask = inside | (edge_dist < via_clear)
-            v_cells = np.column_stack([gx_flat[via_mask], gy_flat[via_mask]])
-            if v_cells.shape[0]:
-                obstacles.add_blocked_vias_batch(v_cells)
+            if via_mask.any():
+                obstacles.add_blocked_vias_batch(
+                    np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -439,98 +437,21 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
 def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, float]],
                           coord: GridCoord, num_layers: int,
                           track_edge_clearance: float, via_edge_clearance: float):
-    """Block tracks and vias inside a board cutout and near its edges.
+    """Block tracks and vias inside a board cutout and within clearance of its edges.
 
-    Points inside the cutout polygon are blocked on all layers.
-    Points outside but near the cutout edge are blocked within clearance distance.
+    Cells whose centre is inside the cutout polygon are blocked on all layers; cells
+    just outside whose track/via copper would intrude past the edge are blocked too.
     """
-    poly_arr = np.array(cutout, dtype=np.float64)
-    n_edges = len(cutout)
-    x1 = poly_arr[:, 0]
-    y1 = poly_arr[:, 1]
-    x2 = np.roll(poly_arr[:, 0], -1)
-    y2 = np.roll(poly_arr[:, 1], -1)
-
-    # Compute bounding box of cutout with clearance margin
     margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
-    cmin_x, cmax_x = poly_arr[:, 0].min() - margin, poly_arr[:, 0].max() + margin
-    cmin_y, cmax_y = poly_arr[:, 1].min() - margin, poly_arr[:, 1].max() + margin
+    gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(cutout, coord, margin)
+    if gx_flat is None:
+        return
 
-    gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
-    gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
-
-    gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
-    gy_range = np.arange(gy_lo, gy_hi + 1, dtype=np.int32)
-    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
-    gx_flat = gx_grid.ravel()
-    gy_flat = gy_grid.ravel()
-
-    px = gx_flat.astype(np.float64) * coord.grid_step
-    py = gy_flat.astype(np.float64) * coord.grid_step
-
-    # Point-in-polygon (ray casting)
-    py_col = py[:, np.newaxis]
-    px_col = px[:, np.newaxis]
-    y1_row = y1[np.newaxis, :]
-    y2_row = y2[np.newaxis, :]
-    x1_row = x1[np.newaxis, :]
-    x2_row = x2[np.newaxis, :]
-
-    cond_y = (y1_row > py_col) != (y2_row > py_col)
-    dy = y2_row - y1_row
-    safe_dy = np.where(dy == 0, 1.0, dy)
-    x_intercept = (x2_row - x1_row) * (py_col - y1_row) / safe_dy + x1_row
-    cond_x = px_col < x_intercept
-    crossings = np.sum(cond_y & cond_x, axis=1)
-    inside = (crossings % 2) == 1
-
-    # Block all points inside the cutout
-    inside_idx = np.where(inside)[0]
-    if inside_idx.size > 0:
-        in_gx = gx_flat[inside_idx]
-        in_gy = gy_flat[inside_idx]
-        in_cells = np.column_stack([in_gx, in_gy])
-        for layer_idx in range(num_layers):
-            layer_col = np.full((in_cells.shape[0], 1), layer_idx, dtype=np.int32)
-            obstacles.add_blocked_cells_batch(np.hstack([in_cells, layer_col]))
-        obstacles.add_blocked_vias_batch(in_cells)
-
-    # For outside points near the cutout edge, compute distance and block if within clearance
-    outside_idx = np.where(~inside)[0]
-    if outside_idx.size > 0:
-        out_px = px[outside_idx]
-        out_py = py[outside_idx]
-
-        out_px_col = out_px[:, np.newaxis]
-        out_py_col = out_py[:, np.newaxis]
-
-        dx_e = x2_row - x1_row
-        dy_e = y2_row - y1_row
-        seg_len_sq = dx_e * dx_e + dy_e * dy_e
-        safe_len_sq = np.where(seg_len_sq < 1e-10, 1.0, seg_len_sq)
-        t = ((out_px_col - x1_row) * dx_e + (out_py_col - y1_row) * dy_e) / safe_len_sq
-        t = np.clip(t, 0.0, 1.0)
-        closest_x = x1_row + t * dx_e
-        closest_y = y1_row + t * dy_e
-        dist_sq = (out_px_col - closest_x) ** 2 + (out_py_col - closest_y) ** 2
-        degen = seg_len_sq < 1e-10
-        degen_dist_sq = (out_px_col - x1_row) ** 2 + (out_py_col - y1_row) ** 2
-        dist_sq = np.where(degen, degen_dist_sq, dist_sq)
-        min_dist = np.sqrt(np.min(dist_sq, axis=1))
-
-        out_gx = gx_flat[outside_idx]
-        out_gy = gy_flat[outside_idx]
-
-        track_mask = min_dist < track_edge_clearance
-        if np.any(track_mask):
-            track_cells = np.column_stack([out_gx[track_mask], out_gy[track_mask]])
-            for layer_idx in range(num_layers):
-                layer_col = np.full((track_cells.shape[0], 1), layer_idx, dtype=np.int32)
-                obstacles.add_blocked_cells_batch(np.hstack([track_cells, layer_col]))
-
-        via_mask = min_dist < via_edge_clearance
-        if np.any(via_mask):
-            obstacles.add_blocked_vias_batch(np.column_stack([out_gx[via_mask], out_gy[via_mask]]))
+    _block_cells_on_layers(obstacles, gx_flat, gy_flat,
+                           inside | (edge_dist < track_edge_clearance), range(num_layers))
+    via_mask = inside | (edge_dist < via_edge_clearance)
+    if via_mask.any():
+        obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
