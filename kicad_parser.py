@@ -95,6 +95,14 @@ class Zone:
 
 
 @dataclass
+class GuidePath:
+    """A user-drawn graphic polyline (e.g. on User.1) used as a routing corridor."""
+    layer: str  # e.g. "User.1"
+    points: List[Tuple[float, float]]  # ordered (x, y) in mm, >= 2 points
+    is_closed: bool = False  # True for closed polygons (gr_poly)
+
+
+@dataclass
 class Footprint:
     """Represents a component footprint."""
     reference: str
@@ -150,6 +158,8 @@ class PCBData:
     zones: List[Zone] = field(default_factory=list)
     kicad_version: int = 0  # File format version (e.g., 20241229 for KiCad 9)
     net_id_to_name: Dict[int, str] = field(default_factory=dict)  # Synthetic ID -> net name (for KiCad 10 output)
+    guide_paths: List[GuidePath] = field(default_factory=list)  # User-drawn guide corridors (issue #7)
+    keepout_zones: List[GuidePath] = field(default_factory=list)  # User-drawn keepout polygons (issue #27)
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -463,6 +473,232 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
         segments.append(((x1, y2), (x1, y1)))
 
     return segments
+
+
+# Regex gap that matches anything EXCEPT the start of another graphic element,
+# so a lazy match can't run past the current element to a later (layer "...")
+# token. Shared by the gr_line/gr_poly/gr_rect readers below.
+_GR_ELEMENT_GAP = r'(?:(?!\(gr_)[\s\S])*?'
+
+
+def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
+    """Return the vertex list of every gr_poly drawn on the given layer."""
+    layer_re = re.escape(layer)
+    pattern = (
+        r'\(gr_poly\s+\(pts\s+((?:\(xy\s+[\d.-]+\s+[\d.-]+\)\s*)+)\)'
+        + _GR_ELEMENT_GAP + r'\(layer\s+"' + layer_re + r'"\)'
+    )
+    polys = []
+    for m in re.finditer(pattern, content, re.DOTALL):
+        polys.append([(float(px), float(py))
+                      for px, py in re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', m.group(1))])
+    return polys
+
+
+def parse_guide_paths(content: str, layer: str) -> List["GuidePath"]:
+    """Parse user-drawn graphic polylines on a given layer from file content.
+
+    Reads gr_line and gr_poly graphics on the named layer (e.g. "User.1") and
+    returns them as GuidePath objects. Consecutive gr_line segments whose
+    endpoints coincide are stitched into a single multi-point path.
+
+    Args:
+        content: Raw .kicad_pcb file text.
+        layer: Layer name to read from (e.g. "User.1").
+
+    Returns:
+        List of GuidePath (mm coordinates). Empty if none found.
+    """
+    layer_re = re.escape(layer)
+    paths: List[GuidePath] = []
+
+    # gr_poly: a closed polygon with a (pts (xy ..) (xy ..) ...) block.
+    for points in _parse_gr_polys_on_layer(content, layer):
+        if len(points) >= 2:
+            paths.append(GuidePath(layer=layer, points=points, is_closed=True))
+
+    # gr_line: collect 2-point segments, then stitch into chains.
+    line_pattern = (
+        r'\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+        + _GR_ELEMENT_GAP + r'\(layer\s+"' + layer_re + r'"\)'
+    )
+    segments = []
+    for m in re.finditer(line_pattern, content, re.DOTALL):
+        segments.append(((float(m.group(1)), float(m.group(2))),
+                         (float(m.group(3)), float(m.group(4)))))
+
+    paths.extend(_chain_guide_segments(segments, layer))
+    return paths
+
+
+def _chain_guide_segments(segments, layer: str, tol: float = 0.01) -> List["GuidePath"]:
+    """Stitch line segments into open polylines by shared endpoints."""
+    if not segments:
+        return []
+
+    def approx_equal(p1, p2):
+        return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+
+    remaining = list(segments)
+    paths: List[GuidePath] = []
+    while remaining:
+        a, b = remaining.pop(0)
+        chain = [a, b]
+        extended = True
+        while extended:
+            extended = False
+            for i, (s, e) in enumerate(remaining):
+                if approx_equal(chain[-1], s):
+                    chain.append(e)
+                elif approx_equal(chain[-1], e):
+                    chain.append(s)
+                elif approx_equal(chain[0], e):
+                    chain.insert(0, s)
+                elif approx_equal(chain[0], s):
+                    chain.insert(0, e)
+                else:
+                    continue
+                remaining.pop(i)
+                extended = True
+                break
+        paths.append(GuidePath(layer=layer, points=chain, is_closed=False))
+    return paths
+
+
+def _poly_points_from_drawing(drawing, to_mm) -> List[Tuple[float, float]]:
+    """Extract a poly PCB_SHAPE's outline vertices as (x, y) mm tuples."""
+    pts = []
+    outline = drawing.GetPolyShape().Outline(0)
+    for i in range(outline.PointCount()):
+        pt = outline.CPoint(i)
+        pts.append((to_mm(pt.x), to_mm(pt.y)))
+    return pts
+
+
+def extract_guide_paths_from_board(board, layer_name: str = "User.1") -> List["GuidePath"]:
+    """Read user-layer guide polylines from a live pcbnew board (best-effort)."""
+    import pcbnew
+
+    try:
+        layer_id = board.GetLayerID(layer_name)
+    except Exception:
+        return []
+    if layer_id is None or layer_id < 0:
+        return []
+
+    seg_shape = getattr(pcbnew, 'S_SEGMENT', getattr(pcbnew, 'SHAPE_T_SEGMENT', None))
+    poly_shape = getattr(pcbnew, 'S_POLYGON', getattr(pcbnew, 'SHAPE_T_POLY', None))
+    to_mm = pcbnew.ToMM
+    segments = []
+    paths: List[GuidePath] = []
+    for drawing in board.GetDrawings():
+        try:
+            if drawing.GetLayer() != layer_id:
+                continue
+            if drawing.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                continue
+            shape_type = drawing.GetShape()
+        except Exception:
+            continue
+        if seg_shape is not None and shape_type == seg_shape:
+            try:
+                s, e = drawing.GetStart(), drawing.GetEnd()
+                segments.append(((to_mm(s.x), to_mm(s.y)), (to_mm(e.x), to_mm(e.y))))
+            except Exception:
+                continue
+        elif poly_shape is not None and shape_type == poly_shape:
+            try:
+                pts = _poly_points_from_drawing(drawing, to_mm)
+                if len(pts) >= 2:
+                    paths.append(GuidePath(layer=layer_name, points=pts, is_closed=True))
+            except Exception:
+                continue
+
+    paths.extend(_chain_guide_segments(segments, layer_name))
+    return paths
+
+
+def parse_keepout_zones(content: str, layer: str) -> List["GuidePath"]:
+    """Parse user-drawn closed keepout polygons on a given layer from file content.
+
+    Reads gr_poly and gr_rect graphics on the named layer (e.g. "User.2") and
+    returns them as closed GuidePath objects (issue #27). Only closed regions are
+    returned -- open gr_line polylines are ignored (they don't bound an area).
+
+    Args:
+        content: Raw .kicad_pcb file text.
+        layer: Layer name to read from (e.g. "User.2").
+
+    Returns:
+        List of closed GuidePath (mm coordinates). Empty if none found.
+    """
+    layer_re = re.escape(layer)
+    zones: List[GuidePath] = []
+
+    # gr_poly: a closed polygon with a (pts (xy ..) (xy ..) ...) block.
+    for points in _parse_gr_polys_on_layer(content, layer):
+        if len(points) >= 3:
+            zones.append(GuidePath(layer=layer, points=points, is_closed=True))
+
+    # gr_rect: a rectangle given by opposite corners -> 4-vertex closed box.
+    rect_pattern = (
+        r'\(gr_rect\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)'
+        + _GR_ELEMENT_GAP + r'\(layer\s+"' + layer_re + r'"\)'
+    )
+    for m in re.finditer(rect_pattern, content, re.DOTALL):
+        x1, y1, x2, y2 = (float(m.group(1)), float(m.group(2)),
+                          float(m.group(3)), float(m.group(4)))
+        zones.append(GuidePath(
+            layer=layer,
+            points=[(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
+            is_closed=True))
+
+    return zones
+
+
+def extract_keepout_zones_from_board(board, layer_name: str = "User.2") -> List["GuidePath"]:
+    """Read user-layer closed keepout polygons from a live pcbnew board (best-effort)."""
+    import pcbnew
+
+    try:
+        layer_id = board.GetLayerID(layer_name)
+    except Exception:
+        return []
+    if layer_id is None or layer_id < 0:
+        return []
+
+    poly_shape = getattr(pcbnew, 'S_POLYGON', getattr(pcbnew, 'SHAPE_T_POLY', None))
+    rect_shape = getattr(pcbnew, 'S_RECT', getattr(pcbnew, 'SHAPE_T_RECT', None))
+    to_mm = pcbnew.ToMM
+    zones: List[GuidePath] = []
+    for drawing in board.GetDrawings():
+        try:
+            if drawing.GetLayer() != layer_id:
+                continue
+            if drawing.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                continue
+            shape_type = drawing.GetShape()
+        except Exception:
+            continue
+        if poly_shape is not None and shape_type == poly_shape:
+            try:
+                pts = _poly_points_from_drawing(drawing, to_mm)
+                if len(pts) >= 3:
+                    zones.append(GuidePath(layer=layer_name, points=pts, is_closed=True))
+            except Exception:
+                continue
+        elif rect_shape is not None and shape_type == rect_shape:
+            try:
+                s, e = drawing.GetStart(), drawing.GetEnd()
+                x1, y1, x2, y2 = to_mm(s.x), to_mm(s.y), to_mm(e.x), to_mm(e.y)
+                zones.append(GuidePath(
+                    layer=layer_name,
+                    points=[(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
+                    is_closed=True))
+            except Exception:
+                continue
+
+    return zones
 
 
 def _chain_segments_into_contours(segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
@@ -1133,12 +1369,15 @@ def extract_keepouts(content: str) -> List[dict]:
     return keepouts
 
 
-def parse_kicad_pcb(filepath: str) -> PCBData:
+def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
+                    keepout_layer: str = "User.2") -> PCBData:
     """
     Parse a KiCad PCB file and extract all routing-relevant information.
 
     Args:
         filepath: Path to .kicad_pcb file
+        guide_layer: User layer to read guide corridor polylines from (issue #7)
+        keepout_layer: User layer to read keepout polygons from (issue #27)
 
     Returns:
         PCBData object containing all parsed data
@@ -1156,6 +1395,8 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
     board_info.keepouts = extract_keepouts(content)
+    guide_paths = parse_guide_paths(content, guide_layer)
+    keepout_zones = parse_keepout_zones(content, keepout_layer)
 
     # Build net_id_to_name mapping for writer output
     net_id_to_name = {net_id: net.name for net_id, net in nets.items()}
@@ -1169,11 +1410,14 @@ def parse_kicad_pcb(filepath: str) -> PCBData:
         pads_by_net=pads_by_net,
         zones=zones,
         kicad_version=kicad_version,
-        net_id_to_name=net_id_to_name
+        net_id_to_name=net_id_to_name,
+        guide_paths=guide_paths,
+        keepout_zones=keepout_zones
     )
 
 
-def build_pcb_data_from_board(board) -> PCBData:
+def build_pcb_data_from_board(board, guide_layer: str = "User.1",
+                              keepout_layer: str = "User.2") -> PCBData:
     """Build PCBData directly from a pcbnew board object (no file I/O).
 
     This is much faster than parse_kicad_pcb() since it reads from pcbnew's
@@ -1538,6 +1782,12 @@ def build_pcb_data_from_board(board) -> PCBData:
     # --- Extract zones ---
     zones = _extract_zones_from_pcbnew(board, to_mm, get_layer_name)
 
+    # --- Extract user-layer guide corridors (issue #7) ---
+    guide_paths = extract_guide_paths_from_board(board, guide_layer)
+
+    # --- Extract user-layer keepout polygons (issue #27) ---
+    keepout_zones = extract_keepout_zones_from_board(board, keepout_layer)
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -1545,7 +1795,9 @@ def build_pcb_data_from_board(board) -> PCBData:
         vias=vias,
         segments=segments,
         pads_by_net=pads_by_net,
-        zones=zones
+        zones=zones,
+        guide_paths=guide_paths,
+        keepout_zones=keepout_zones
     )
 
 

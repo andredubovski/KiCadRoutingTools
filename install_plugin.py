@@ -243,8 +243,13 @@ def check_rust_router():
 
 def copy_plugin(source_dir: Path, dest_dir: Path):
     """Copy the entire KiCadRoutingTools directory to destination."""
-    # Remove existing installation if present
-    if dest_dir.exists():
+    # Remove existing installation if present. Handle symlinks separately:
+    # a prior `--symlink` dev install leaves a symlink here, and shutil.rmtree
+    # refuses to operate on a symlink (raises an opaque "[Errno None] None").
+    if dest_dir.is_symlink():
+        print(f"  Removing existing symlink at {dest_dir}")
+        dest_dir.unlink()
+    elif dest_dir.exists():
         print(f"  Removing existing installation at {dest_dir}")
         shutil.rmtree(dest_dir)
 

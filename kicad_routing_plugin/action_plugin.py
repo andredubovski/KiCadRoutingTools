@@ -17,6 +17,51 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 
+def _get_selected_net_names(board):
+    """Return the set of net names that the user has selected in the PCB editor.
+
+    Looks at the current selection (tracks, vias, pads, and zones) and collects
+    the net of each selected item. Selecting any item that belongs to a net is
+    treated as selecting that net for routing. Returns an empty set if nothing
+    relevant is selected, so the dialog falls back to its normal behaviour.
+    """
+    net_names = set()
+    try:
+        selected_items = []
+
+        # Tracks and vias
+        for track in board.GetTracks():
+            if track.IsSelected():
+                selected_items.append(track)
+
+        # Pads (including those on whole-footprint selections)
+        for footprint in board.GetFootprints():
+            fp_selected = footprint.IsSelected()
+            for pad in footprint.Pads():
+                if fp_selected or pad.IsSelected():
+                    selected_items.append(pad)
+
+        # Copper zones / planes
+        for i in range(board.GetAreaCount()):
+            zone = board.GetArea(i)
+            if zone.IsSelected():
+                selected_items.append(zone)
+
+        for item in selected_items:
+            try:
+                name = item.GetNetname()
+            except Exception:
+                name = None
+            # Ignore the unconnected/no-net pseudo-net (net code 0)
+            if name and item.GetNetCode() > 0:
+                net_names.add(name)
+    except Exception:
+        # Selection introspection is best-effort; never block the dialog.
+        pass
+
+    return net_names
+
+
 class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
     """Action Plugin for KiCad Routing Tools."""
 
@@ -87,6 +132,10 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
             )
             return
 
+        # Collect the nets the user has selected in the PCB editor so the
+        # dialog can pre-check them for routing (GitHub issue #6).
+        preselected_nets = _get_selected_net_names(board)
+
         # Show the configuration dialog (modal)
         parent = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
 
@@ -96,7 +145,9 @@ class KiCadRoutingToolsPlugin(pcbnew.ActionPlugin):
                 and KiCadRoutingToolsPlugin._saved_settings is not None):
             saved_settings = KiCadRoutingToolsPlugin._saved_settings
 
-        dlg = RoutingDialog(parent, pcb_data, board_filename, saved_settings=saved_settings)
+        dlg = RoutingDialog(parent, pcb_data, board_filename,
+                            saved_settings=saved_settings,
+                            preselected_nets=preselected_nets)
 
         dlg.ShowModal()
 
