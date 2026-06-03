@@ -143,6 +143,7 @@ class BoardInfo:
     stackup: List[StackupLayer] = field(default_factory=list)  # ordered top to bottom
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
+    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
 
 
 @dataclass
@@ -1202,25 +1203,20 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     return segments
 
 
-def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
-    """Extract all filled zones from PCB file.
+def _iter_zone_blocks(content: str):
+    """Yield the inner body of each top-level ``(zone ...)`` block.
 
-    Parses zone definitions including their net assignment, layer, and polygon outline.
-    These are used for power planes and other filled copper areas.
+    Zones are at the top level, indented with a single tab. Uses ``\\r?\\n`` to
+    handle both Unix and Windows line endings. Each yielded string is the
+    content between the opening ``(zone`` line and its matching closing paren.
+    Shared by :func:`extract_zones` and :func:`extract_keepouts`.
     """
-    zones = []
-
-    # Find each zone block start - zones are at the top level, indented with single tab
-    # Use \r?\n to handle both Unix and Windows line endings
     zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
-
     for start_match in re.finditer(zone_start_pattern, content):
         # Find the matching closing paren by counting balanced parens
-        start_pos = start_match.start() + len(start_match.group()) - 1  # Position after opening (
         paren_count = 1
         pos = start_match.end()
         zone_end = None
-
         while pos < len(content) and paren_count > 0:
             char = content[pos]
             if char == '(':
@@ -1230,12 +1226,20 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 if paren_count == 0:
                     zone_end = pos
             pos += 1
-
         if zone_end is None:
             continue
+        yield content[start_match.end():zone_end]
 
-        zone_content = content[start_match.end():zone_end]
 
+def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
+    """Extract all filled zones from PCB file.
+
+    Parses zone definitions including their net assignment, layer, and polygon outline.
+    These are used for power planes and other filled copper areas.
+    """
+    zones = []
+
+    for zone_content in _iter_zone_blocks(content):
         # Extract net id - try KiCad 9 format first, then KiCad 10
         net_match = re.search(r'\(net\s+(\d+)\)', zone_content)
         if net_match:
@@ -1308,6 +1312,63 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     return zones
 
 
+def extract_keepouts(content: str) -> List[dict]:
+    """Extract keep-out rule areas (zones with a (keepout ...) clause and no net fill).
+
+    These define regions where tracks and/or vias are not allowed — e.g. an
+    antenna-flange RF clearance. Returns a list of dicts:
+        {polygon: [(x,y),...], layers: set(layer_names),
+         tracks_allowed: bool, vias_allowed: bool}
+    """
+    keepouts = []
+    for zc in _iter_zone_blocks(content):
+        # The keepout clause holds nested sub-clauses, e.g.
+        #   (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) ...)
+        # so capture its full balanced-paren body rather than just the first ).
+        ko_start = zc.find('(keepout')
+        if ko_start < 0:
+            continue
+        pc = 0
+        ko_end = ko_start
+        for i in range(ko_start, len(zc)):
+            if zc[i] == '(':
+                pc += 1
+            elif zc[i] == ')':
+                pc -= 1
+                if pc == 0:
+                    ko_end = i
+                    break
+        ko_body = zc[ko_start:ko_end + 1]
+        tracks_allowed = 'tracks not_allowed' not in ko_body
+        vias_allowed = 'vias not_allowed' not in ko_body
+
+        # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu")
+        lm = re.search(r'\(layers\s+([^)]+)\)', zc) or re.search(r'\(layer\s+("[^"]+")\)', zc)
+        layers = set(re.findall(r'"([^"]+)"', lm.group(1))) if lm else set()
+
+        # Polygon (same parsing as filled zones)
+        pts_start = zc.find('(pts')
+        if pts_start < 0:
+            continue
+        pc = 0
+        pts_end = pts_start
+        for i in range(pts_start, len(zc)):
+            if zc[i] == '(':
+                pc += 1
+            elif zc[i] == ')':
+                pc -= 1
+                if pc == 0:
+                    pts_end = i
+                    break
+        polygon = [(float(a), float(b)) for a, b in
+                   re.findall(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', zc[pts_start:pts_end + 1])]
+        if len(polygon) < 3:
+            continue
+        keepouts.append({'polygon': polygon, 'layers': layers,
+                         'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed})
+    return keepouts
+
+
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
                     keepout_layer: str = "User.2") -> PCBData:
     """
@@ -1333,6 +1394,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     vias = extract_vias(content, name_to_id)
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
+    board_info.keepouts = extract_keepouts(content)
     guide_paths = parse_guide_paths(content, guide_layer)
     keepout_zones = parse_keepout_zones(content, keepout_layer)
 

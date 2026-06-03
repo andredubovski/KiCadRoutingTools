@@ -25,6 +25,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Net ordering strategies** - MPS (crossing conflicts with diff pairs treated as units, shorter routes first using BGA-aware distance; uses segment intersection with MST for non-BGA boards), inside-out (BGA), or original order
 - **MPS layer swap** - When MPS detects crossing conflicts (nets in Round 2+), attempts layer swaps to eliminate same-layer crossings. Tries swapping both the conflicting Round 2 unit and Round 1 unit. Re-runs MPS after swaps to verify conflict resolution
 - **Board edge clearance** - Tracks and vias respect Edge.Cuts boundaries including curved edges (gr_arc), non-rectangular outlines, and interior cutouts. Arcs are automatically linearized into polylines for accurate clearance checking
+- **Keep-out rule areas** - Tracks and/or vias respect KiCad keep-out zones (rule areas with `(keepout (tracks not_allowed) (vias not_allowed) ...)`), blocking only the disallowed item on the keepout's listed layers (or all routing layers if none are listed). Track/via copper is kept clear of the boundary by the configured clearance, e.g. an antenna-flange RF exclusion
 - **BGA exclusion zones** - Auto-detected from footprints, prevents vias under BGAs
 - **Stub proximity avoidance** - Penalizes routes near unrouted stubs, with direction-aware costs (moving away from stubs costs less)
 - **BGA proximity avoidance** - Penalizes routes near BGA edges, with direction-aware costs (moving away from BGA zones costs less)

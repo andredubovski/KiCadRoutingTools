@@ -197,6 +197,28 @@ Unlike the guide corridor (best-effort), a keepout is a **hard** block: a zone t
 walls off the only path to a pad will make that net fail — by design. Zones are
 meant for open board area, not over pads.
 
+### test_rule_area_keepout.py - KiCad Keep-out Rule-Area Test
+
+Pass/fail tests for the *native* KiCad keepout (`(zone ... (keepout (tracks
+not_allowed) (vias not_allowed) ...))`), as opposed to the user-drawn User-layer
+keepout above. It has no enable flag — it is honored automatically whenever the
+board contains a keep-out rule area, blocking only the disallowed item (tracks
+and/or vias) on the keepout's listed layers. Self-contained: it inserts a keepout
+zone into `kicad_files/flat_hierarchy.kicad_pcb` and reuses the `test_keepout.py`
+harness.
+
+```bash
+python3 tests/test_rule_area_keepout.py        # run with KiCad's python
+python3 tests/test_rule_area_keepout.py -v       # verbose routing output
+```
+
+**Scenarios:**
+| ID | Checks |
+|----|--------|
+| R1 | Avoid — a rule area straddling a net's path forces a detour; the net connects, is DRC-clean, and no routed cell lies inside the polygon |
+| R2 | Multi-net — two nets routed with rule areas present both connect and neither occupies a cell inside a rule area |
+| R3 | No-op gating — a keepout that *allows* both tracks and vias is a no-op; the route cuts straight through (guards the tracks/vias-allowed gating, including the vias-not-allowed parse fix) |
+
 ## Performance Benchmarks
 
 Results from `test_fanout_and_route.py` (full mode):
