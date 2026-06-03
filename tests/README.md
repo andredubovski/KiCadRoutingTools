@@ -219,6 +219,27 @@ python3 tests/test_rule_area_keepout.py -v       # verbose routing output
 | R2 | Multi-net — two nets routed with rule areas present both connect and neither occupies a cell inside a rule area |
 | R3 | No-op gating — a keepout that *allows* both tracks and vias is a no-op; the route cuts straight through (guards the tracks/vias-allowed gating, including the vias-not-allowed parse fix) |
 
+### test_diff_pair_route.py - Differential-Pair Routing Correctness Test
+
+A small, fast focused guard for the differential-pair router (`route_diff.py`),
+separate from the big `test_fanout_and_route.py` pipeline. It routes individual
+`/fpga_adc/lvds_rx1_NN` pairs on the post-fanout board
+`kicad_files/routed_output.kicad_pcb` (each a 2-pad point-to-point on F.Cu) and
+asserts each is **fully connected** and **DRC-clean**.
+
+```bash
+python3 tests/test_diff_pair_route.py        # run with KiCad's python
+python3 tests/test_diff_pair_route.py -v
+```
+
+Each scenario routes one pair with `route_diff.py`, then checks `check_connected.py`
+reports `ALL NETS FULLY CONNECTED` and `check_drc.py --clearance 0.1` reports no
+violations. **DRC is scoped to each pair's own nets** (`--nets "*lvds_rx1_NN*"`):
+the board carries pre-existing violations among other already-routed nets, so an
+unscoped check would fail regardless — the same scoping `test_fanout_and_route.py`
+uses for its LVDS stage. Three confirmed-clean pairs are checked
+(`lvds_rx1_10/11/12`); ~9s total.
+
 ## Performance Benchmarks
 
 Results from `test_fanout_and_route.py` (full mode):
