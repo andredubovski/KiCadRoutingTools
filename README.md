@@ -202,14 +202,19 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 1. Open KiCad (9.0 or later)
 2. Open a PCB in Pcbnew
-3. Go to **Tools → External Plugins → KiCadRoutingTools**
-4. Configure routing parameters and select nets to route
-5. Click **Route** to run the router
+3. *(Optional)* Select one or more nets in the PCB editor first — for example by
+   clicking tracks/pads, or right-clicking a track and choosing
+   **Select → All Tracks in Net**. Any nets you have selected are automatically
+   pre-checked for routing when the plugin opens.
+4. Go to **Tools → External Plugins → KiCadRoutingTools**
+5. Configure routing parameters and select (or adjust) the nets to route
+6. Click **Route** to run the router
 
 ### Plugin Tabs
 
 **Basic Tab:**
 - Net selection with filtering and component filtering
+- Nets selected in the PCB editor before opening the plugin are pre-checked automatically (also applies to the Fanout, Planes, and Differential tabs)
 - Option to separate nets by net class (organizes into tabs per class)
 - Track width, clearance, via size/drill from net class or manual override
 - Layer selection with per-layer cost multipliers

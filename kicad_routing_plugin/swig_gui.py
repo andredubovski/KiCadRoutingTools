@@ -132,7 +132,8 @@ def _get_board_minimum_constraints():
 class RoutingDialog(wx.Dialog):
     """Main dialog for configuring and running the router."""
 
-    def __init__(self, parent, pcb_data, board_filename, saved_settings=None):
+    def __init__(self, parent, pcb_data, board_filename, saved_settings=None,
+                 preselected_nets=None):
         super().__init__(
             parent,
             title="KiCad Routing Tools",
@@ -159,6 +160,9 @@ class RoutingDialog(wx.Dialog):
         self._routing_thread = None
         self._connectivity_cache = {}  # Cache: net_id -> is_connected
         self._saved_settings = saved_settings  # Settings to restore after init
+        # Nets the user selected in the PCB editor before opening the plugin.
+        # These pre-check the matching nets for routing (GitHub issue #6).
+        self._preselected_nets = set(preselected_nets) if preselected_nets else set()
         self._last_notebook = None  # Track netclass notebook for cleanup
         self._initial_load = True  # Skip board sync on first refresh (data is already current)
         # Per-session "no" responses to the "make a plane first?" suggestion
@@ -1256,11 +1260,37 @@ class RoutingDialog(wx.Dialog):
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
 
+        # Pre-check nets the user selected in the PCB editor. This overrides any
+        # restored/default net selection so the KiCad selection takes priority.
+        self._apply_preselected_nets()
+
         # Apply board-level minimum constraints if checkbox is enabled
         self._apply_board_minimums_to_controls()
 
         # Do initial refresh
         self.refresh_from_board()
+
+    def _apply_preselected_nets(self):
+        """Pre-check the nets the user selected in the PCB editor.
+
+        Applies the selection to every net-based tab (Basic routing, Fanout,
+        Planes) and to differential pairs whose nets are selected. Does nothing
+        when no nets were selected, leaving restored/default behaviour intact.
+        """
+        if not self._preselected_nets:
+            return
+
+        names = self._preselected_nets
+
+        # Show selected nets even if they are already routed, so the user can
+        # see exactly what was carried over from their KiCad selection.
+        if self.net_panel.hide_check:
+            self.net_panel.hide_check.SetValue(False)
+
+        self.net_panel.set_selected_nets(names)
+        self.fanout_tab.net_panel.set_selected_nets(names)
+        self.planes_tab.net_panel.set_selected_nets(names)
+        self.differential_tab.pair_panel.set_selected_pairs_by_net(names)
 
     def refresh_from_board(self):
         """Refresh pcb_data from the current board state.
