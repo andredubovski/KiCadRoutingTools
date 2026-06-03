@@ -57,7 +57,8 @@ from obstacle_costs import (
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
-from single_ended_routing import route_net, route_net_with_obstacles, route_net_with_visualization, route_multipoint_taps
+from single_ended_routing import (route_net, route_net_with_obstacles, route_net_with_visualization,
+                                   route_multipoint_taps, build_corridor_waypoints)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from layer_swap_optimization import apply_single_ended_layer_swaps
@@ -116,6 +117,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 bus_attraction_radius: float = 5.0,
                 bus_attraction_bonus: int = 5000,
                 bus_min_nets: int = 2,
+                guide_corridor_enabled: bool = False,
+                guide_corridor_layer: str = "User.1",
+                guide_corridor_spacing: float = 0.0,
                 proximity_heuristic_factor: float = 0.02,
                 stub_proximity_radius: float = 2.0,
                 stub_proximity_cost: float = 0.2,
@@ -212,7 +216,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     if pcb_data is None:
         print(f"Loading {input_file}...")
-        pcb_data = parse_kicad_pcb(input_file)
+        pcb_data = parse_kicad_pcb(input_file, guide_layer=guide_corridor_layer)
     else:
         print("Using provided PCB data...")
 
@@ -267,7 +271,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         turn_cost=turn_cost, direction_preference_cost=direction_preference_cost,
         bus_enabled=bus_enabled, bus_detection_radius=bus_detection_radius,
         bus_attraction_radius=bus_attraction_radius, bus_attraction_bonus=bus_attraction_bonus,
-        bus_min_nets=bus_min_nets, proximity_heuristic_factor=proximity_heuristic_factor,
+        bus_min_nets=bus_min_nets,
+        guide_corridor_enabled=guide_corridor_enabled, guide_corridor_layer=guide_corridor_layer,
+        guide_corridor_spacing=guide_corridor_spacing,
+        proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius, stub_proximity_cost=stub_proximity_cost,
         via_proximity_cost=via_proximity_cost, bga_proximity_radius=bga_proximity_radius,
@@ -293,6 +300,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
+
+    # Build guide-corridor waypoints once (issue #7). These steer the per-segment
+    # A* through a user-drawn polyline; empty when the feature is off / no guide.
+    config.corridor_waypoints = build_corridor_waypoints(pcb_data, config)
+    if config.corridor_waypoints:
+        print(f"Guide corridor: steering routes through {len(config.corridor_waypoints)} "
+              f"waypoint(s) from {len(pcb_data.guide_paths)} polyline(s) on {config.guide_corridor_layer}")
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
@@ -880,6 +894,13 @@ For differential pair routing, use route_diff.py:
                         help=f"Cost bonus for staying near neighbor track (default: {defaults.BUS_ATTRACTION_BONUS})")
     parser.add_argument("--bus-min-nets", type=int, default=defaults.BUS_MIN_NETS,
                         help=f"Minimum nets to form a bus group (default: {defaults.BUS_MIN_NETS})")
+    parser.add_argument("--guide-corridor", action="store_true",
+                        help="Steer routed nets along a guide polyline drawn on a User layer (issue #7)")
+    parser.add_argument("--guide-corridor-layer", type=str, default=defaults.GUIDE_CORRIDOR_LAYER,
+                        help=f"User layer the guide polyline is drawn on (default: {defaults.GUIDE_CORRIDOR_LAYER})")
+    parser.add_argument("--guide-corridor-spacing", type=float, default=defaults.GUIDE_CORRIDOR_SPACING,
+                        help=f"Max mm between waypoints; 0 = use only the drawn segment endpoints, "
+                             f">0 subdivides long segments to follow curves more tightly (default: {defaults.GUIDE_CORRIDOR_SPACING})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
 
@@ -1088,6 +1109,9 @@ For differential pair routing, use route_diff.py:
                 bus_attraction_radius=args.bus_attraction_radius,
                 bus_attraction_bonus=args.bus_attraction_bonus,
                 bus_min_nets=args.bus_min_nets,
+                guide_corridor_enabled=args.guide_corridor,
+                guide_corridor_layer=args.guide_corridor_layer,
+                guide_corridor_spacing=args.guide_corridor_spacing,
                 proximity_heuristic_factor=args.proximity_heuristic_factor,
                 stub_proximity_radius=args.stub_proximity_radius,
                 stub_proximity_cost=args.stub_proximity_cost,

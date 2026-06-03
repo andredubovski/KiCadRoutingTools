@@ -700,6 +700,26 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
         options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
 
+        # Guide corridor: follow a user-drawn polyline (issue #7)
+        self.guide_corridor_check = wx.CheckBox(options_scroll, label="Follow User-layer guide path")
+        self.guide_corridor_check.SetValue(defaults.GUIDE_CORRIDOR_ENABLED)
+        self.guide_corridor_check.SetToolTip(
+            "Route the selected nets so they follow a polyline you draw on a User layer "
+            "(waypoints), avoiding obstacles. Multiple nets pack alongside without overlapping.")
+        options_inner.Add(self.guide_corridor_check, 0, wx.ALL, 3)
+
+        gc_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        gc_sizer.Add(wx.StaticText(options_scroll, label="Guide Layer:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.guide_corridor_layer_ctrl = wx.TextCtrl(options_scroll, value=defaults.GUIDE_CORRIDOR_LAYER, size=(70, -1))
+        self.guide_corridor_layer_ctrl.SetToolTip("User layer the guide polyline is drawn on (e.g., User.1)")
+        gc_sizer.Add(self.guide_corridor_layer_ctrl, 0, wx.RIGHT, 8)
+        gc_sizer.Add(wx.StaticText(options_scroll, label="Spacing(mm):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.guide_corridor_spacing_ctrl = wx.TextCtrl(options_scroll, value=str(defaults.GUIDE_CORRIDOR_SPACING), size=(45, -1))
+        self.guide_corridor_spacing_ctrl.SetToolTip("Max mm between waypoints. 0 = only the drawn segment endpoints; "
+                                                    ">0 subdivides long segments to follow curves more tightly.")
+        gc_sizer.Add(self.guide_corridor_spacing_ctrl, 0)
+        options_inner.Add(gc_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Power nets
         power_sizer = wx.BoxSizer(wx.HORIZONTAL)
         power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -1679,6 +1699,14 @@ class RoutingDialog(wx.Dialog):
 
         return selected_nets, selected_layers
 
+    @staticmethod
+    def _safe_float(text, default):
+        """Parse a float from a text control, falling back to default."""
+        try:
+            return float(str(text).strip())
+        except (ValueError, TypeError):
+            return default
+
     def _build_routing_config(self, selected_nets, selected_layers):
         """Build the routing configuration dictionary from UI controls.
 
@@ -1732,6 +1760,10 @@ class RoutingDialog(wx.Dialog):
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
+            # Guide corridor (issue #7)
+            'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
+            'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
+            'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
             'verbose': self.verbose_check.GetValue(),
             'skip_routing': self.skip_routing_check.GetValue(),
             'debug_memory': self.debug_memory_check.GetValue(),
@@ -2122,6 +2154,24 @@ class RoutingDialog(wx.Dialog):
                 print(f"Warning: Could not get net class clearances: {e}")
                 # Fall back to using config clearance for all nets
 
+            # Refresh user-layer guide polylines from the live board so a path
+            # drawn this session is used without saving the file first (issue #7).
+            if config.get('guide_corridor_enabled'):
+                guide_layer = config.get('guide_corridor_layer', 'User.1')
+                try:
+                    import pcbnew
+                    from kicad_parser import extract_guide_paths_from_board
+                    board = pcbnew.GetBoard()
+                    if board is not None:
+                        self.pcb_data.guide_paths = extract_guide_paths_from_board(board, guide_layer)
+                        print(f"Guide corridor: found {len(self.pcb_data.guide_paths)} "
+                              f"polyline(s) on {guide_layer}")
+                        if not self.pcb_data.guide_paths:
+                            print(f"  (No graphic lines found on {guide_layer} - "
+                                  f"draw a line there to guide routing.)")
+                except Exception as e:
+                    print(f"Warning: could not read guide paths from board: {e}")
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -2173,6 +2223,9 @@ class RoutingDialog(wx.Dialog):
                     bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                     bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                     bus_min_nets=config.get('bus_min_nets', 2),
+                    guide_corridor_enabled=config.get('guide_corridor_enabled', False),
+                    guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
+                    guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
@@ -2278,6 +2331,9 @@ class RoutingDialog(wx.Dialog):
                         bus_attraction_radius=config.get('bus_attraction_radius', 5.0),
                         bus_attraction_bonus=config.get('bus_attraction_bonus', 5000),
                         bus_min_nets=config.get('bus_min_nets', 2),
+                        guide_corridor_enabled=config.get('guide_corridor_enabled', False),
+                        guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
+                        guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                         power_nets=config.get('power_nets', []),
                         power_nets_widths=config.get('power_nets_widths', []),
                         disable_bga_zones=config.get('no_bga_zones'),

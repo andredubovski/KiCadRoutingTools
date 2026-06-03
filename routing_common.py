@@ -449,7 +449,10 @@ def get_common_config_kwargs(
     time_matching: bool,
     time_match_tolerance: float,
     debug_memory: bool,
-    layer_costs: Optional[List[float]] = None
+    layer_costs: Optional[List[float]] = None,
+    guide_corridor_enabled: bool = False,
+    guide_corridor_layer: str = "User.1",
+    guide_corridor_spacing: float = 0.0,
 ) -> Dict:
     """
     Build config kwargs dict from common parameters.
@@ -475,6 +478,9 @@ def get_common_config_kwargs(
         bus_attraction_radius=bus_attraction_radius,
         bus_attraction_bonus=bus_attraction_bonus,
         bus_min_nets=bus_min_nets,
+        guide_corridor_enabled=guide_corridor_enabled,
+        guide_corridor_layer=guide_corridor_layer,
+        guide_corridor_spacing=guide_corridor_spacing,
         proximity_heuristic_factor=proximity_heuristic_factor,
         bga_exclusion_zones=bga_exclusion_zones,
         stub_proximity_radius=stub_proximity_radius,

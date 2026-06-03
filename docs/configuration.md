@@ -110,6 +110,50 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--vertical-attraction-radius` | 1.0 | Radius for cross-layer track attraction (mm) |
 | `--vertical-attraction-cost` | 0.0 | Cost bonus for aligning with tracks on other layers (0 = disabled) |
 
+### Guide Corridor Options (preferred route)
+
+Draw a polyline on a User layer in KiCad, then enable `--guide-corridor` to route the
+selected nets so they **follow** that line. The router takes the polyline's vertices as
+waypoints (`--guide-corridor-spacing > 0` subdivides long segments for tighter curves) and
+routes source → waypoints → target. It keeps the route on a single layer where it can — a
+waypoint it can't reach cleanly on the current layer is skipped rather than forcing a layer
+change, so a corridor doesn't add vias the direct route wouldn't need. It applies to all nets
+routed in the run and works in either draw direction; multiple nets following the same
+corridor pack alongside each other without overlapping.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--guide-corridor` | off | Route selected nets to follow a user-drawn guide polyline |
+| `--guide-corridor-layer` | User.1 | User layer the guide polyline is drawn on |
+| `--guide-corridor-spacing` | 0.0 | Max mm between waypoints. `0` uses only the drawn segment endpoints (vertices); `>0` subdivides long segments to follow curves more tightly |
+
+```bash
+# Route two nets so they follow a corridor drawn on User.1
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" "Net-(B)" --guide-corridor
+```
+
+Notes:
+- **Endpoints/topology are untouched.** The waypoints only steer the path *between* the
+  pads the router already chose to connect. For a multi-point net the existing MST is kept,
+  and each waypoint steers the MST segment it is nearest to (so the net follows the whole
+  drawn line across its topology); a waypoint used by one segment is not reused by others.
+- **A corridor never makes a route fail.** It is strictly best-effort: a waypoint that
+  can't be reached (or that would strand the route) is dropped, and if no waypoints can be
+  followed the segment routes directly — identical to routing with no corridor. With the
+  flag off, routing is byte-for-byte unchanged.
+- Routes are placed one at a time; each becomes an obstacle for the next, which keeps
+  multiple corridor nets from overlapping. Draw the corridor wide enough (or use separate
+  lines) if you want several nets to follow it comfortably.
+- The guide applies to every net routed in the run, so select only the nets you want it to
+  steer. Nets routed as a detected bus (`--bus`) follow their neighbor instead of the guide.
+- The route is built by routing A* legs between the waypoints and concatenating them. A
+  multi-point tap or a detour can cross an earlier leg of the **same** net. KiCad allows
+  same-net copper to overlap, so the net stays connected and DRC-clean against other nets,
+  but the trace may be less tidy than a hand-route.
+- Tested by `tests/test_guide_corridor.py` — follow, blocked-waypoint snap, shared-corridor
+  non-overlap, flag-off regression, never-blocks-routing, spacing subdivision, and a real
+  bundled board (`kicad_files/lvds_converter_dualclk.kicad_pcb`) with a `User.1` guide.
+
 ### Differential Pair Options (route_diff.py only)
 
 These options are only available in `route_diff.py`. All nets passed to route_diff.py are treated as differential pairs.

@@ -138,6 +138,39 @@ python3 tests/test_sonde_u.py -u
 1. Route with 1.2mm track width, 0.3mm clearance
 2. DRC and connectivity verification
 
+### test_guide_corridor.py - Guide-Corridor (Waypoint) Routing Test
+
+Pass/fail tests for the guide-corridor feature (issue #7), where nets are routed
+to follow a polyline drawn on a User layer. Unlike the other scripts, this one is
+self-contained: it builds temporary boards from `kicad_files/flat_hierarchy.kicad_pcb`
+by inserting `User.1` graphic lines, routes with/without `--guide-corridor`, and
+asserts each scenario. It prints a `PASS`/`FAIL` line per scenario plus log detail,
+and exits non-zero if any scenario fails.
+
+```bash
+python3 tests/test_guide_corridor.py        # run with KiCad's python (needs the Rust router)
+python3 tests/test_guide_corridor.py -v      # verbose routing output
+```
+
+**Scenarios:**
+| ID | Checks |
+|----|--------|
+| S0 | Regression — with the flag OFF, a guide on the board is ignored; the net routes its normal short path (guards against behavior change when the feature isn't requested) |
+| S1 | Follow — a single net follows an arch drawn over it (track reaches the drawn peak), connects, no clearance errors |
+| S2 | Blocked waypoint — a vertex placed on another net's through-hole pad is snapped to the nearest free cell; the net connects with no clip of that pad |
+| S3 | Shared corridor — two nets follow the same arch, both connect, and occupy no shared copper cell (pack alongside, non-overlapping) |
+| S4 | Never blocks — a pathological guide (unreachable off-board vertex) must not make a net fail; it routes and connects regardless (the unfollowable waypoint is dropped) |
+| S5 | Real board — `kicad_files/lvds_converter_dualclk.kicad_pcb` has a 6-vertex `User.1` guide spanning the 3-pad `/CLK` net (the board from the issue #7 bug report). `/CLK` routes, connects, is DRC-clean, adds no vias the direct route didn't need, and passes near all guide vertices, distributed across both MST segments |
+| S6 | Spacing subdivides — with `--guide-corridor-spacing 1.0`, `build_corridor_waypoints` subdivides the LVDS guide's long segments into denser, evenly-spaced waypoints (more points, no consecutive gap larger than the spacing) |
+| S7 | Real board, spacing>0 — routing `/CLK` with `--guide-corridor-spacing 1.0` still connects, is DRC-clean, adds no extra vias, and follows the guide (exercises the subdivision path end-to-end) |
+
+Pass/fail uses real clearance violations (to OTHER nets) plus connectivity / follow /
+non-overlap. **Same-net self-crossings** are reported as a quality note, not a
+failure: waypoint routing concatenates A* legs, so a multi-point tap or a
+blocked-waypoint detour can cross an earlier leg of the same net. KiCad permits
+same-net copper to overlap, so this is electrically harmless (the net stays
+connected) — a route-quality nicety to improve later.
+
 ## Performance Benchmarks
 
 Results from `test_fanout_and_route.py` (full mode):

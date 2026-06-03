@@ -39,6 +39,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
 - **Turn cost penalty** - Penalizes direction changes during routing to encourage straighter paths with fewer wiggles
 - **Bus routing** - Automatically detects groups of nets with clustered endpoints (buses) and routes them together. Uses direction-based attraction so each net follows its neighbor's path in parallel, creating clean parallel traces. Routes from the middle of the bus outward, alternating sides. Enable with `--bus` flag. Configurable detection radius, attraction radius, and attraction bonus
+- **Guide corridor (preferred route)** - Draw a polyline on a User layer (e.g. `User.1`) in KiCad and the selected nets are routed to follow it as waypoints — source → along your drawn path → target — getting as close to the line as obstacles allow. For multi-point nets each waypoint steers the nearest segment of the net's existing MST, so endpoints/topology are untouched. It's strictly best-effort: a waypoint it can't follow on the current layer is skipped (so a guide never makes a route fail or adds vias the direct route wouldn't need), and multiple nets following the same corridor pack alongside without overlapping. Enable with `--guide-corridor` (CLI) or the "Follow User-layer guide path" checkbox (plugin); configurable layer and waypoint spacing
 - **Length matching** - Adds trombone-style meanders to match route lengths within groups (e.g., DDR4 byte lanes). Auto-groups DQ/DQS nets by byte lane. Per-bump clearance checking with automatic amplitude reduction to avoid conflicts with other traces. Supports multi-layer routes with vias. Calculates via barrel length from board stackup for accurate length matching that matches KiCad's measurements. Includes stub via barrel lengths (BGA pad vias) using actual stub-layer-to-pad-layer distance
 - **Time matching** - Alternative to length matching that matches propagation delay instead of physical length. Accounts for different signal speeds on outer layers (microstrip, faster) vs inner layers (stripline, slower) using effective dielectric constants from the board stackup. Use `--time-matching` to enable. Tolerance specified in picoseconds
 - **Multi-point routing** - Routes nets with 3+ pads using an MST-based 3-phase approach: (1) compute MST between all pads and route the longest edge, (2) apply length matching, (3) route remaining MST edges in length order (longest first). This ensures length-matched routes are clean 2-point paths while connecting all pads optimally
@@ -219,6 +220,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 - Track width, clearance, via size/drill from net class or manual override
 - Layer selection with per-layer cost multipliers
 - Options: stub layer swaps, copper text moving, teardrops, power net widths, no-BGA zones
+- **Guide corridor** - draw a polyline on a User layer (e.g. `User.1`) and tick "Follow User-layer guide path" to route the selected nets along it (waypoints, avoiding obstacles, packed non-overlapping)
 
 **Advanced Tab:**
 - Swappable nets configuration for target swap optimization
@@ -739,6 +741,11 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --bus-attraction-radius 5.0     # Attraction radius from neighbor track (mm)
 --bus-attraction-bonus 5000     # Cost bonus for staying parallel to neighbor
 --bus-min-nets 2                # Minimum nets to form a bus group
+
+# Guide corridor: route selected nets to follow a polyline drawn on a User layer (issue #7)
+--guide-corridor                # Steer routed nets along the drawn guide polyline
+--guide-corridor-layer User.1   # User layer the guide polyline is drawn on
+--guide-corridor-spacing 0.0    # Max mm between waypoints (0 = drawn vertices only; >0 subdivides)
 
 # Layer optimization
 --no-stub-layer-swap    # Disable stub layer switching

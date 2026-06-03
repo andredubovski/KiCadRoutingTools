@@ -87,6 +87,11 @@ def get_dialog_settings(dialog):
         'bus_attraction_bonus': dialog.bus_attraction_bonus.GetValue(),
         'bus_min_nets': dialog.bus_min_nets.GetValue(),
 
+        # Guide corridor (issue #7)
+        'guide_corridor_check': dialog.guide_corridor_check.GetValue(),
+        'guide_corridor_layer': dialog.guide_corridor_layer_ctrl.GetValue(),
+        'guide_corridor_spacing': dialog.guide_corridor_spacing_ctrl.GetValue(),
+
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
@@ -315,6 +320,14 @@ def restore_dialog_settings(dialog, settings):
         dialog.bus_attraction_bonus.SetValue(settings['bus_attraction_bonus'])
     if 'bus_min_nets' in settings:
         dialog.bus_min_nets.SetValue(settings['bus_min_nets'])
+
+    # Restore guide corridor (issue #7)
+    if 'guide_corridor_check' in settings:
+        dialog.guide_corridor_check.SetValue(settings['guide_corridor_check'])
+    if 'guide_corridor_layer' in settings:
+        dialog.guide_corridor_layer_ctrl.SetValue(settings['guide_corridor_layer'])
+    if 'guide_corridor_spacing' in settings:
+        dialog.guide_corridor_spacing_ctrl.SetValue(str(settings['guide_corridor_spacing']))
 
     if 'length_match_groups' in settings:
         dialog.length_match_groups_ctrl.SetValue(settings['length_match_groups'])
