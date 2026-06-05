@@ -502,6 +502,13 @@ class RoutingDialog(wx.Dialog):
 
     def _on_drc_param_changed(self, event, ctrl_name):
         """Validate parameter change against DRC minimums."""
+        # Guard against re-entrancy: correcting the value below triggers another
+        # EVT_SPINCTRLDOUBLE, and showing a modal dialog inside the handler steals
+        # focus from the spin control which fires yet another event. Without this
+        # guard the warning dialog reappears endlessly and the UI deadlocks (#30).
+        if getattr(self, '_drc_validating', False):
+            return
+
         if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
             event.Skip()
             return
@@ -525,15 +532,22 @@ class RoutingDialog(wx.Dialog):
         current = ctrl.GetValue()
 
         if current < minimum:
-            # Show warning and revert to minimum
+            # Correct the value first (suppressing the nested validation event),
+            # then show the warning deferred so no modal dialog runs inside this
+            # handler. By the time it shows, the value is already valid.
+            self._drc_validating = True
+            try:
+                ctrl.SetValue(minimum)
+            finally:
+                self._drc_validating = False
             label = ctrl_name.replace('_', ' ').title()
-            wx.MessageBox(
+            wx.CallAfter(
+                wx.MessageBox,
                 f"{label} cannot be less than {minimum:.3f} mm\n"
                 f"(Board minimum from Design Rules)",
                 "Design Rule Constraint",
                 wx.OK | wx.ICON_WARNING
             )
-            ctrl.SetValue(minimum)
         else:
             event.Skip()
 
