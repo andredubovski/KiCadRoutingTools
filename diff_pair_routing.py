@@ -67,6 +67,75 @@ def direction_to_theta_idx(dx: float, dy: float) -> int:
     return theta_idx
 
 
+def _footprint_pad_centroid(pcb_data: PCBData, net_id: int, x: float, y: float,
+                            tolerance: float = 0.05) -> Optional[Tuple[float, float]]:
+    """Find the pad of net_id at (x, y) and return the centroid of all pads on its footprint."""
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if abs(pad.global_x - x) < tolerance and abs(pad.global_y - y) < tolerance:
+            footprint = pcb_data.footprints.get(pad.component_ref)
+            if footprint and footprint.pads:
+                cx = sum(p.global_x for p in footprint.pads) / len(footprint.pads)
+                cy = sum(p.global_y for p in footprint.pads) / len(footprint.pads)
+                return (cx, cy)
+    return None
+
+
+def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                           p_segments: List[Segment], n_segments: List[Segment],
+                           p_x: float, p_y: float, n_x: float, n_y: float,
+                           layer_name: str,
+                           other_center: Optional[Tuple[float, float]] = None
+                           ) -> Tuple[float, float, bool]:
+    """
+    Compute the escape direction for one end of a differential pair.
+
+    Normally this is the average of the P and N stub directions. When both
+    endpoints are bare pads (no stub segments), the stub directions are (0,0)
+    and the setback machinery would degenerate to the pad-pair center, letting
+    the offset P/N tracks cross the partner net's pads. In that case we
+    synthesize a direction perpendicular to the P-N pad axis, pointing away
+    from the owning component's pad centroid (falling back to "toward the
+    other end of the route").
+
+    Returns (dir_x, dir_y, synthesized). The direction is normalized, or (0,0)
+    if no direction could be determined. synthesized is True when the direction
+    came from pad geometry rather than stub segments.
+    """
+    p_dir = get_stub_direction(p_segments, p_x, p_y, layer_name)
+    n_dir = get_stub_direction(n_segments, n_x, n_y, layer_name)
+
+    dir_x = (p_dir[0] + n_dir[0]) / 2
+    dir_y = (p_dir[1] + n_dir[1]) / 2
+    dir_len = math.sqrt(dir_x * dir_x + dir_y * dir_y)
+    if dir_len > 1e-6:
+        return (dir_x / dir_len, dir_y / dir_len, False)
+
+    # Bare pads (or cancelling stub directions): synthesize from pad geometry.
+    axis_x, axis_y = p_x - n_x, p_y - n_y
+    axis_len = math.sqrt(axis_x * axis_x + axis_y * axis_y)
+    if axis_len < 1e-6:
+        return (0.0, 0.0, False)
+    perp_x, perp_y = -axis_y / axis_len, axis_x / axis_len
+
+    center_x, center_y = (p_x + n_x) / 2, (p_y + n_y) / 2
+
+    # Prefer escaping away from the owning component's body (pad centroid)
+    centroid = (_footprint_pad_centroid(pcb_data, p_net_id, p_x, p_y) or
+                _footprint_pad_centroid(pcb_data, n_net_id, n_x, n_y))
+    if centroid:
+        dot = perp_x * (center_x - centroid[0]) + perp_y * (center_y - centroid[1])
+        if abs(dot) > 0.05:
+            return (perp_x, perp_y, True) if dot > 0 else (-perp_x, -perp_y, True)
+
+    # Symmetric component (e.g. 2-pad resistor): escape toward the other end
+    if other_center is not None:
+        dot = perp_x * (other_center[0] - center_x) + perp_y * (other_center[1] - center_y)
+        if abs(dot) > 0.05:
+            return (perp_x, perp_y, True) if dot > 0 else (-perp_x, -perp_y, True)
+
+    return (perp_x, perp_y, True)
+
+
 def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                          label, layer_names, spacing_mm, config, obstacles,
                          connector_obstacles, coord, neighbor_stubs):
@@ -1069,23 +1138,30 @@ def create_parallel_path_from_float(centerline_path, sign, spacing_mm=0.1, start
 
 def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
                                      config: GridRouteConfig) -> Optional[dict]:
+    """Compute connector region parameters for a differential pair (see by-ids variant)."""
+    return get_diff_pair_connector_regions_by_ids(
+        pcb_data, diff_pair.p_net_id, diff_pair.n_net_id, config)
+
+
+def get_diff_pair_connector_regions_by_ids(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                                            config: GridRouteConfig) -> Optional[dict]:
     """
     Compute connector region parameters for a differential pair.
 
     Returns dict with:
         - src_center: (x, y) center between P and N source stubs
         - src_dir: (dx, dy) normalized direction from stubs toward route
+        - src_dir_synthesized: True if src_dir was derived from pad geometry
+          (bare-pad endpoint); the route may use either +src_dir or -src_dir
         - src_setback: distance from stub center to route start
         - tgt_center: (x, y) center between P and N target stubs
         - tgt_dir: (dx, dy) normalized direction from stubs toward route
+        - tgt_dir_synthesized: True if tgt_dir was derived from pad geometry
         - tgt_setback: distance from stub center to route start
         - spacing_mm: half-spacing between P and N tracks
 
     Returns None if endpoints cannot be determined.
     """
-    p_net_id = diff_pair.p_net_id
-    n_net_id = diff_pair.n_net_id
-
     # Find endpoints
     sources, targets, error = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
     if error or not sources or not targets:
@@ -1113,33 +1189,22 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
     src_layer_name = layer_names[src[4]]
     tgt_layer_name = layer_names[tgt[4]]
 
-    # Get stub directions at source and target
-    p_src_dir = get_stub_direction(p_segments, p_src_x, p_src_y, src_layer_name)
-    n_src_dir = get_stub_direction(n_segments, n_src_x, n_src_y, src_layer_name)
-    p_tgt_dir = get_stub_direction(p_segments, p_tgt_x, p_tgt_y, tgt_layer_name)
-    n_tgt_dir = get_stub_direction(n_segments, n_tgt_x, n_tgt_y, tgt_layer_name)
-
-    # Average P and N directions at each end
-    src_dir_x = (p_src_dir[0] + n_src_dir[0]) / 2
-    src_dir_y = (p_src_dir[1] + n_src_dir[1]) / 2
-    tgt_dir_x = (p_tgt_dir[0] + n_tgt_dir[0]) / 2
-    tgt_dir_y = (p_tgt_dir[1] + n_tgt_dir[1]) / 2
-
-    # Normalize
-    src_dir_len = math.sqrt(src_dir_x*src_dir_x + src_dir_y*src_dir_y)
-    tgt_dir_len = math.sqrt(tgt_dir_x*tgt_dir_x + tgt_dir_y*tgt_dir_y)
-    if src_dir_len > 0:
-        src_dir_x /= src_dir_len
-        src_dir_y /= src_dir_len
-    if tgt_dir_len > 0:
-        tgt_dir_x /= tgt_dir_len
-        tgt_dir_y /= tgt_dir_len
-
     # Calculate centerline midpoints
     center_src_x = (p_src_x + n_src_x) / 2
     center_src_y = (p_src_y + n_src_y) / 2
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
+
+    # Get escape directions (averaged stub directions, or synthesized from pad
+    # geometry for bare-pad endpoints) - must match _try_route_direction
+    src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_src_x, p_src_y, n_src_x, n_src_y, src_layer_name,
+        other_center=(center_tgt_x, center_tgt_y))
+    tgt_dir_x, tgt_dir_y, tgt_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_layer_name,
+        other_center=(center_src_x, center_src_y))
 
     # Calculate setback (default to 4x spacing = 2x total P-N distance)
     if config.diff_pair_centerline_setback is not None:
@@ -1152,9 +1217,11 @@ def get_diff_pair_connector_regions(pcb_data: PCBData, diff_pair: DiffPairNet,
     return {
         'src_center': (center_src_x, center_src_y),
         'src_dir': (src_dir_x, src_dir_y),
+        'src_dir_synthesized': src_dir_synth,
         'src_setback': src_setback,
         'tgt_center': (center_tgt_x, center_tgt_y),
         'tgt_dir': (tgt_dir_x, tgt_dir_y),
+        'tgt_dir_synthesized': tgt_dir_synth,
         'tgt_setback': tgt_setback,
         'spacing_mm': spacing_mm,
     }
@@ -1217,33 +1284,22 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     src_layer_name = layer_names[src_layer]
     tgt_layer_name = layer_names[tgt_layer]
 
-    # Get stub directions at source and target
-    p_src_dir = get_stub_direction(p_segments, p_src_x, p_src_y, src_layer_name)
-    n_src_dir = get_stub_direction(n_segments, n_src_x, n_src_y, src_layer_name)
-    p_tgt_dir = get_stub_direction(p_segments, p_tgt_x, p_tgt_y, tgt_layer_name)
-    n_tgt_dir = get_stub_direction(n_segments, n_tgt_x, n_tgt_y, tgt_layer_name)
-
-    # Average P and N directions at each end (they should be similar for a diff pair)
-    src_dir_x = (p_src_dir[0] + n_src_dir[0]) / 2
-    src_dir_y = (p_src_dir[1] + n_src_dir[1]) / 2
-    tgt_dir_x = (p_tgt_dir[0] + n_tgt_dir[0]) / 2
-    tgt_dir_y = (p_tgt_dir[1] + n_tgt_dir[1]) / 2
-
-    # Normalize the averaged directions
-    src_dir_len = math.sqrt(src_dir_x*src_dir_x + src_dir_y*src_dir_y)
-    tgt_dir_len = math.sqrt(tgt_dir_x*tgt_dir_x + tgt_dir_y*tgt_dir_y)
-    if src_dir_len > 0:
-        src_dir_x /= src_dir_len
-        src_dir_y /= src_dir_len
-    if tgt_dir_len > 0:
-        tgt_dir_x /= tgt_dir_len
-        tgt_dir_y /= tgt_dir_len
-
     # Calculate centerline midpoints between P and N stubs
     center_src_x = (p_src_x + n_src_x) / 2
     center_src_y = (p_src_y + n_src_y) / 2
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
+
+    # Get escape directions at source and target (averaged stub directions, or
+    # synthesized from pad geometry when the endpoints are bare pads)
+    src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_src_x, p_src_y, n_src_x, n_src_y, src_layer_name,
+        other_center=(center_tgt_x, center_tgt_y))
+    tgt_dir_x, tgt_dir_y, tgt_dir_synth = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, p_segments, n_segments,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, tgt_layer_name,
+        other_center=(center_src_x, center_src_y))
 
     # Calculate setback distance (default to 4x spacing = 2x total P-N distance)
     if config.diff_pair_centerline_setback is not None:
@@ -1266,6 +1322,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
+    if not src_candidates and src_dir_synth:
+        # Synthesized direction blocked - try escaping from the opposite side
+        src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
+        src_candidates = _find_open_positions(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        )
     if not src_candidates:
         blocked = _collect_setback_blocked_cells(
             center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
@@ -1277,6 +1340,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
+    if not tgt_candidates and tgt_dir_synth:
+        # Synthesized direction blocked - try escaping from the opposite side
+        tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
+        tgt_candidates = _find_open_positions(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        )
     if not tgt_candidates:
         blocked = _collect_setback_blocked_cells(
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
