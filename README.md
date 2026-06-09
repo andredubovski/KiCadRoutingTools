@@ -36,6 +36,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **GND via placement** - Automatically places GND vias adjacent to differential pair signal vias for return current paths. The Rust router checks clearance and determines optimal placement (ahead or behind signal vias)
 - **Automatic polarity swap** - Detects when differential pair P/N polarity differs between source and target pads and automatically swaps target pad net assignments to match - consistently in the output file (CLI), the live board (plugin), and in-memory state. Use `--no-fix-polarity` to disable (default in the plugin GUI): the router then resolves the mismatch geometrically by taking the connectors out the opposite side at one end (bare-pad endpoints only), and skips the pair with a warning if that is not possible - crossing tracks are never written
 - **Bare-pad differential pairs** - Routes diff pairs directly between SMD pads with no fanout stubs (e.g., SOIC pins, termination resistors). The escape direction is derived from the pad geometry (perpendicular to the pad axis, away from the component body), and the pair's own pads are treated as obstacles outside the pad-entry corridors so the P/N tracks cannot cross the partner polarity's pad
+- **Multi-point differential pairs** - Pairs with 3+ pad-pair terminals (e.g., connector → termination → IC) are routed as a chain of legs passing "through" each terminal: a continuation leg leaves on the opposite side from the leg that arrived, since a pair cannot tap mid-track without P/N crossing. Alternative chain orderings are tried automatically if one fails
 - **Target swap optimization** - For swappable nets (e.g., memory lanes), uses Hungarian algorithm to find optimal source-to-target assignments that minimize crossings. Works for both differential pairs and single-ended nets
 - **Schematic synchronization** - When `--schematic-dir` is specified, updates KiCad schematic files with any pad swaps (target swaps or polarity swaps) to keep schematics in sync with PCB. Handles multi-unit symbols correctly by updating all schematic files containing the lib_symbol. Disabled by default
 - **Chip boundary crossing detection** - Uses chip boundary "unrolling" to accurately detect route crossings for MPS ordering and target swap optimization
@@ -386,6 +387,10 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 ```bash
 # Check for DRC violations (default clearance: 0.2mm)
 python check_drc.py kicad_files/output.kicad_pcb
+
+# Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids
+# bogus zone-clearance errors from stale pours - see tests/README.md for details)
+kicad-cli pcb drc --refill-zones --format json -o drc.json kicad_files/output.kicad_pcb
 
 # Check connectivity (detects unrouted nets, broken routes, and T-junctions)
 python check_connected.py kicad_files/output.kicad_pcb

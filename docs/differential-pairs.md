@@ -106,6 +106,32 @@ the partner polarity's pad mid-route. Capsule-shaped corridors from each
 pad-pair center out past the setback position stay open so the route can still
 reach its endpoints and fan out to the pads.
 
+### Multi-Point Differential Pairs
+
+A diff pair cannot tap onto the middle of an existing pair of tracks - the
+tapping leg's P/N tracks would have to cross the existing pair. So pairs with
+3+ pad-pair terminals (e.g. connector -> termination resistor -> IC pins) are
+routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
+
+1. The pair's pads are grouped into (P pad, N pad) terminals by nearest
+   matching (connector pins, IC input pairs, termination resistors).
+2. Terminals are ordered as the shortest open chain. Each terminal has only
+   two usable sides (the +/- directions of its escape axis), so the topology
+   must be a path, not an MST tree. Orderings whose interior terminals have
+   both neighbors on the same side of the escape axis are penalized (they
+   force a wrap-around leg).
+3. Legs are routed sequentially. A continuation leg leaves a shared terminal
+   on the **opposite side** from the leg that arrived - the chain passes
+   "through" the pads. The forced side gets a connector corridor exemption in
+   the obstacle map (own pads AND the previous leg's tracks).
+4. Polarity is resolved per leg geometrically by choosing the side at the
+   fresh terminal; pad swaps are never used (a swap at a shared terminal
+   would break the already-routed leg).
+5. If a leg fails (unroutable, or its P/N tracks cross), the attempt's legs
+   are ripped out and the next-best chain ordering is tried - the side
+   constraints depend on routing order, so a reversed chain can succeed
+   where the forward one wraps itself into a corner.
+
 ### Pose-Based Centerline Routing
 
 The centerline is routed using orientation-aware A* search with state space (x, y, θ, layer):
@@ -457,4 +483,10 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
 
 1. **Polarity swap** - Enabled by default on the CLI (disabled by default in the plugin GUI); use `--no-fix-polarity` to disable automatic target pad swapping. With fixing disabled, a mismatched pair is re-routed with the connectors out the opposite side at one end (bare-pad endpoints only), and skipped with a warning if that is not possible
 2. **Fixed spacing** - Spacing is constant along the route (no tapering)
-3. **Grid snapping** - Centerline endpoints snap to grid
+3. **Grid snapping** - Centerline endpoints snap to grid for the search; the
+   terminal endpoints of the generated geometry are un-snapped back to the
+   exact setback positions so the connector fan stays centered between the
+   pads (snapping could bias it half a grid cell toward one pad and graze it)
+4. **Multi-point pairs** - Routed as a chain of terminals; mid-track taps are
+   geometrically impossible for a pair, and each terminal supports at most
+   two legs (one per side of its escape axis)

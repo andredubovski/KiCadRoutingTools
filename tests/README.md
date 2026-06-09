@@ -240,6 +240,54 @@ unscoped check would fail regardless — the same scoping `test_fanout_and_route
 uses for its LVDS stage. Three confirmed-clean pairs are checked
 (`lvds_rx1_10/11/12`); ~9s total.
 
+### test_multipoint_diff_route.py - Bare-Pad / Multi-Point Diff Pair Test
+
+Routes the two diff pairs of `kicad_files/lvds_converter_dualclk.kicad_pcb`, a
+simple 2-layer LVDS converter whose pairs terminate on bare pads (no fanout
+stubs) at multiple terminals: `/DATA+`/`/DATA-` spans 3 pad-pair terminals
+(connector, IC, termination resistor) and `/CLK+`/`/CLK-` spans 4. Asserts the
+multi-point chain plan (legs passing through shared terminals), full
+connectivity of **every** terminal, no pad-net swaps, and pair-scoped DRC
+cleanliness, using the board's netclass geometry (0.2/0.25/0.2 mm).
+
+```bash
+python3 tests/test_multipoint_diff_route.py
+python3 tests/test_multipoint_diff_route.py -v
+```
+
+## Verifying With KiCad's Own DRC (manual, not part of the tests)
+
+The tests use the project's `check_drc.py` so they run without KiCad installed.
+For a second opinion with KiCad's full rule engine (netclass clearances, board
+min track width, solder mask, zone clearances), run `kicad-cli` on a routed
+output manually:
+
+```bash
+# kicad-cli is on PATH on Linux/Windows; on macOS use the bundled binary:
+#   /Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
+
+kicad-cli pcb drc --severity-error --refill-zones --format json -o drc.json routed.kicad_pcb
+
+# Errors AND warnings (catches dangling track ends):
+kicad-cli pcb drc --refill-zones --format json -o drc.json routed.kicad_pcb
+
+# Non-zero exit code on violations (for scripting):
+kicad-cli pcb drc --refill-zones --exit-code-violations routed.kicad_pcb
+```
+
+Gotchas:
+
+- **Always pass `--refill-zones`** when the board has copper pours: without it,
+  stale zone fills produce bogus zone-clearance violations against the new
+  tracks (the pour hasn't been re-poured around them yet).
+- KiCad checks the **board's own design rules**, so routing with geometry that
+  doesn't match the netclass (e.g. 0.101 mm tracks on a board with a 0.2 mm
+  minimum width, or a pair gap below the netclass clearance) is reported as
+  violations even though the router kept the clearances it was given. Route
+  with the board's netclass values, or add matching custom rules in KiCad.
+- To inspect only specific nets, filter the JSON, e.g.
+  `python3 -c "import json; [print(v['type'], v['description']) for v in json.load(open('drc.json'))['violations'] if 'CLK' in json.dumps(v)]"`
+
 ## Performance Benchmarks
 
 Results from `test_fanout_and_route.py` (full mode):
