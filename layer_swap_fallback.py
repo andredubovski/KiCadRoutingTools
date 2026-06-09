@@ -27,11 +27,18 @@ from polarity_swap import get_canonical_net_id
 
 
 def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
-                                              config, extra_clearance: float):
+                                              config, extra_clearance: float,
+                                              exclude_cells=None, exempt_capsules=None):
     """Add a diff pair's own stubs and pads as obstacles to prevent the centerline
     (and its offset P/N tracks) from crossing them mid-route.
 
     This is a helper function to avoid duplicating code in multiple places.
+
+    exclude_cells / exempt_capsules: optional connector-corridor exemptions for
+    a specific multi-point leg (grid cells exempted from own-track blocking,
+    and (x1, y1, x2, y2, radius) capsules exempted from own-pad blocking).
+    When exempt_capsules is None the pad corridors are derived from the pair's
+    closest-endpoint connector regions.
     """
     p_segments = [s for s in pcb_data.segments if s.net_id == p_net_id]
     n_segments = [s for s in pcb_data.segments if s.net_id == n_net_id]
@@ -45,11 +52,17 @@ def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int,
 
         add_diff_pair_own_stubs_as_obstacles(
             obstacles, pcb_data, p_net_id, n_net_id, config,
-            exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance
+            exclude_endpoints=stub_endpoints, extra_clearance=extra_clearance,
+            exclude_cells=exclude_cells
         )
 
-    add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id, n_net_id,
-                                            config, extra_clearance)
+    if exempt_capsules is not None:
+        add_diff_pair_own_pads_as_obstacles(
+            obstacles, pcb_data, p_net_id, n_net_id, config,
+            exempt_capsules=exempt_capsules, extra_clearance=extra_clearance)
+    else:
+        add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id, n_net_id,
+                                                config, extra_clearance)
 
 
 def add_own_pads_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,

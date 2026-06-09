@@ -693,7 +693,8 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
                                           p_net_id: int, n_net_id: int,
                                           config: GridRouteConfig,
                                           exclude_endpoints: List[Tuple[float, float]] = None,
-                                          extra_clearance: float = 0.0):
+                                          extra_clearance: float = 0.0,
+                                          exclude_cells: Set[Tuple[int, int]] = None):
     """Add a diff pair's own stub segments as obstacles to prevent centerline from crossing them.
 
     This is different from add_net_stubs_as_obstacles which adds OTHER nets' stubs.
@@ -708,6 +709,9 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         config: Routing configuration
         exclude_endpoints: List of (x, y) positions to exclude from blocking (stub connection points)
         extra_clearance: Additional clearance to add
+        exclude_cells: Additional grid cells to exclude from blocking (e.g.
+            connector corridors of a multi-point leg, so a previous leg's
+            tracks at a shared terminal don't block the opposite-side setback)
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -715,7 +719,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
     # Convert exclude endpoints to grid coordinates with some radius
     # Use max track width for exclusion radius
     max_track_width = config.get_max_track_width()
-    exclude_grid_cells = set()
+    exclude_grid_cells = set(exclude_cells) if exclude_cells else set()
     exclude_radius = max(2, coord.to_grid_dist(max_track_width * 2))  # 2x track width radius
     if exclude_endpoints:
         for ex, ey in exclude_endpoints:
