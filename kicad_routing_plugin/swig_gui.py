@@ -2508,11 +2508,17 @@ class RoutingDialog(wx.Dialog):
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
+        from .board_swaps import apply_swaps_to_board
 
         board = pcbnew.GetBoard()
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return
+
+        # Apply pad/stub net swaps (target swaps) and stub layer modifications
+        # BEFORE adding new tracks - the routes were created assuming these
+        # swaps, so skipping them leaves shorts at swapped pads
+        apply_swaps_to_board(board, results_data)
 
         # Move copper text to silkscreen if enabled
         text_moved = 0

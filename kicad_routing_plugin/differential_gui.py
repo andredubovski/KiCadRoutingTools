@@ -748,11 +748,17 @@ class DifferentialTab(wx.Panel):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
         from .swig_gui import _build_layer_mappings
+        from .board_swaps import apply_swaps_to_board
 
         board = pcbnew.GetBoard()
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return 0, 0
+
+        # Apply pad/stub net swaps (polarity fixes, target swaps) and stub layer
+        # modifications BEFORE adding new tracks - the routes were created
+        # assuming these swaps, so skipping them leaves shorts at swapped pads
+        apply_swaps_to_board(board, results_data)
 
         tracks_added = 0
         vias_added = 0

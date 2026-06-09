@@ -694,10 +694,17 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Write output file or return results for direct application
     if return_results:
-        # Return results data for direct application (e.g., KiCad plugin)
+        # Return results data for direct application (e.g., KiCad plugin).
+        # pad_swaps / target_swap_info / all_segment_modifications must be
+        # applied to the live board just like write_routed_output applies them
+        # to the output file - otherwise polarity/target swaps leave the routed
+        # tracks pointing at pads that still carry the old net.
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'pad_swaps': pad_swaps,
+            'target_swap_info': target_swap_info,
+            'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
         }
