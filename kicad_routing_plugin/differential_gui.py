@@ -458,8 +458,12 @@ class DifferentialTab(wx.Panel):
         options_sizer = wx.StaticBoxSizer(options_box, wx.VERTICAL)
 
         self.fix_polarity_check = wx.CheckBox(self, label="Fix polarity swaps")
-        self.fix_polarity_check.SetValue(True)
-        self.fix_polarity_check.SetToolTip("Swap target pad net assignments if polarity swap is needed")
+        self.fix_polarity_check.SetValue(False)
+        self.fix_polarity_check.SetToolTip(
+            "Swap target pad net assignments if polarity swap is needed (board only - "
+            "schematic must be updated to match). When unchecked, the router instead "
+            "takes the connectors out the opposite side at one end, or skips the pair "
+            "if that's not possible")
         options_sizer.Add(self.fix_polarity_check, 0, wx.ALL, 5)
 
         self.gnd_via_check = wx.CheckBox(self, label="Add GND vias")
