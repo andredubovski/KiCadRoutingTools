@@ -590,6 +590,31 @@ def collapse_appendices(segments: List[Segment], existing_segments: List[Segment
     return result_segments
 
 
+def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
+    """Swap the net assignments of two pads in pcb_data (net_id, net_name, and
+    membership in pads_by_net / Net.pads).
+
+    Used by polarity fixes and target swaps so the in-memory state matches the
+    swap that is later applied to the output file or live board.
+    """
+    net_a, net_b = pad_a.net_id, pad_b.net_id
+    pad_a.net_id, pad_b.net_id = net_b, net_a
+    pad_a.net_name, pad_b.net_name = pad_b.net_name, pad_a.net_name
+
+    for pad, old_net, new_net in ((pad_a, net_a, net_b), (pad_b, net_b, net_a)):
+        old_list = pcb_data.pads_by_net.get(old_net)
+        if old_list and pad in old_list:
+            old_list.remove(pad)
+        pcb_data.pads_by_net.setdefault(new_net, []).append(pad)
+
+        old_net_obj = pcb_data.nets.get(old_net)
+        if old_net_obj and pad in old_net_obj.pads:
+            old_net_obj.pads.remove(pad)
+        new_net_obj = pcb_data.nets.get(new_net)
+        if new_net_obj is not None:
+            new_net_obj.pads.append(pad)
+
+
 def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False) -> None:
     """Add routed segments and vias to PCB data for subsequent routes to see."""
     new_segments = result['new_segments']

@@ -428,6 +428,9 @@ def _detect_polarity(simplified_path, coord,
     if polarity_swap_needed and config.fix_polarity:
         print(f"  Polarity swap needed - will swap target pad and stub nets in output")
         polarity_fixed = True
+    elif polarity_swap_needed:
+        print(f"  WARNING: Polarity swap needed but polarity fixing is disabled - "
+              f"P/N connectors will cross at the target and short the pair")
 
     # Always use source polarity
     p_sign = src_p_sign

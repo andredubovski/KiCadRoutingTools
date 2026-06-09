@@ -12,6 +12,7 @@ from routing_config import DiffPairNet
 from routing_utils import pos_key
 from connectivity import find_connected_segment_positions
 from net_queries import find_pad_nearest_to_position
+from pcb_modification import swap_pad_nets_in_pcb_data
 
 
 def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
@@ -86,6 +87,12 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
             'p_stub_positions': p_stub_positions,
             'n_stub_positions': n_stub_positions,
         })
+        # Swap the pad net assignments in pcb_data too, so in-memory state
+        # matches the swap that will be applied to the output file / board.
+        # Without this, appendix cleanup in add_route_to_pcb_data sees the
+        # route's connectors ending on a foreign-net pad and collapses them,
+        # leaving gaps at the swapped pads.
+        swap_pad_nets_in_pcb_data(pcb_data, pad_p, pad_n)
         print(f"  Polarity fixed: will swap nets of {pad_p.component_ref}:{pad_p.pad_number} <-> {pad_n.component_ref}:{pad_n.pad_number}")
         return True
     else:
