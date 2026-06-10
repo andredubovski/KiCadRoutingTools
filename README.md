@@ -56,7 +56,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - **Disconnected plane region repair** - After power planes are created, regions may be effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects disconnected regions and routes wide, short tracks between them to ensure electrical continuity
 - **GND return via placement** - Automatically places GND vias near signal vias for return current paths. Searches from minimum viable distance outward (24 angles, fine step), placing GND vias as close as possible while respecting track clearances. Through-hole GND pads count as existing return paths. Use `--add-gnd-vias` with route_planes.py
 - **Real-time visualization** - Watch the A* search explore the grid live with the optional [PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`), with pause/step, zoom/pan, per-layer filtering, and speed control
-- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
+- **AI-powered high-speed net analysis** - Use the `/find-high-speed-nets` skill to identify which nets carry high-speed signals. Looks up component datasheets via WebSearch to find max interface frequencies and rise times, traces signals through series passives, and recommends `--gnd-via-distance` values based on the fastest signals on the board. See [Claude Skills](docs/claude-skills.md) and the [GND return via distance guidance](#gnd-return-via-distance-guidance) in the planes documentation
 
 ## Quick Start
 
@@ -144,6 +144,8 @@ Other useful skills:
 > /diagnose-routing-failures my_board.kicad_pcb /tmp/route_output.txt  # Root-cause failed routes, get a retry command
 > /review-routed-board my_board_routed.kicad_pcb             # Post-route QA: DRC, connectivity, length match, GND vias
 ```
+
+See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -483,7 +485,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
-| [High-Speed Net Analysis](#6-high-speed-net-analysis) | Signal speed classification, GND return via recommendations |
+| [Claude Skills](docs/claude-skills.md) | All seven AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, failure diagnosis, board review |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
