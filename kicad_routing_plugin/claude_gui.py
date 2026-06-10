@@ -398,8 +398,9 @@ class ClaudeTab(wx.Panel):
         sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
         ctrl_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Action buttons
+        # Planning: the headline action (bold) with its Cancel right under it
         self.plan_btn = wx.Button(self, label="Plan Routing with Claude")
+        self.plan_btn.SetFont(self.plan_btn.GetFont().Bold())
         self.plan_btn.SetToolTip(
             "Run the /plan-pcb-routing skill headless on the current board. The "
             "plan fills the tabs' parameter fields and appears in the step list "
@@ -408,6 +409,15 @@ class ClaudeTab(wx.Panel):
         self.plan_btn.Enable(self._claude_path is not None and self.routing_dialog is not None)
         ctrl_sizer.Add(self.plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.cancel_btn = wx.Button(self, label="Cancel")
+        self.cancel_btn.SetToolTip("Cancel the running Claude analysis")
+        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
+        self.cancel_btn.Disable()
+        ctrl_sizer.Add(self.cancel_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        ctrl_sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        # Execution: run/stop the planned steps
         self.run_plan_btn = wx.Button(self, label="Run Selected Steps")
         self.run_plan_btn.SetToolTip(
             "Execute the checked steps in order through the tabs' own routing "
@@ -421,12 +431,6 @@ class ClaudeTab(wx.Panel):
         self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
         self.stop_plan_btn.Disable()
         ctrl_sizer.Add(self.stop_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
-
-        self.cancel_btn = wx.Button(self, label="Cancel")
-        self.cancel_btn.SetToolTip("Cancel the running Claude analysis")
-        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
-        self.cancel_btn.Disable()
-        ctrl_sizer.Add(self.cancel_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         # Activity: elapsed time + pulsing gauge while Claude runs
         self.elapsed_label = wx.StaticText(self, label="")
