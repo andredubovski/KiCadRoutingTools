@@ -78,6 +78,7 @@ ROOT_EXCLUDE = {
 IGNORE_PATTERNS = shutil.ignore_patterns(
     ".git", ".github", ".gitignore", ".DS_Store",
     "__pycache__", "*.pyc", "dist",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv",
     "target",  # rust_router/target/ is the cargo build dir
     "grid_router.so", "grid_router.pyd", "grid_router.abi3.so",
     "Cargo.lock",
