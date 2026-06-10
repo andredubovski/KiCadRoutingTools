@@ -337,15 +337,19 @@ class ClaudeSkillDialog(wx.Dialog):
 class ClaudeTab(wx.Panel):
     """Claude tab: run AI skills headless and bring results into the GUI."""
 
-    def __init__(self, parent, board_filename, log_callback=None):
+    def __init__(self, parent, board_filename, log_callback=None, routing_dialog=None):
         super().__init__(parent)
         self.board_filename = board_filename
         self.log_callback = log_callback
+        self.routing_dialog = routing_dialog
         self._elapsed_timer = wx.Timer(self)
         self._elapsed_seconds = 0
         self.Bind(wx.EVT_TIMER, self._on_elapsed_tick, self._elapsed_timer)
         self._claude_path = find_claude()
         self._runner = None
+        self._pending_kind = None  # 'test' or 'plan' - what the runner is doing
+        self._plan_steps = []
+        self._plan_executor = None
         if self._claude_path:
             self._runner = ClaudeSkillRunner(
                 self._claude_path, self._append_transcript, self._on_done)
@@ -385,8 +389,17 @@ class ClaudeTab(wx.Panel):
         sel_sizer.Add(self.effort_choice, 0)
         sizer.Add(sel_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # Test button row
+        # Action button row
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.plan_btn = wx.Button(self, label="Plan Routing with Claude")
+        self.plan_btn.SetToolTip(
+            "Run the /plan-pcb-routing skill headless on the current board. The "
+            "plan fills the tabs' parameter fields and appears below as a step "
+            "list you can review, edit (in each tab), select, and run.")
+        self.plan_btn.Bind(wx.EVT_BUTTON, self._on_plan)
+        self.plan_btn.Enable(self._claude_path is not None and self.routing_dialog is not None)
+        btn_sizer.Add(self.plan_btn, 0, wx.RIGHT, 5)
+
         self.test_btn = wx.Button(self, label="Test: Recommend Stackup")
         self.test_btn.SetToolTip(
             f"Run the /{_TEST_SKILL} skill headless on the current board and show "
@@ -403,6 +416,30 @@ class ClaudeTab(wx.Panel):
         self.elapsed_label = wx.StaticText(self, label="")
         btn_sizer.Add(self.elapsed_label, 0, wx.ALIGN_CENTER_VERTICAL)
         sizer.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        # Plan step list + run controls
+        plan_row = wx.BoxSizer(wx.HORIZONTAL)
+        plan_row.Add(wx.StaticText(self, label="Plan steps:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        self.run_plan_btn = wx.Button(self, label="Run Selected Steps")
+        self.run_plan_btn.SetToolTip(
+            "Execute the checked steps in order through the tabs' own routing "
+            "machinery, updating the list with check marks as each completes.")
+        self.run_plan_btn.Bind(wx.EVT_BUTTON, self._on_run_selected)
+        self.run_plan_btn.Disable()
+        plan_row.Add(self.run_plan_btn, 0, wx.RIGHT, 5)
+        self.stop_plan_btn = wx.Button(self, label="Stop")
+        self.stop_plan_btn.SetToolTip("Stop after the currently running step finishes")
+        self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
+        self.stop_plan_btn.Disable()
+        plan_row.Add(self.stop_plan_btn, 0)
+        sizer.Add(plan_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.plan_list = wx.CheckListBox(self, choices=[])
+        self.plan_list.SetToolTip(
+            "The routing plan from Claude. Check the steps to run; review or "
+            "tweak each step's parameters on its own tab before running.")
+        sizer.Add(self.plan_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Activity gauge (pulses while Claude runs)
         self.gauge = wx.Gauge(self, range=100)
@@ -457,38 +494,70 @@ class ClaudeTab(wx.Panel):
 
     # ------------------------------------------------------------------ run
 
-    def _on_run_test(self, event):
-        if self._runner is None or self._runner.is_running():
-            return
+    def _board_path_or_warn(self):
         board = self.board_filename
         if not board or not os.path.isfile(board):
             wx.MessageBox(
                 "Board file not found on disk. Save the board first so the "
                 f"analysis sees the current state.\n\nLooked for: {board}",
                 "Claude", wx.OK | wx.ICON_WARNING)
-            return
+            return None
+        return os.path.abspath(board)
 
-        prompt = (
-            f"/{_TEST_SKILL} {os.path.abspath(board)} — analysis only, do not modify "
-            "any files. After the report, end your reply with exactly one line of "
-            "the form RESULT=<copper layer count you recommend> (a bare integer), "
-            "e.g. RESULT=4"
-        )
-
+    def _start_run(self, prompt, kind, intro):
+        """Start a headless run (kind: 'test' or 'plan') with shared UI state."""
+        self._pending_kind = kind
         self.test_btn.Disable()
+        self.plan_btn.Disable()
+        self.run_plan_btn.Disable()
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
-        self.output_ctrl.SetValue(f"Running /{_TEST_SKILL} on {os.path.basename(board)} ...\n"
-                                  "(local analysis; typically a few minutes)\n\n")
+        self.output_ctrl.SetValue(intro + "\n\n")
         self._elapsed_seconds = 0
         self.elapsed_label.SetLabel("0s")
         self._elapsed_timer.Start(1000)
         model = self.get_model_value()
         effort = self.get_effort_value()
-        self._log(f"Claude: running /{_TEST_SKILL} on {board}"
+        self._log(f"Claude: {intro.splitlines()[0]}"
                   + (f" | model={model}" if model else "")
                   + (f" | effort={effort}" if effort else ""))
         self._runner.run(prompt, model=model, effort=effort)
+
+    def _on_run_test(self, event):
+        if self._runner is None or self._runner.is_running():
+            return
+        board = self._board_path_or_warn()
+        if board is None:
+            return
+        prompt = (
+            f"/{_TEST_SKILL} {board} — analysis only, do not modify "
+            "any files. After the report, end your reply with exactly one line of "
+            "the form RESULT=<copper layer count you recommend> (a bare integer), "
+            "e.g. RESULT=4"
+        )
+        self._start_run(prompt, "test",
+                        f"Running /{_TEST_SKILL} on {os.path.basename(board)} ...\n"
+                        "(local analysis; typically a few minutes)")
+
+    def _on_plan(self, event):
+        if self._runner is None or self._runner.is_running():
+            return
+        if self._plan_executor is not None:
+            wx.MessageBox("A plan is currently executing. Stop it first.",
+                          "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = self._board_path_or_warn()
+        if board is None:
+            return
+        from .claude_plan import PLAN_RESULT_SCHEMA
+        prompt = (
+            f"/plan-pcb-routing {board} — analysis and planning only: do not "
+            "execute any routing commands and do not modify any files. After the "
+            f"report, end your reply with exactly one line of the form {PLAN_RESULT_SCHEMA}"
+        )
+        self._start_run(prompt, "plan",
+                        f"Running /plan-pcb-routing on {os.path.basename(board)} ...\n"
+                        "(board analysis + datasheet lookups; typically several minutes)")
 
     def _append_transcript(self, text):
         self.output_ctrl.AppendText(text)
@@ -497,7 +566,10 @@ class ClaudeTab(wx.Panel):
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
         self.test_btn.Enable()
+        self.plan_btn.Enable(self.routing_dialog is not None)
+        self.run_plan_btn.Enable(bool(self._plan_steps))
         self.cancel_btn.Disable()
+        kind, self._pending_kind = self._pending_kind, None
 
         if error:
             self.output_ctrl.AppendText(f"\n{error}\n")
@@ -508,11 +580,101 @@ class ClaudeTab(wx.Panel):
         self.output_ctrl.AppendText(f"\n--- done in {self.elapsed_label.GetLabel()} ---\n")
         parsed = extract_result_line(result_text)
         if parsed is not None:
-            self.parsed_ctrl.SetValue(parsed)
-            self._log(f"Claude: done in {self._elapsed_seconds}s, RESULT={parsed}")
+            self.parsed_ctrl.SetValue(parsed if len(parsed) < 200 else parsed[:200] + "...")
+            self._log(f"Claude: done in {self._elapsed_seconds}s")
         else:
             self.parsed_ctrl.SetValue("(no RESULT= line found)")
             self._log(f"Claude: done in {self._elapsed_seconds}s, no RESULT= line")
+        if kind == "plan":
+            self._handle_plan_result(parsed)
+
+    # ------------------------------------------------------------- planning
+
+    def _handle_plan_result(self, value):
+        """Parse the plan JSON, fill the tabs, and populate the step list."""
+        from .claude_plan import parse_plan_result, step_label, \
+            apply_step_params, apply_step_selection
+
+        if value is None:
+            self.output_ctrl.AppendText("\nNo RESULT= plan line found - nothing to apply.\n")
+            return
+        steps, errors = parse_plan_result(value)
+        for message in errors:
+            self.output_ctrl.AppendText(f"plan: {message}\n")
+            self._log(f"Claude plan: {message}")
+        if steps is None:
+            self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
+            return
+
+        self._plan_steps = steps
+        self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
+        self.plan_list.SetCheckedItems(range(len(steps)))
+
+        # Fill the tabs so each step can be reviewed in its native controls.
+        # (Selections of same-action steps overwrite each other here; they are
+        # re-applied per step at execution time.)
+        notes = []
+        for step in steps:
+            try:
+                notes += apply_step_params(step, self.routing_dialog)
+                notes += apply_step_selection(step, self.routing_dialog)
+            except Exception as e:
+                notes.append(f"applying {step['action']}: {e}")
+        for note in notes:
+            self.output_ctrl.AppendText(f"plan: {note}\n")
+            self._log(f"Claude plan: {note}")
+        self.output_ctrl.AppendText(
+            f"\nPlan loaded: {len(steps)} step(s). Parameters were applied to the "
+            "tabs - review/tweak them there, uncheck steps you don't want, then "
+            "press 'Run Selected Steps'.\n")
+        self.run_plan_btn.Enable()
+        self._log(f"Claude plan: {len(steps)} steps loaded")
+
+    def _on_run_selected(self, event):
+        from .claude_plan import PlanExecutor
+
+        if self._plan_executor is not None or not self._plan_steps:
+            return
+        if self._runner is not None and self._runner.is_running():
+            return
+        indices = list(self.plan_list.GetCheckedItems())
+        if not indices:
+            wx.MessageBox("No steps are checked.", "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        self.run_plan_btn.Disable()
+        self.plan_btn.Disable()
+        self.stop_plan_btn.Enable()
+        self._plan_executor = PlanExecutor(
+            self.routing_dialog, self._plan_steps, indices,
+            on_status=self._on_plan_step_status,
+            on_finished=self._on_plan_finished,
+            log=self._log)
+        self._plan_executor.start()
+
+    def _on_stop_plan(self, event):
+        if self._plan_executor is not None:
+            self._plan_executor.stop()
+            self.stop_plan_btn.Disable()
+            self._log("Claude plan: stop requested (after current step)")
+
+    def _on_plan_step_status(self, index, status):
+        from .claude_plan import step_label
+        mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] "}[status]
+        self.plan_list.SetString(index, mark + step_label(index + 1, self._plan_steps[index]))
+        if status == "done":
+            self.plan_list.Check(index, False)
+
+    def _on_plan_finished(self, completed, aborted_reason):
+        self._plan_executor = None
+        self.stop_plan_btn.Disable()
+        self.run_plan_btn.Enable(bool(self._plan_steps))
+        self.plan_btn.Enable()
+        if aborted_reason:
+            message = f"Claude plan: stopped after {completed} step(s): {aborted_reason}"
+        else:
+            message = f"Claude plan: all {completed} selected step(s) completed"
+        self.output_ctrl.AppendText(f"\n{message}\n")
+        self._log(message)
 
     # -------------------------------------------------------------- helpers
 

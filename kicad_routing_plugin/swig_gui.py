@@ -1224,6 +1224,7 @@ class RoutingDialog(wx.Dialog):
             self.notebook,
             self.board_filename,
             log_callback=self._append_log,
+            routing_dialog=self,
         )
 
     def _create_differential_tab(self):
