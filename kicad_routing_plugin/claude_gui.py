@@ -140,7 +140,9 @@ class ClaudeTab(wx.Panel):
         )
         cmd = [
             self._claude_path, "-p", prompt,
-            "--output-format", "json",
+            # stream-json (requires --verbose in -p mode) emits one JSON event
+            # per line as Claude works, so we can show live progress.
+            "--output-format", "stream-json", "--verbose",
             "--allowedTools", "Read,Glob,Grep,Bash,WebSearch",
         ]
 
@@ -149,7 +151,7 @@ class ClaudeTab(wx.Panel):
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
         self.output_ctrl.SetValue(f"Running /{_TEST_SKILL} on {os.path.basename(board)} ...\n"
-                                  "(local analysis; typically a minute or two)\n")
+                                  "(local analysis; typically a few minutes)\n\n")
         self._elapsed_seconds = 0
         self.elapsed_label.SetLabel("0s")
         self._elapsed_timer.Start(1000)
@@ -159,7 +161,8 @@ class ClaudeTab(wx.Panel):
         self._worker.start()
 
     def _run_claude(self, cmd):
-        """Background thread: run the claude CLI and post results to the GUI."""
+        """Background thread: stream claude CLI events and post them to the GUI."""
+        final_event = None
         try:
             kwargs = {}
             if os.name == "nt":
@@ -170,9 +173,32 @@ class ClaudeTab(wx.Panel):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
+                bufsize=1,  # line-buffered: one stream-json event per line
                 **kwargs,
             )
-            stdout, stderr = self._process.communicate()
+            # Drain stderr concurrently so a chatty stderr can't fill its
+            # pipe buffer and deadlock the stdout loop below.
+            stderr_chunks = []
+            stderr_thread = threading.Thread(
+                target=lambda p: stderr_chunks.append(p.stderr.read()),
+                args=(self._process,), daemon=True)
+            stderr_thread.start()
+            for line in self._process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if event.get("type") == "result":
+                    final_event = event
+                else:
+                    wx.CallAfter(self._on_stream_event, event)
+            self._process.wait()
+            stderr_thread.join(timeout=5)
+            stderr = "".join(stderr_chunks)
             returncode = self._process.returncode
         except Exception as e:
             wx.CallAfter(self._on_finished, None, f"Failed to launch claude: {e}", -1)
@@ -182,28 +208,90 @@ class ClaudeTab(wx.Panel):
         if self._cancel_requested:
             wx.CallAfter(self._on_finished, None, "Cancelled.", returncode)
         else:
-            wx.CallAfter(self._on_finished, stdout, stderr, returncode)
+            wx.CallAfter(self._on_finished, final_event, stderr, returncode)
+
+    # ----------------------------------------------------------- streaming
+
+    def _on_stream_event(self, event):
+        """Render one stream-json event as a live transcript line."""
+        etype = event.get("type")
+        if etype == "system" and event.get("subtype") == "init":
+            self.output_ctrl.AppendText("Claude session started.\n\n")
+        elif etype == "assistant":
+            for block in event.get("message", {}).get("content", []):
+                btype = block.get("type")
+                if btype == "text" and block.get("text", "").strip():
+                    self.output_ctrl.AppendText(block["text"].rstrip() + "\n")
+                elif btype == "tool_use":
+                    summary = self._summarize_tool_use(
+                        block.get("name", "?"), block.get("input", {}))
+                    self.output_ctrl.AppendText(f"  -> {summary}\n")
+        elif etype == "user":
+            content = event.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        text = self._tool_result_text(block)
+                        mark = "x" if block.get("is_error") else "ok"
+                        self.output_ctrl.AppendText(f"     [{mark}] {text}\n")
+
+    @staticmethod
+    def _summarize_tool_use(name, tool_input):
+        """One-line human-readable summary of a tool call."""
+        if name == "Bash":
+            detail = tool_input.get("description") or tool_input.get("command", "")
+        elif name in ("Read", "Write", "Edit"):
+            detail = tool_input.get("file_path", "")
+        elif name in ("Glob", "Grep"):
+            detail = tool_input.get("pattern", "")
+        elif name == "WebSearch":
+            detail = tool_input.get("query", "")
+        elif name == "WebFetch":
+            detail = tool_input.get("url", "")
+        else:
+            detail = json.dumps(tool_input)
+        detail = " ".join(str(detail).split())
+        if len(detail) > 120:
+            detail = detail[:120] + "..."
+        return f"{name}: {detail}"
+
+    @staticmethod
+    def _tool_result_text(block, max_len=120):
+        """First line of a tool result, truncated."""
+        content = block.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text")
+        first_line = str(content).strip().splitlines()[0] if str(content).strip() else "(no output)"
+        if len(first_line) > max_len:
+            first_line = first_line[:max_len] + "..."
+        return first_line
 
     # ------------------------------------------------------------- results
 
-    def _on_finished(self, stdout, stderr, returncode):
+    def _on_finished(self, final_event, stderr, returncode):
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
         self.test_btn.Enable()
         self.cancel_btn.Disable()
 
-        if stdout is None:  # launch failure or cancel
-            self.output_ctrl.AppendText(f"\n{stderr}\n")
-            self._log(f"Claude: {stderr}")
+        if final_event is None:
+            # Launch failure, cancel, or claude died before emitting a result
+            message = (stderr or "").strip() or f"claude exited with code {returncode}"
+            self.output_ctrl.AppendText(f"\n{message}\n")
+            self._log(f"Claude: {message}")
             return
 
-        result_text, error = self._parse_cli_output(stdout, stderr, returncode)
-        if error:
+        if final_event.get("is_error"):
+            error = str(final_event.get("result", "unknown error from claude"))
             self.output_ctrl.AppendText(f"\nERROR: {error}\n")
             self._log(f"Claude: error: {error}")
             return
 
-        self.output_ctrl.SetValue(result_text)
+        # The streamed transcript already shows the full report; just close out.
+        self.output_ctrl.AppendText(f"\n--- done in {self.elapsed_label.GetLabel()} ---\n")
+        result_text = str(final_event.get("result", ""))
         parsed = self._extract_result_line(result_text)
         if parsed is not None:
             self.parsed_ctrl.SetValue(parsed)
@@ -211,27 +299,6 @@ class ClaudeTab(wx.Panel):
         else:
             self.parsed_ctrl.SetValue("(no RESULT= line found)")
             self._log(f"Claude: done in {self._elapsed_seconds}s, no RESULT= line")
-
-    @staticmethod
-    def _parse_cli_output(stdout, stderr, returncode):
-        """Parse `claude -p --output-format json` output.
-
-        Returns (result_text, error): exactly one is non-None.
-        """
-        if returncode != 0 and not stdout.strip():
-            return None, (stderr.strip() or f"claude exited with code {returncode}")
-        try:
-            data = json.loads(stdout)
-        except (json.JSONDecodeError, ValueError):
-            # Not JSON despite --output-format json; show raw output rather
-            # than nothing (older CLI versions, or a crash banner).
-            text = stdout.strip()
-            if text:
-                return text, None
-            return None, (stderr.strip() or "empty output from claude")
-        if data.get("is_error"):
-            return None, str(data.get("result", "unknown error from claude"))
-        return str(data.get("result", "")), None
 
     @staticmethod
     def _extract_result_line(text):
