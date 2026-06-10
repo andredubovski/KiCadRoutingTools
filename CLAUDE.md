@@ -1,5 +1,12 @@
 # Project Notes for Claude
 
+## Running Python
+
+Invoke Python as `python3` (bare `python` does not exist on macOS and many
+Linux distros). On Windows, if `python3` is missing, fall back to `py -3`
+or `python` — don't retry blindly. Add `-X utf8` when a script prints
+special characters (Ω etc.) to avoid Windows encoding errors.
+
 ## Building the Rust Router
 
 Use `build_router.py` to build the Rust router:
