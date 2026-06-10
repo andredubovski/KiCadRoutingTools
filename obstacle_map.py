@@ -1287,8 +1287,15 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Expand wildcard layers like "*.Cu" to actual routing layers
     expanded_layers = expand_pad_layers(pad.layers, config.layers)
 
+    # Diff pair routing (extra_clearance > 0) generates the P/N tracks as
+    # sub-grid offsets from the centerline, which adds a few um of deviation
+    # on top of grid discretization - use a larger corner buffer so diagonal
+    # passes by round pads cannot shave below the clearance
+    corner_buffer = config.grid_step * 0.75 if extra_clearance > 0 else None
+
     # Use shared utility for consistent pad blocking
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin,
+                                                   config.grid_step, corner_radius, corner_buffer):
         if skip_cell is not None and skip_cell(cell_gx, cell_gy):
             continue
         for layer in expanded_layers:
@@ -1301,7 +1308,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = config.via_size / 2 + clearance + extra_clearance
-        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin, config.grid_step, corner_radius):
+        for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, via_margin,
+                                                       config.grid_step, corner_radius, corner_buffer):
             if skip_cell is not None and skip_cell(cell_gx, cell_gy):
                 continue
             obstacles.add_blocked_via(cell_gx, cell_gy)
