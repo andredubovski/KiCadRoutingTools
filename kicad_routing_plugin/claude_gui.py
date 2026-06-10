@@ -432,6 +432,27 @@ class ClaudeTab(wx.Panel):
         self.stop_plan_btn.Disable()
         ctrl_sizer.Add(self.stop_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        ctrl_sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        # Post-route skills: QA sign-off and failure diagnosis
+        self.review_btn = wx.Button(self, label="Review Routed Board")
+        self.review_btn.SetToolTip(
+            "Run the /review-routed-board skill: DRC, connectivity, and orphan-stub "
+            "checks, match-group and GND-via coverage review. The report shows in "
+            "the transcript with a PASS/FAIL verdict.")
+        self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
+        self.review_btn.Enable(self._claude_path is not None)
+        ctrl_sizer.Add(self.review_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        self.diagnose_btn = wx.Button(self, label="Diagnose Routing Failures")
+        self.diagnose_btn.SetToolTip(
+            "Run the /diagnose-routing-failures skill on the board plus this "
+            "session's Log tab content: root-causes failed routes and recommends "
+            "a targeted retry. Run a routing operation first.")
+        self.diagnose_btn.Bind(wx.EVT_BUTTON, self._on_diagnose)
+        self.diagnose_btn.Enable(self._claude_path is not None)
+        ctrl_sizer.Add(self.diagnose_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         # Activity: elapsed time + pulsing gauge while Claude runs
         self.elapsed_label = wx.StaticText(self, label="")
         ctrl_sizer.Add(self.elapsed_label, 0, wx.LEFT | wx.RIGHT, 5)
@@ -505,6 +526,8 @@ class ClaudeTab(wx.Panel):
         """Start a headless run (kind names what the result is for) with shared UI state."""
         self._pending_kind = kind
         self.plan_btn.Disable()
+        self.review_btn.Disable()
+        self.diagnose_btn.Disable()
         self.run_plan_btn.Disable()
         self.cancel_btn.Enable()
         self.parsed_ctrl.SetValue("")
@@ -518,6 +541,49 @@ class ClaudeTab(wx.Panel):
                   + (f" | model={model}" if model else "")
                   + (f" | effort={effort}" if effort else ""))
         self._runner.run(prompt, model=model, effort=effort)
+
+    def _on_review(self, event):
+        if self._runner is None or self._runner.is_running():
+            return
+        board = self._board_path_or_warn()
+        if board is None:
+            return
+        prompt = (
+            f"/review-routed-board {board} — analysis only, do not modify any "
+            "files. After the report, end your reply with exactly one line of the "
+            "form RESULT=PASS or RESULT=FAIL (the overall sign-off verdict)"
+        )
+        self._start_run(prompt, "review",
+                        f"Running /review-routed-board on {os.path.basename(board)} ...\n"
+                        "(DRC + connectivity checkers + review; typically a few minutes)")
+
+    def _on_diagnose(self, event):
+        if self._runner is None or self._runner.is_running():
+            return
+        board = self._board_path_or_warn()
+        if board is None:
+            return
+        log_text = ""
+        if self.routing_dialog is not None and hasattr(self.routing_dialog, "log_text"):
+            log_text = self.routing_dialog.log_text.GetValue()
+        if not log_text.strip():
+            wx.MessageBox(
+                "The Log tab is empty. Run a routing operation first so there "
+                "is a log to diagnose.", "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        import tempfile
+        fd, log_path = tempfile.mkstemp(prefix="kicadrt_gui_log_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
+            f.write(log_text)
+        prompt = (
+            f"/diagnose-routing-failures {board} — the routing log from this GUI "
+            f"session is at {log_path}. Analysis only, do not modify any files. "
+            "After the report, end your reply with exactly one line of the form "
+            "RESULT=<one-line recommended fix, or 'no failures found'>"
+        )
+        self._start_run(prompt, "diagnose",
+                        f"Running /diagnose-routing-failures on {os.path.basename(board)} "
+                        "+ the Log tab content ...\n(log analysis; typically a few minutes)")
 
     def _on_plan(self, event):
         if self._runner is None or self._runner.is_running():
@@ -546,6 +612,8 @@ class ClaudeTab(wx.Panel):
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
         self.plan_btn.Enable(self.routing_dialog is not None)
+        self.review_btn.Enable()
+        self.diagnose_btn.Enable()
         self.run_plan_btn.Enable(bool(self._plan_steps))
         self.cancel_btn.Disable()
         kind, self._pending_kind = self._pending_kind, None

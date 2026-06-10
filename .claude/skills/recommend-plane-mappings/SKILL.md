@@ -33,7 +33,7 @@ Use pad counts plus the `/analyze-power-nets` approach (datasheet lookup for sup
 pins and current estimates) rather than name matching alone:
 
 ```bash
-python -X utf8 list_nets.py path/to/file.kicad_pcb --power
+python3 -X utf8 list_nets.py path/to/file.kicad_pcb --power
 ```
 
 - **GND** (or the dominant ground net): always plane-worthy.

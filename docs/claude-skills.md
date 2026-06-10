@@ -14,6 +14,27 @@ claude
 
 Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, `/identify-diff-pairs`, `/recommend-stackup`, `/recommend-plane-mappings`) use WebSearch and can take a few minutes on boards with many unique ICs.
 
+## Plugin GUI Integration
+
+All eight skills are reachable from the plugin's routing dialog (the GUI spawns
+`claude` headless with the working directory set to the plugin root, streams a live
+transcript, and parses a machine-readable `RESULT=` last line back into controls):
+
+| Where | Button | Skill | What it fills / shows |
+|-------|--------|-------|------------------------|
+| Claude tab | **Plan Routing with Claude** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
+| Claude tab | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
+| Claude tab | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
+| Basic tab (Layers) | **Check Stackup (Claude)** | `/recommend-stackup` | Stackup report; recommended layer count logged |
+| Basic tab (Options) | **Ask Claude** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
+| Differential tab | **Ask Claude** | `/identify-diff-pairs` | Checks confirmed pairs, unchecks name-matching false positives; unconventional pairs reported in the log |
+| Planes tab | **Ask Claude** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
+| Planes tab | **Ask Claude** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
+
+The Claude tab's **Model** and **Effort** dropdowns apply to every button above and
+persist with the other dialog settings. Each run shows a startup header (Claude Code
+version, model, discovered skills) so you can confirm what actually ran.
+
 ## The Skills
 
 | Skill | Purpose | Main output |

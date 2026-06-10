@@ -1331,7 +1331,13 @@ class RoutingDialog(wx.Dialog):
             get_connectivity_check=self._get_connectivity_check_fn,
             get_routing_config=get_routing_config,
             append_log=self._append_log,
-            sync_pcb_data_callback=sync_pcb_data
+            sync_pcb_data_callback=sync_pcb_data,
+            # Deferred: the Claude tab is created after this tab, but the
+            # callback only fires on button click.
+            get_claude_params=lambda: {
+                'model': self.claude_tab.get_model_value(),
+                'effort': self.claude_tab.get_effort_value(),
+            }
         )
         return self.differential_tab
 
