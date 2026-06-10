@@ -354,6 +354,21 @@ class ClaudeTab(wx.Panel):
     def _create_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
+        # Top area: planned steps on the left, controls box on the right
+        top_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        steps_box = wx.StaticBox(self, label="Planned Steps")
+        steps_sizer = wx.StaticBoxSizer(steps_box, wx.VERTICAL)
+        self.plan_list = wx.CheckListBox(self, choices=[])
+        self.plan_list.SetToolTip(
+            "The routing plan from Claude. Check the steps to run; review or "
+            "tweak each step's parameters on its own tab before running.")
+        steps_sizer.Add(self.plan_list, 1, wx.EXPAND | wx.ALL, 3)
+        top_sizer.Add(steps_sizer, 1, wx.EXPAND | wx.RIGHT, 8)
+
+        ctrl_box = wx.StaticBox(self, label="Claude")
+        ctrl_sizer = wx.StaticBoxSizer(ctrl_box, wx.VERTICAL)
+
         # Availability status
         if self._claude_path:
             status = f"Claude Code CLI found: {self._claude_path}"
@@ -361,80 +376,70 @@ class ClaudeTab(wx.Panel):
             status = ("Claude Code CLI not found. Install it (https://claude.com/claude-code) "
                       "and make sure `claude` is on your PATH, then reopen this dialog.")
         self.status_label = wx.StaticText(self, label=status)
-        self.status_label.Wrap(720)
-        sizer.Add(self.status_label, 0, wx.ALL, 8)
+        self.status_label.Wrap(280)
+        ctrl_sizer.Add(self.status_label, 0, wx.ALL, 5)
 
-        # Model / effort selection row
-        sel_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sel_sizer.Add(wx.StaticText(self, label="Model:"), 0,
-                      wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        # Model / effort selection
+        sel_grid = wx.FlexGridSizer(cols=2, hgap=5, vgap=5)
+        sel_grid.AddGrowableCol(1)
+        sel_grid.Add(wx.StaticText(self, label="Model:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.model_choice = wx.Choice(self, choices=[label for label, _ in MODEL_CHOICES])
         self.model_choice.SetSelection(0)
         self.model_choice.SetToolTip(
             "Model for the headless run (--model). Default = your claude CLI default. "
             "Bigger models give deeper analysis; Haiku is fastest/cheapest.")
-        sel_sizer.Add(self.model_choice, 0, wx.RIGHT, 15)
-
-        sel_sizer.Add(wx.StaticText(self, label="Effort:"), 0,
-                      wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        sel_grid.Add(self.model_choice, 0, wx.EXPAND)
+        sel_grid.Add(wx.StaticText(self, label="Effort:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.effort_choice = wx.Choice(self, choices=EFFORT_CHOICES)
         self.effort_choice.SetSelection(0)
         self.effort_choice.SetToolTip(
             "Reasoning effort (--effort): low/medium/high/xhigh/max. Higher = more "
             "thorough but slower and costlier. Not supported on Haiku.")
-        sel_sizer.Add(self.effort_choice, 0)
-        sizer.Add(sel_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
+        ctrl_sizer.Add(sel_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Action button row
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Action buttons
         self.plan_btn = wx.Button(self, label="Plan Routing with Claude")
         self.plan_btn.SetToolTip(
             "Run the /plan-pcb-routing skill headless on the current board. The "
-            "plan fills the tabs' parameter fields and appears below as a step "
-            "list you can review, edit (in each tab), select, and run.")
+            "plan fills the tabs' parameter fields and appears in the step list "
+            "you can review, edit (in each tab), select, and run.")
         self.plan_btn.Bind(wx.EVT_BUTTON, self._on_plan)
         self.plan_btn.Enable(self._claude_path is not None and self.routing_dialog is not None)
-        btn_sizer.Add(self.plan_btn, 0, wx.RIGHT, 5)
+        ctrl_sizer.Add(self.plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        self.cancel_btn = wx.Button(self, label="Cancel")
-        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
-        self.cancel_btn.Disable()
-        btn_sizer.Add(self.cancel_btn, 0, wx.RIGHT, 10)
-
-        self.elapsed_label = wx.StaticText(self, label="")
-        btn_sizer.Add(self.elapsed_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(btn_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
-
-        # Plan step list + run controls
-        plan_row = wx.BoxSizer(wx.HORIZONTAL)
-        plan_row.Add(wx.StaticText(self, label="Plan steps:"), 0,
-                     wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         self.run_plan_btn = wx.Button(self, label="Run Selected Steps")
         self.run_plan_btn.SetToolTip(
             "Execute the checked steps in order through the tabs' own routing "
             "machinery, updating the list with check marks as each completes.")
         self.run_plan_btn.Bind(wx.EVT_BUTTON, self._on_run_selected)
         self.run_plan_btn.Disable()
-        plan_row.Add(self.run_plan_btn, 0, wx.RIGHT, 5)
+        ctrl_sizer.Add(self.run_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.stop_plan_btn = wx.Button(self, label="Stop")
         self.stop_plan_btn.SetToolTip("Stop after the currently running step finishes")
         self.stop_plan_btn.Bind(wx.EVT_BUTTON, self._on_stop_plan)
         self.stop_plan_btn.Disable()
-        plan_row.Add(self.stop_plan_btn, 0)
-        sizer.Add(plan_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        ctrl_sizer.Add(self.stop_plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        self.plan_list = wx.CheckListBox(self, choices=[])
-        self.plan_list.SetToolTip(
-            "The routing plan from Claude. Check the steps to run; review or "
-            "tweak each step's parameters on its own tab before running.")
-        sizer.Add(self.plan_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self.cancel_btn = wx.Button(self, label="Cancel")
+        self.cancel_btn.SetToolTip("Cancel the running Claude analysis")
+        self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
+        self.cancel_btn.Disable()
+        ctrl_sizer.Add(self.cancel_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Activity gauge (pulses while Claude runs)
+        # Activity: elapsed time + pulsing gauge while Claude runs
+        self.elapsed_label = wx.StaticText(self, label="")
+        ctrl_sizer.Add(self.elapsed_label, 0, wx.LEFT | wx.RIGHT, 5)
         self.gauge = wx.Gauge(self, range=100)
-        sizer.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        ctrl_sizer.Add(self.gauge, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Parsed machine-readable result (the proof that values can flow
-        # back into GUI fields, per issues #34/#39/#40)
+        ctrl_sizer.AddStretchSpacer(1)
+        top_sizer.Add(ctrl_sizer, 0, wx.EXPAND)
+
+        sizer.Add(top_sizer, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Parsed machine-readable result (RESULT= line of the last run)
         parsed_sizer = wx.BoxSizer(wx.HORIZONTAL)
         parsed_sizer.Add(wx.StaticText(self, label="Parsed result:"), 0,
                          wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -443,9 +448,9 @@ class ClaudeTab(wx.Panel):
             "The machine-readable last line of Claude's reply (RESULT=...), "
             "demonstrating how skill output will populate GUI fields.")
         parsed_sizer.Add(self.parsed_ctrl, 1, wx.EXPAND)
-        sizer.Add(parsed_sizer, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(parsed_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # Full output
+        # Full output across the whole width at the bottom
         self.output_ctrl = wx.TextCtrl(
             self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
         self.output_ctrl.SetFont(
