@@ -787,7 +787,14 @@ class RoutingDialog(wx.Dialog):
         power_sizer.Add(wx.StaticText(options_scroll, label="Power Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.power_nets_ctrl = wx.TextCtrl(options_scroll)
         self.power_nets_ctrl.SetToolTip("Glob patterns for power nets (e.g., *GND* *VCC*)")
-        power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND)
+        power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND | wx.RIGHT, 5)
+        self.ask_claude_power_btn = wx.Button(options_scroll, label="Ask Claude", style=wx.BU_EXACTFIT)
+        self.ask_claude_power_btn.SetToolTip(
+            "Run the /analyze-power-nets skill: looks up component datasheets to "
+            "identify power nets and recommend per-net track widths, then fills "
+            "the Power Nets and Power Widths fields. Takes a few minutes (web lookups).")
+        self.ask_claude_power_btn.Bind(wx.EVT_BUTTON, self._on_ask_claude_power_nets)
+        power_sizer.Add(self.ask_claude_power_btn, 0)
         options_inner.Add(power_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Power net widths
@@ -822,6 +829,92 @@ class RoutingDialog(wx.Dialog):
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
         return options_box_sizer
+
+    def _on_ask_claude_power_nets(self, event):
+        """Run /analyze-power-nets headless and fill the Power Nets and
+        Power Widths fields from its recommendation (issue #34)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = self.board_filename
+        if not board or not os.path.isfile(board):
+            wx.MessageBox(
+                "Board file not found on disk. Save the board first so the "
+                f"analysis sees the current state.\n\nLooked for: {board}",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+
+        prompt = (
+            f"/analyze-power-nets {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=--power-nets <space-separated glob patterns> "
+            "--power-nets-widths <space-separated widths in mm>, "
+            'e.g. RESULT=--power-nets "*GND*" "*VCC*" --power-nets-widths 0.5 0.4'
+        )
+        dlg = ClaudeSkillDialog(
+            self, "Claude: analyze power nets", prompt,
+            claude_path=claude_path,
+            model=self.claude_tab.get_model_value(),
+            effort=self.claude_tab.get_effort_value(),
+            intro=f"Running /analyze-power-nets on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            self._apply_power_nets_recommendation(value)
+
+    def _apply_power_nets_recommendation(self, value):
+        """Validate Claude's RESULT value and fill the power-net fields."""
+        parsed = self._parse_power_nets_result(value)
+        if parsed is None:
+            self._append_log(f"Claude: unusable power-nets recommendation {value!r}\n")
+            return
+        patterns, widths = parsed
+        self.power_nets_ctrl.SetValue(" ".join(patterns))
+        self.power_widths_ctrl.SetValue(" ".join(f"{w:g}" for w in widths))
+        self._append_log(
+            "Claude recommended power nets: "
+            + ", ".join(f"{p} -> {w:g}mm" for p, w in zip(patterns, widths)) + "\n")
+
+    @staticmethod
+    def _parse_power_nets_result(value):
+        """Parse '--power-nets <patterns> --power-nets-widths <widths>'.
+
+        Returns (patterns, widths) or None. Widths must be positive floats,
+        one per pattern (first matching pattern wins, same as the CLI).
+        """
+        import shlex
+        try:
+            tokens = shlex.split(value)
+        except ValueError:
+            return None
+        patterns, widths = [], []
+        bucket = None
+        for token in tokens:
+            if token == "--power-nets":
+                bucket = patterns
+            elif token == "--power-nets-widths":
+                bucket = widths
+            elif token.startswith("--") or bucket is None:
+                bucket = None  # unknown flag: ignore its values
+            else:
+                bucket.append(token)
+        if not patterns or len(patterns) != len(widths):
+            return None
+        try:
+            float_widths = [float(w) for w in widths]
+        except ValueError:
+            return None
+        if any(w <= 0 for w in float_widths):
+            return None
+        return patterns, float_widths
 
     def _create_options_panel(self, panel):
         """Create the advanced options panel (MPS, crossing, length matching, debug)."""
