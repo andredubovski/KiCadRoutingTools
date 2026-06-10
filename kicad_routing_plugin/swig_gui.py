@@ -706,13 +706,13 @@ class RoutingDialog(wx.Dialog):
         layer_scroll.SetSizer(layer_inner)
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
 
-        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (Claude)", style=wx.BU_EXACTFIT)
+        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (Claude)")
         self.check_stackup_btn.SetToolTip(
             "Run the /recommend-stackup skill: reviews the board's physical stackup, "
             "flags untouched KiCad defaults (which skew impedance calculations), and "
             "recommends a fab-realistic stackup. Analysis only - shows a report.")
         self.check_stackup_btn.Bind(wx.EVT_BUTTON, self._on_check_stackup)
-        layer_box_sizer.Add(self.check_stackup_btn, 0, wx.EXPAND | wx.ALL, 3)
+        layer_box_sizer.Add(self.check_stackup_btn, 0, wx.ALL, 3)
         return layer_box_sizer
 
     def _on_check_stackup(self, event):
