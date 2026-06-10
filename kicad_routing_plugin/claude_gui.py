@@ -39,6 +39,19 @@ _TEST_SKILL = "recommend-stackup"
 # Read-only analysis tools: the skills never need write access to the board.
 DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
 
+# Main models offered in the model dropdown: (label, --model value).
+# None = let the CLI use the user's configured default.
+MODEL_CHOICES = [
+    ("Default", None),
+    ("Fable 5", "claude-fable-5"),
+    ("Opus 4.8", "claude-opus-4-8"),
+    ("Sonnet 4.6", "claude-sonnet-4-6"),
+    ("Haiku 4.5", "claude-haiku-4-5"),
+]
+
+# --effort levels accepted by the CLI ("Default" = don't pass the flag).
+EFFORT_CHOICES = ["Default", "low", "medium", "high", "xhigh", "max"]
+
 
 def find_claude():
     """Return the path to the claude CLI, or None if not installed."""
@@ -148,7 +161,7 @@ class ClaudeSkillRunner:
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
 
-    def run(self, prompt, allowed_tools=DEFAULT_ALLOWED_TOOLS):
+    def run(self, prompt, allowed_tools=DEFAULT_ALLOWED_TOOLS, model=None, effort=None):
         if self.is_running():
             raise RuntimeError("a Claude run is already in progress")
         cmd = [
@@ -158,6 +171,10 @@ class ClaudeSkillRunner:
             "--output-format", "stream-json", "--verbose",
             "--allowedTools", allowed_tools,
         ]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
         self._cancel_requested = False
         self._thread = threading.Thread(target=self._work, args=(cmd,), daemon=True)
         self._thread.start()
@@ -240,7 +257,8 @@ class ClaudeSkillDialog(wx.Dialog):
     """
 
     def __init__(self, parent, title, prompt, claude_path=None,
-                 allowed_tools=DEFAULT_ALLOWED_TOOLS, intro=None):
+                 allowed_tools=DEFAULT_ALLOWED_TOOLS, intro=None,
+                 model=None, effort=None):
         super().__init__(parent, title=title, size=(720, 520),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.result_value = None
@@ -276,7 +294,7 @@ class ClaudeSkillDialog(wx.Dialog):
 
         self._runner = ClaudeSkillRunner(
             claude_path or find_claude(), self._append, self._on_done)
-        self._runner.run(prompt, allowed_tools=allowed_tools)
+        self._runner.run(prompt, allowed_tools=allowed_tools, model=model, effort=effort)
 
     def _append(self, text):
         self.output_ctrl.AppendText(text)
@@ -345,6 +363,27 @@ class ClaudeTab(wx.Panel):
         self.status_label = wx.StaticText(self, label=status)
         self.status_label.Wrap(720)
         sizer.Add(self.status_label, 0, wx.ALL, 8)
+
+        # Model / effort selection row
+        sel_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        sel_sizer.Add(wx.StaticText(self, label="Model:"), 0,
+                      wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.model_choice = wx.Choice(self, choices=[label for label, _ in MODEL_CHOICES])
+        self.model_choice.SetSelection(0)
+        self.model_choice.SetToolTip(
+            "Model for the headless run (--model). Default = your claude CLI default. "
+            "Bigger models give deeper analysis; Haiku is fastest/cheapest.")
+        sel_sizer.Add(self.model_choice, 0, wx.RIGHT, 15)
+
+        sel_sizer.Add(wx.StaticText(self, label="Effort:"), 0,
+                      wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.effort_choice = wx.Choice(self, choices=EFFORT_CHOICES)
+        self.effort_choice.SetSelection(0)
+        self.effort_choice.SetToolTip(
+            "Reasoning effort (--effort): low/medium/high/xhigh/max. Higher = more "
+            "thorough but slower and costlier. Not supported on Haiku.")
+        sel_sizer.Add(self.effort_choice, 0)
+        sizer.Add(sel_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Test button row
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -418,8 +457,13 @@ class ClaudeTab(wx.Panel):
         self._elapsed_seconds = 0
         self.elapsed_label.SetLabel("0s")
         self._elapsed_timer.Start(1000)
-        self._log(f"Claude: running /{_TEST_SKILL} on {board}")
-        self._runner.run(prompt)
+        model = MODEL_CHOICES[self.model_choice.GetSelection()][1]
+        effort_label = EFFORT_CHOICES[self.effort_choice.GetSelection()]
+        effort = None if effort_label == "Default" else effort_label
+        self._log(f"Claude: running /{_TEST_SKILL} on {board}"
+                  + (f" | model={model}" if model else "")
+                  + (f" | effort={effort}" if effort else ""))
+        self._runner.run(prompt, model=model, effort=effort)
 
     def _append_transcript(self, text):
         self.output_ctrl.AppendText(text)
