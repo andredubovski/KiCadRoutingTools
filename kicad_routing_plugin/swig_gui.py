@@ -1103,6 +1103,14 @@ class RoutingDialog(wx.Dialog):
                 'board_edge_clearance': edge_clearance,
             }
 
+        def get_claude_params():
+            # Deferred: the Claude tab is created after the Planes tab,
+            # but this is only called on button click.
+            return {
+                'model': self.claude_tab.get_model_value(),
+                'effort': self.claude_tab.get_effort_value(),
+            }
+
         return PlanesTab(
             self.notebook,
             self.pcb_data,
@@ -1111,7 +1119,8 @@ class RoutingDialog(wx.Dialog):
             on_planes_complete=self._on_tab_operation_complete,
             get_connectivity_check=self._get_connectivity_check_fn,
             append_log=self._append_log,
-            sync_pcb_data_callback=self._sync_pcb_data_from_board
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            get_claude_params=get_claude_params
         )
 
     def _create_claude_tab(self):

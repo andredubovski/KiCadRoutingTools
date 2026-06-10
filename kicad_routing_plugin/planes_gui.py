@@ -412,7 +412,7 @@ class PlanesTab(wx.Panel):
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_planes_complete=None,
                  get_connectivity_check=None, append_log=None,
-                 sync_pcb_data_callback=None):
+                 sync_pcb_data_callback=None, get_claude_params=None):
         """
         Create the planes tab.
 
@@ -425,11 +425,14 @@ class PlanesTab(wx.Panel):
             get_connectivity_check: Callback that returns connectivity check function
             append_log: Callback to append text to log
             sync_pcb_data_callback: Callback to sync pcb_data from board
+            get_claude_params: Callback returning the Claude tab's
+                {'model', 'effort'} selections for headless runs
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.get_shared_params = get_shared_params
+        self.get_claude_params = get_claude_params
         self.on_planes_complete = on_planes_complete
         self.get_connectivity_check = get_connectivity_check
         self.append_log = append_log
@@ -591,9 +594,15 @@ class PlanesTab(wx.Panel):
             "line of the form RESULT=<recommended --gnd-via-distance in mm> "
             "(a bare number), e.g. RESULT=2.5"
         )
+        # Obey the model/effort selected on the Claude tab
+        model = effort = None
+        if self.get_claude_params:
+            claude_params = self.get_claude_params()
+            model = claude_params.get('model')
+            effort = claude_params.get('effort')
         dlg = ClaudeSkillDialog(
             self, "Claude: recommend GND via distance", prompt,
-            claude_path=claude_path,
+            claude_path=claude_path, model=model, effort=effort,
             intro=f"Running /find-high-speed-nets on {os.path.basename(board)} ...\n"
                   "(datasheet lookups; typically a few minutes)")
         dlg.ShowModal()
