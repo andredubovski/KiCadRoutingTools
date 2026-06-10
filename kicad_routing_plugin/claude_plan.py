@@ -273,6 +273,10 @@ class PlanExecutor:
         self._stop_requested = False
 
     def start(self):
+        # The plan sequences its own route_planes steps, so the route step's
+        # "create planes first?" offer (which jumps to the Planes tab and
+        # aborts routing) must not fire during an automated run.
+        self.dialog._suppress_plane_offer = True
         self._queue = list(self.indices)
         self._next_step()
 
@@ -283,34 +287,33 @@ class PlanExecutor:
     # -- per-action wiring ---------------------------------------------------
 
     def _action_parts(self, action):
-        """(tab page title, invoke callable, busy predicate) for an action."""
+        """(invoke callable, busy predicate) for an action. The handlers run
+        fine without their tab being the visible page, so execution stays on
+        the Claude tab."""
         d = self.dialog
         return {
-            "route": ("Basic", lambda: d._on_route(None),
+            "route": (lambda: d._on_route(None),
                       lambda: not d.route_btn.IsEnabled()),
-            "route_diff": ("Differential", lambda: d.differential_tab._on_route(None),
+            "route_diff": (lambda: d.differential_tab._on_route(None),
                            lambda: not d.differential_tab.route_btn.IsEnabled()),
-            "fanout": ("Fanout", lambda: d.fanout_tab._on_fanout(None),
+            "fanout": (lambda: d.fanout_tab._on_fanout(None),
                        lambda: not d.fanout_tab.fanout_btn.IsEnabled()),
-            "route_planes": ("Planes", lambda: d.planes_tab._on_action(None),
+            "route_planes": (lambda: d.planes_tab._on_action(None),
                              lambda: not d.planes_tab.action_btn.IsEnabled()),
         }[action]
 
-    def _switch_to_tab(self, title):
-        notebook = self.dialog.notebook
-        for i in range(notebook.GetPageCount()):
-            if notebook.GetPageText(i) == title:
-                notebook.SetSelection(i)
-                return
-
     # -- sequencing ----------------------------------------------------------
+
+    def _finish(self, aborted_reason):
+        self.dialog._suppress_plane_offer = False
+        self.on_finished(self._completed, aborted_reason)
 
     def _next_step(self):
         if self._stop_requested:
-            self.on_finished(self._completed, "stopped by user")
+            self._finish("stopped by user")
             return
         if not self._queue:
-            self.on_finished(self._completed, None)
+            self._finish(None)
             return
         index = self._queue.pop(0)
         step = self.steps[index]
@@ -320,13 +323,12 @@ class PlanExecutor:
             notes = apply_step_selection(step, self.dialog)
             for note in notes:
                 self.log(f"Claude plan: {note}")
-            title, invoke, busy = self._action_parts(step["action"])
-            self._switch_to_tab(title)
+            invoke, busy = self._action_parts(step["action"])
             invoke()
         except Exception as e:
             self.on_status(index, "failed")
             self.log(f"Claude plan: step {index + 1} failed: {e}")
-            self.on_finished(self._completed, f"step {index + 1} raised: {e}")
+            self._finish(f"step {index + 1} raised: {e}")
             return
         self._poll_until_idle(index, busy, polls=0, seen_busy=False)
 
@@ -335,7 +337,7 @@ class PlanExecutor:
             is_busy = busy()
         except RuntimeError:
             # A control died (dialog closing) - abort quietly
-            self.on_finished(self._completed, "dialog closed")
+            self._finish("dialog closed")
             return
         if is_busy:
             wx.CallLater(self.POLL_MS, self._poll_until_idle, index, busy, polls + 1, True)

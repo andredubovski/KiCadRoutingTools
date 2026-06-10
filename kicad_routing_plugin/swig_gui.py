@@ -2167,6 +2167,10 @@ class RoutingDialog(wx.Dialog):
         Returns True if the user accepted and was navigated to the Planes tab
         (so the caller should abort routing); False otherwise.
         """
+        # During an automated Claude plan run the plan sequences its own
+        # route_planes steps - don't interrupt or abort the route step.
+        if getattr(self, '_suppress_plane_offer', False):
+            return False
         # Suggested net -> layer mappings to offer.
         suggestions = [('GND', 'B.Cu'), ('VCC', 'F.Cu')]
 
