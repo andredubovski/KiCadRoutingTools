@@ -113,12 +113,6 @@ tapping leg's P/N tracks would have to cross the existing pair. So pairs with
 3+ pad-pair terminals (e.g. connector -> termination resistor -> IC pins) are
 routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
 
-<img src="multipoint_diff.png" alt="Multi-point diff pairs routed as chains" width="500">
-
-*Two multi-point pairs on a 2-layer LVDS converter: CLK spans 4 terminals
-(connector, termination resistor, and two IC pin pairs - note the swapped
-IC pins 6/7), DATA spans 3. Each chain passes "through" its shared terminals.*
-
 1. The pair's pads are grouped into (P pad, N pad) terminals by nearest
    matching (connector pins, IC input pairs, termination resistors).
 2. Terminals are ordered as the shortest open chain. Each terminal has only
