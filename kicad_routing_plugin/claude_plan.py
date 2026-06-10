@@ -191,16 +191,19 @@ def apply_step_selection(step, dialog):
         for a in step.get("assignments", []):
             if not isinstance(a, dict):
                 continue
-            layer = a.get("layer")
+            # Accept a single "layer" or a "layers" list from the plan; the
+            # assignment panel stores (nets_list, layers_list) tuples.
+            layers = a.get("layers") if isinstance(a.get("layers"), list) else [a.get("layer")]
+            valid_layers = [l for l in layers if l in copper]
             nets = [n for n in a.get("nets", []) if n in net_names]
             unknown = [n for n in a.get("nets", []) if n not in net_names]
             if unknown:
                 notes.append(f"route_planes: unknown nets {unknown} dropped")
-            if layer not in copper:
-                notes.append(f"route_planes: {layer!r} is not a copper layer, assignment dropped")
+            if not valid_layers:
+                notes.append(f"route_planes: no valid copper layers in {layers}, assignment dropped")
                 continue
             if nets:
-                assignments.append((nets, layer))
+                assignments.append((nets, valid_layers))
         if not assignments:
             notes.append("route_planes: no valid assignments")
         tab.assignment_panel.set_assignments(assignments)
