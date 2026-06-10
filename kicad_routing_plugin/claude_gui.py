@@ -66,28 +66,24 @@ def board_path_for_analysis(board_filename):
     except Exception:
         pass  # not running inside pcbnew (e.g. tests) - use the file as-is
     if board is not None:
-        modified = None
-        try:
-            modified = board.IsModified()
-        except Exception:
-            pass  # API not available - can't tell, so ask
-        if modified is not False:
-            suffix = ("the board has unsaved changes." if modified
-                      else "save now so it sees the current state?")
-            choice = wx.MessageBox(
-                f"The analysis reads the saved .kicad_pcb file, but {suffix}\n\n"
-                "Yes = save the board and continue\n"
-                "No = continue with the last saved file\n",
-                "Claude", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
-            if choice == wx.CANCEL:
+        # Always offer to save: the editor's dirty state isn't reliably
+        # exposed to plugins (BOARD.IsModified() tracks an internal item
+        # flag, not unsaved edits), so we can't tell whether the file is
+        # current. Saving an already-saved board is harmless.
+        choice = wx.MessageBox(
+            "The analysis reads the saved .kicad_pcb file.\n\n"
+            "Yes = save the board and continue\n"
+            "No = continue with the last saved file\n",
+            "Claude", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
+        if choice == wx.CANCEL:
+            return None
+        if choice == wx.YES:
+            try:
+                pcbnew.SaveBoard(board_filename, board)
+            except Exception as e:
+                wx.MessageBox(f"Saving the board failed: {e}",
+                              "Claude", wx.OK | wx.ICON_WARNING)
                 return None
-            if choice == wx.YES:
-                try:
-                    pcbnew.SaveBoard(board_filename, board)
-                except Exception as e:
-                    wx.MessageBox(f"Saving the board failed: {e}",
-                                  "Claude", wx.OK | wx.ICON_WARNING)
-                    return None
     if not board_filename or not os.path.isfile(board_filename):
         wx.MessageBox(
             "Board file not found on disk. Save the board first so the "
