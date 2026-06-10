@@ -36,13 +36,30 @@ Report to user:
 - Available copper layers (F.Cu, B.Cu, In1.Cu, In2.Cu, etc.)
 - Whether it's a 2-layer, 4-layer, or multi-layer board
 
-### Stackup Sanity Check
+### Stackup Check (always run this early)
 
-If the board has impedance-relevant signals (see the speed detection in Step 4) and you plan
-to recommend `--impedance` or `--time-matching`, check the stackup first: an untouched KiCad
-default stackup (no stackup section, or uniform dielectric thickness/ε_r) makes those
-calculations wrong for the user's fab. In that case recommend running `/recommend-stackup`
-before routing, and take plane-layer assignments from its output when available.
+Inspect the stackup now, before planning, and report the verdict **at the top of the
+plan report** so problems surface before any routing work:
+
+```python
+from kicad_parser import parse_kicad_pcb
+pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
+for layer in pcb.stackup:
+    print(layer.name, layer.thickness, layer.epsilon_r)
+```
+
+- No stackup section, or all dielectrics with identical thickness and ε_r ≈ 4.5, means
+  KiCad's untouched default. If the board also has impedance-relevant signals (see the
+  speed detection in Step 4), lead the report with a clear warning: impedance and
+  time-matching calculations will not match the user's fab, and `/recommend-stackup`
+  should be run before impedance-controlled routing. Take plane-layer assignments from
+  its output when available.
+- A 2-layer board with multiple differential pairs or planes-worth of power nets is
+  itself worth flagging (no inner layers for reference planes).
+- If the stackup looks deliberate, say so in one line and move on.
+
+Report problems prominently but still produce the full plan - the user decides whether
+to fix the stackup first.
 
 ## Step 3: Check for Components Needing Fanout
 

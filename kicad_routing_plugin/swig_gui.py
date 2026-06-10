@@ -705,7 +705,61 @@ class RoutingDialog(wx.Dialog):
 
         layer_scroll.SetSizer(layer_inner)
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
+
+        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (Claude)", style=wx.BU_EXACTFIT)
+        self.check_stackup_btn.SetToolTip(
+            "Run the /recommend-stackup skill: reviews the board's physical stackup, "
+            "flags untouched KiCad defaults (which skew impedance calculations), and "
+            "recommends a fab-realistic stackup. Analysis only - shows a report.")
+        self.check_stackup_btn.Bind(wx.EVT_BUTTON, self._on_check_stackup)
+        layer_box_sizer.Add(self.check_stackup_btn, 0, wx.EXPAND | wx.ALL, 3)
         return layer_box_sizer
+
+    def _on_check_stackup(self, event):
+        """Run /recommend-stackup headless and show the report (issue #40)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = self.board_filename
+        if not board or not os.path.isfile(board):
+            wx.MessageBox(
+                "Board file not found on disk. Save the board first so the "
+                f"analysis sees the current state.\n\nLooked for: {board}",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+
+        prompt = (
+            f"/recommend-stackup {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=<copper layer count you recommend> "
+            "(a bare integer), e.g. RESULT=4"
+        )
+        dlg = ClaudeSkillDialog(
+            self, "Claude: check stackup", prompt,
+            claude_path=claude_path,
+            model=self.claude_tab.get_model_value(),
+            effort=self.claude_tab.get_effort_value(),
+            intro=f"Running /recommend-stackup on {os.path.basename(board)} ...\n"
+                  "(local analysis; typically a minute or two)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            board_layers = len(self.pcb_data.board_info.copper_layers)
+            note = ""
+            try:
+                if int(value) != board_layers:
+                    note = (f" (board currently has {board_layers}; change it in "
+                            "Board Setup before impedance-controlled routing)")
+            except ValueError:
+                pass
+            self._append_log(f"Claude recommends {value} copper layers{note}\n")
 
     def _create_basic_options_panel(self, panel):
         """Create the basic options panel for the Basic tab."""

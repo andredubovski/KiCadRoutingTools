@@ -32,10 +32,6 @@ _CLAUDE_CANDIDATES = [
     "/usr/local/bin/claude",
 ]
 
-# The smoke-test skill: local-only analysis (no datasheet web lookups), so
-# it finishes quickly while still exercising skill discovery and board access.
-_TEST_SKILL = "recommend-stackup"
-
 # Read-only analysis tools: the skills never need write access to the board.
 DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
 
@@ -400,14 +396,6 @@ class ClaudeTab(wx.Panel):
         self.plan_btn.Enable(self._claude_path is not None and self.routing_dialog is not None)
         btn_sizer.Add(self.plan_btn, 0, wx.RIGHT, 5)
 
-        self.test_btn = wx.Button(self, label="Test: Recommend Stackup")
-        self.test_btn.SetToolTip(
-            f"Run the /{_TEST_SKILL} skill headless on the current board and show "
-            "the result here. Analysis only - nothing is modified.")
-        self.test_btn.Bind(wx.EVT_BUTTON, self._on_run_test)
-        self.test_btn.Enable(self._claude_path is not None)
-        btn_sizer.Add(self.test_btn, 0, wx.RIGHT, 5)
-
         self.cancel_btn = wx.Button(self, label="Cancel")
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.cancel_btn.Disable()
@@ -505,9 +493,8 @@ class ClaudeTab(wx.Panel):
         return os.path.abspath(board)
 
     def _start_run(self, prompt, kind, intro):
-        """Start a headless run (kind: 'test' or 'plan') with shared UI state."""
+        """Start a headless run (kind names what the result is for) with shared UI state."""
         self._pending_kind = kind
-        self.test_btn.Disable()
         self.plan_btn.Disable()
         self.run_plan_btn.Disable()
         self.cancel_btn.Enable()
@@ -522,22 +509,6 @@ class ClaudeTab(wx.Panel):
                   + (f" | model={model}" if model else "")
                   + (f" | effort={effort}" if effort else ""))
         self._runner.run(prompt, model=model, effort=effort)
-
-    def _on_run_test(self, event):
-        if self._runner is None or self._runner.is_running():
-            return
-        board = self._board_path_or_warn()
-        if board is None:
-            return
-        prompt = (
-            f"/{_TEST_SKILL} {board} — analysis only, do not modify "
-            "any files. After the report, end your reply with exactly one line of "
-            "the form RESULT=<copper layer count you recommend> (a bare integer), "
-            "e.g. RESULT=4"
-        )
-        self._start_run(prompt, "test",
-                        f"Running /{_TEST_SKILL} on {os.path.basename(board)} ...\n"
-                        "(local analysis; typically a few minutes)")
 
     def _on_plan(self, event):
         if self._runner is None or self._runner.is_running():
@@ -565,7 +536,6 @@ class ClaudeTab(wx.Panel):
     def _on_done(self, result_text, error):
         self._elapsed_timer.Stop()
         self.gauge.SetValue(0)
-        self.test_btn.Enable()
         self.plan_btn.Enable(self.routing_dialog is not None)
         self.run_plan_btn.Enable(bool(self._plan_steps))
         self.cancel_btn.Disable()
