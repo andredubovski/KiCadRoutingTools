@@ -282,11 +282,15 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
 
-        # Tab 6: Log
+        # Tab 6: Claude (AI skills, issue #40)
+        self.claude_tab = self._create_claude_tab()
+        self.notebook.AddPage(self.claude_tab, "Claude")
+
+        # Tab 7: Log
         log_panel = self._create_log_tab()
         self.notebook.AddPage(log_panel, "Log")
 
-        # Tab 7: About
+        # Tab 8: About
         self.about_tab = self._create_about_tab()
         self.notebook.AddPage(self.about_tab, "About")
 
@@ -1108,6 +1112,16 @@ class RoutingDialog(wx.Dialog):
             get_connectivity_check=self._get_connectivity_check_fn,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board
+        )
+
+    def _create_claude_tab(self):
+        """Create the Claude tab for running AI skills headless (issue #40)."""
+        from .claude_gui import ClaudeTab
+
+        return ClaudeTab(
+            self.notebook,
+            self.board_filename,
+            log_callback=self._append_log,
         )
 
     def _create_differential_tab(self):
