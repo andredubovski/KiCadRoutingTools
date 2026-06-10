@@ -61,6 +61,8 @@ PLUGIN_FILES_KEEP = {
 PLUGIN_DIRS_KEEP = {
     "kicad_routing_plugin",
     "rust_router",  # binaries are placed here separately
+    "bga_fanout",   # package imported by the fanout GUI
+    "qfn_fanout",   # package imported by the fanout GUI
 }
 # Build/install scripts that should NOT ship inside the plugin.
 ROOT_SCRIPTS_EXCLUDE = {
@@ -68,6 +70,14 @@ ROOT_SCRIPTS_EXCLUDE = {
     "install_plugin.py",
     "package_pcm.py",
     "update_metadata.py",
+    # CLI wrappers whose filenames collide with same-named packages
+    # (bga_fanout/, qfn_fanout/). KiCad's plugin loader imports top-level .py
+    # files in the plugin directory by path, so shipping these wrappers makes
+    # `from bga_fanout import main` re-import the wrapper itself, producing a
+    # circular-import error. The packages they wrap ship normally and are what
+    # the GUI imports; the wrappers are only needed for command-line use.
+    "bga_fanout.py",
+    "qfn_fanout.py",
 }
 
 # All binaries bundled in every PCM zip. The startup resolver in the root
