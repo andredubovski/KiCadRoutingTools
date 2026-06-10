@@ -36,13 +36,30 @@ Report to user:
 - Available copper layers (F.Cu, B.Cu, In1.Cu, In2.Cu, etc.)
 - Whether it's a 2-layer, 4-layer, or multi-layer board
 
-### Stackup Sanity Check
+### Stackup Check (always run this early)
 
-If the board has impedance-relevant signals (see the speed detection in Step 4) and you plan
-to recommend `--impedance` or `--time-matching`, check the stackup first: an untouched KiCad
-default stackup (no stackup section, or uniform dielectric thickness/ε_r) makes those
-calculations wrong for the user's fab. In that case recommend running `/recommend-stackup`
-before routing, and take plane-layer assignments from its output when available.
+Inspect the stackup now, before planning, and report the verdict **at the top of the
+plan report** so problems surface before any routing work:
+
+```python
+from kicad_parser import parse_kicad_pcb
+pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
+for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to bottom
+    print(layer.name, layer.layer_type, layer.thickness, layer.epsilon_r)
+```
+
+- No stackup section, or all dielectrics with identical thickness and ε_r ≈ 4.5, means
+  KiCad's untouched default. If the board also has impedance-relevant signals (see the
+  speed detection in Step 4), lead the report with a clear warning: impedance and
+  time-matching calculations will not match the user's fab, and `/recommend-stackup`
+  should be run before impedance-controlled routing. Take plane-layer assignments from
+  its output when available.
+- A 2-layer board with multiple differential pairs or planes-worth of power nets is
+  itself worth flagging (no inner layers for reference planes).
+- If the stackup looks deliberate, say so in one line and move on.
+
+Report problems prominently but still produce the full plan - the user decides whether
+to fix the stackup first.
 
 ## Step 3: Check for Components Needing Fanout
 
@@ -162,60 +179,15 @@ Report to user:
 - Whether `route_diff.py` is needed
 - Whether DDR/length-matching is needed
 
-### Lightweight High-Speed Signal Detection
+### High-Speed Signal Check (delegate to /find-high-speed-nets)
 
-Scan net names and footprint names for speed indicators to determine whether GND return
-vias should be included in the plan and what `--gnd-via-distance` to use.
-
-> **Tip:** For thorough analysis with datasheet lookup and per-net rise time estimates,
-> run `/find-high-speed-nets` first.
-
-```python
-# Quick speed classification by net name patterns (no datasheet lookup)
-hs_patterns = {
-    'ultra_high': ['DDR3', 'DDR4', 'DDR5', 'LPDDR', 'PCIE', 'SATA', 'USB3',
-                   'SGMII', 'XGMII', 'TMDS'],     # >1 GHz
-    'high':       ['DDR', 'DQ', 'DQS', 'RGMII', 'RMII', 'QSPI', 'QIO',
-                   'SDIO', 'LVDS', 'HDMI', 'USB', 'ETH', 'ULPI', 'EMMC'],  # 100 MHz-1 GHz
-    'medium':     ['SPI', 'SCK', 'SCLK', 'MOSI', 'MISO', 'CLK', 'MCLK',
-                   'BCLK', 'JTAG', 'TCK', 'SWDIO', 'SWCLK', 'CAN'],       # 10-100 MHz
-}
-
-# Check net names (case-insensitive) - stop at first (fastest) match
-highest_tier = None
-matched_nets = []
-for net in pcb.nets.values():
-    if not net.name:
-        continue
-    name_upper = net.name.upper()
-    for tier in ['ultra_high', 'high', 'medium']:
-        if any(pat in name_upper for pat in hs_patterns[tier]):
-            matched_nets.append((net.name, tier))
-            if highest_tier is None or ['ultra_high','high','medium'].index(tier) < \
-               ['ultra_high','high','medium'].index(highest_tier):
-                highest_tier = tier
-            break
-
-# Also check footprint names for high-speed ICs
-hs_footprint_kw = ['FPGA', 'CPLD', 'DDR', 'SDRAM', 'PHY', 'USB', 'ETH', 'SERDES']
-for ref, fp in pcb.footprints.items():
-    if any(kw in fp.footprint_name.upper() for kw in hs_footprint_kw):
-        if highest_tier is None:
-            highest_tier = 'high'  # Conservative default for HS components
-```
-
-Based on the highest speed tier found, select GND return via parameters:
-
-| Speed Tier | Frequency | `--gnd-via-distance` | Action |
-|------------|-----------|----------------------|--------|
-| Ultra-high | >1 GHz | 2.0 mm | Strongly recommend GND return vias |
-| High | 100 MHz - 1 GHz | 3.0 mm | Recommend GND return vias |
-| Medium | 10 - 100 MHz | 5.0 mm | Recommend (can skip if desired) |
-| Low / none | <10 MHz | Skip | Suggest skipping; offer to include |
-
-**Minimum physical limit:** `--gnd-via-distance` should not be set below 3 x (via_size + clearance),
-typically ~2.5 mm for standard 0.8 mm vias with 0.25 mm clearance. Values below this will not find
-valid placement positions.
+Whether the plan includes GND return vias - and the `--gnd-via-distance` to use -
+is the `/find-high-speed-nets` skill's job: it classifies nets into speed tiers
+(datasheet lookup, rise-time estimates) and maps tiers to recommended distances.
+Follow that skill's methodology here (its quick net-name/footprint scan decides
+whether the deeper datasheet pass is worth it) and put the recommended distance
+into the plan's GND-via step. Remember its physical floor: never set
+`--gnd-via-distance` below 3 x (via_size + clearance), ~2.5 mm for standard vias.
 
 Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
@@ -225,22 +197,21 @@ Report to user when presenting the plan:
   low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
   for this board. Want me to remove the step?"
 
-## Step 5: Review Power and Ground Net Strategy
+## Step 5: Review Power and Ground Net Strategy (delegate to /recommend-plane-mappings)
 
-From the `list_nets.py --power` output, analyze:
-
-### Power Net Routing Strategies
-
-| Net Type | Strategy | Rationale |
-|----------|----------|-----------|
-| GND (many pads) | `route_planes.py` on bottom/inner layer | Low impedance return path |
-| VCC/Power (many pads) | Wide traces (0.5mm+) or plane | Current carrying capacity |
-| VCC/Power (few pads) | Wide traces with `--power-nets` | Simpler than plane |
+Which nets deserve planes and on which copper layers is the
+`/recommend-plane-mappings` skill's job: it weighs pad counts and datasheet
+current estimates, and assigns layers with SI rationale (GND adjacent to signal
+layers for return paths, power planes paired against GND, split layers for
+multiple rails). Follow its methodology here, seeded by the `list_nets.py --power`
+output, and put the resulting net -> layer assignments into the plan's
+`route_planes` steps. Nets it leaves to wide traces become `--power-nets` /
+`--power-nets-widths` on the route step instead.
 
 Report to user:
 - Identified GND nets and pad counts
 - Identified power nets and pad counts
-- Recommended strategy (plane vs wide traces)
+- Recommended strategy (plane vs wide traces) with layer assignments
 
 ## Step 6: Generate Routing Plan
 
@@ -287,7 +258,7 @@ Creates power planes in a single call. Each net is paired with its corresponding
 layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads automatically connect to
 planes on their layer; SMD pads get vias routed to the plane.
 
-python -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
+python3 -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
     --nets GND VCC \
     --plane-layers B.Cu F.Cu \
     2>&1 | tee /tmp/step1_planes.txt
@@ -301,7 +272,7 @@ by power planes. This ensures every signal net gets fanned out, avoiding
 plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
-python -X utf8 bga_fanout.py board_step1.kicad_pcb \
+python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
     --output board_step2.kicad_pcb \
@@ -313,7 +284,7 @@ use `--no-bga-zone` to allow the router to find alternative paths through
 the dense pin area (even when fanout was done, some paths may require this).
 Use `--max-ripup 10 --max-iterations 1000000` for difficult 2-layer boards.
 
-python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
+python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
     --max-ripup 10 \
@@ -332,7 +303,7 @@ of the analysis (see "Lightweight High-Speed Signal Detection" above).
 > is set to [X] mm. If this is a purely low-frequency board (I2C/UART/GPIO only),
 > this step can be skipped. Let me know if you'd like to remove it.
 
-python -X utf8 route_planes.py board_step3.kicad_pcb board_step4.kicad_pcb \
+python3 -X utf8 route_planes.py board_step3.kicad_pcb board_step4.kicad_pcb \
     --nets GND \
     --plane-layers B.Cu \
     --add-gnd-vias --gnd-via-distance 2.0 \
@@ -348,7 +319,7 @@ Adjust `--gnd-via-distance` based on the board's highest signal speed:
 Signal traces and GND return vias may have cut through planes. This step
 reconnects any isolated copper islands.
 
-python -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.kicad_pcb \
+python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.kicad_pcb \
     2>&1 | tee /tmp/step5_plane_repair.txt
 
 ### Step 6: Verify Results
@@ -356,9 +327,9 @@ Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
 diff pair checks). If that skill is unavailable, run the raw checks:
 
-python -X utf8 check_drc.py board_step5.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step6_drc.txt
-python -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
-python -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
+python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
+python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
 
 ### Alternative: VCC as Wide Traces (No Plane)
@@ -367,20 +338,20 @@ If you prefer not to use a VCC plane, route VCC with wide traces instead:
 
 ```
 ### Step 2 (Alternative): Fanout U9 Including VCC
-python -X utf8 bga_fanout.py board_step1.kicad_pcb \
+python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
     --nets "/*" VCC \
     --output board_step2.kicad_pcb
 
 ### Step 3 (Alternative): Route VCC with Wide Traces
-python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
+python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
     --nets VCC \
     --track-width 0.5
 ```
 
 Or if VCC wasn't fanned out, use `--no-bga-zone` to allow router access:
 ```
-python -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
+python3 -X utf8 route.py board_step2.kicad_pcb board_step3.kicad_pcb \
     --nets VCC \
     --track-width 0.5 \
     --no-bga-zone U9
@@ -658,7 +629,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 10. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
 12. **Use --no-bga-zone for difficult boards** - Even when fanout is complete, use `--no-bga-zone` during routing to allow the router to find alternative paths through the dense pin area. This is especially important for 2-layer boards where routing channels are limited.
-13. **Windows UTF-8 encoding** - On Windows, use `python -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python -X utf8 route_planes.py ...`
+13. **Windows UTF-8 encoding** - On Windows, use `python3 -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python3 -X utf8 route_planes.py ...`
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
@@ -684,10 +655,10 @@ After generating the plan:
 Always capture command output to `/tmp` files for later analysis:
 
 ```bash
-python -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
-python -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
-python -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
-python -X utf8 check_drc.py output.kicad_pcb 2>&1 | tee /tmp/drc.txt
+python3 -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
+python3 -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
+python3 -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
+python3 -X utf8 check_drc.py output.kicad_pcb 2>&1 | tee /tmp/drc.txt
 ```
 
 ### Parse Logs for Failure Analysis
@@ -730,7 +701,7 @@ After running routing commands:
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
 
 ```bash
-python -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
+python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
     --max-ripup 10 \
