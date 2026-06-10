@@ -429,6 +429,32 @@ class ClaudeTab(wx.Panel):
 
         self.SetSizer(sizer)
 
+    # ------------------------------------------------------- model/effort
+
+    def get_model_value(self):
+        """The selected --model value (None = CLI default)."""
+        return MODEL_CHOICES[self.model_choice.GetSelection()][1]
+
+    def set_model_value(self, value):
+        """Select the saved model; unknown/retired values revert to Default."""
+        for i, (_label, v) in enumerate(MODEL_CHOICES):
+            if v == value:
+                self.model_choice.SetSelection(i)
+                return
+        self.model_choice.SetSelection(0)
+
+    def get_effort_value(self):
+        """The selected --effort level (None = CLI default)."""
+        label = EFFORT_CHOICES[self.effort_choice.GetSelection()]
+        return None if label == "Default" else label
+
+    def set_effort_value(self, value):
+        """Select the saved effort; unknown levels revert to Default."""
+        if value in EFFORT_CHOICES[1:]:
+            self.effort_choice.SetSelection(EFFORT_CHOICES.index(value))
+        else:
+            self.effort_choice.SetSelection(0)
+
     # ------------------------------------------------------------------ run
 
     def _on_run_test(self, event):
@@ -457,9 +483,8 @@ class ClaudeTab(wx.Panel):
         self._elapsed_seconds = 0
         self.elapsed_label.SetLabel("0s")
         self._elapsed_timer.Start(1000)
-        model = MODEL_CHOICES[self.model_choice.GetSelection()][1]
-        effort_label = EFFORT_CHOICES[self.effort_choice.GetSelection()]
-        effort = None if effort_label == "Default" else effort_label
+        model = self.get_model_value()
+        effort = self.get_effort_value()
         self._log(f"Claude: running /{_TEST_SKILL} on {board}"
                   + (f" | model={model}" if model else "")
                   + (f" | effort={effort}" if effort else ""))

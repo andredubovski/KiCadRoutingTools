@@ -1652,6 +1652,10 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel.filter_ctrl.SetValue("")
         self.planes_tab.net_panel.filter_ctrl.SetValue("")
 
+        # Reset Claude tab model/effort to Default
+        self.claude_tab.model_choice.SetSelection(0)
+        self.claude_tab.effort_choice.SetSelection(0)
+
         # Reset component dropdowns to "All"
         if self.net_panel.component_dropdown:
             self.net_panel.component_dropdown.SetSelection(0)
