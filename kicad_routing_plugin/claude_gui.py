@@ -216,7 +216,15 @@ class ClaudeTab(wx.Panel):
         """Render one stream-json event as a live transcript line."""
         etype = event.get("type")
         if etype == "system" and event.get("subtype") == "init":
-            self.output_ctrl.AppendText("Claude session started.\n\n")
+            model = event.get("model", "unknown")
+            version = event.get("claude_code_version", "unknown")
+            lines = [f"Claude Code {version} | model: {model}",
+                     f"cwd: {event.get('cwd', '?')}"]
+            skills = event.get("skills", [])
+            if skills:
+                shown = ", ".join(skills[:8]) + (", ..." if len(skills) > 8 else "")
+                lines.append(f"skills discovered: {len(skills)} ({shown})")
+            self.output_ctrl.AppendText("\n".join(lines) + "\n\n")
         elif etype == "assistant":
             for block in event.get("message", {}).get("content", []):
                 btype = block.get("type")
