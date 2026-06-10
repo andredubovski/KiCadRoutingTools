@@ -104,6 +104,40 @@ def apply_polarity_swap(pcb_data: PCBData, result: dict, pad_swaps: List[dict],
         return False
 
 
+def undo_polarity_swap(pcb_data: PCBData, swap_entry: dict) -> None:
+    """Reverse a polarity swap previously applied by apply_polarity_swap.
+
+    Used when a multi-point chain attempt is ripped back out: the leg whose
+    routing decided the swap no longer exists, so the pad/stub nets must
+    return to their original assignment. The caller is responsible for
+    removing swap_entry from the pad_swaps list.
+    """
+    p_net_id = swap_entry['p_net_id']
+    n_net_id = swap_entry['n_net_id']
+    p_stub_positions = swap_entry.get('p_stub_positions') or set()
+    n_stub_positions = swap_entry.get('n_stub_positions') or set()
+
+    # Swapping is its own inverse: pads back first, then the stub segments and
+    # vias at the recorded positions (note the nets are currently swapped, so
+    # the membership tests are mirrored relative to apply_polarity_swap)
+    swap_pad_nets_in_pcb_data(pcb_data, swap_entry['pad_p'], swap_entry['pad_n'])
+
+    for seg in pcb_data.segments:
+        seg_start = pos_key(seg.start_x, seg.start_y)
+        seg_end = pos_key(seg.end_x, seg.end_y)
+        if seg.net_id == n_net_id and (seg_start in p_stub_positions or seg_end in p_stub_positions):
+            seg.net_id = p_net_id
+        elif seg.net_id == p_net_id and (seg_start in n_stub_positions or seg_end in n_stub_positions):
+            seg.net_id = n_net_id
+
+    for via in pcb_data.vias:
+        via_pos = pos_key(via.x, via.y)
+        if via.net_id == n_net_id and via_pos in p_stub_positions:
+            via.net_id = p_net_id
+        elif via.net_id == p_net_id and via_pos in n_stub_positions:
+            via.net_id = n_net_id
+
+
 def get_canonical_net_id(net_id: int, diff_pair_by_net_id: Dict[int, Tuple[str, DiffPairNet]]) -> int:
     """Get canonical net ID for loop prevention tracking.
 

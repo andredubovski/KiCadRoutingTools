@@ -343,9 +343,12 @@ def _collect_setback_blocked_cells(center_x, center_y, dir_x, dir_y, layer_idx, 
 def _detect_polarity(simplified_path, coord,
                      p_src_x, p_src_y, n_src_x, n_src_y,
                      p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
-                     config, fix_polarity=None):
+                     config):
     """
     Detect which side of the centerline P should be on and whether polarity swap is needed.
+
+    Detection only - whether the mismatch is resolved by a pad swap, an
+    opposite-side connector flip, or a skip is decided by the caller.
 
     Args:
         simplified_path: List of (gx, gy, layer) representing simplified centerline
@@ -354,12 +357,11 @@ def _detect_polarity(simplified_path, coord,
         n_src_x, n_src_y: N source position in mm
         p_tgt_x, p_tgt_y: P target position in mm
         n_tgt_x, n_tgt_y: N target position in mm
-        config: Routing config (for fix_polarity flag)
+        config: Routing config
 
     Returns:
-        (p_sign, polarity_fixed, polarity_swap_needed, has_layer_change)
+        (p_sign, polarity_swap_needed, has_layer_change)
         - p_sign: +1 or -1, which perpendicular side P should be offset to
-        - polarity_fixed: True if we'll swap target pads in output
         - polarity_swap_needed: True if source and target polarities differ
         - has_layer_change: True if path has vias (layer changes)
     """
@@ -421,20 +423,10 @@ def _detect_polarity(simplified_path, coord,
             has_layer_change = True
             break
 
-    # Handle polarity fix - mark for pad/stub net swap in output file
-    # We DON'T swap coordinates here - instead we'll swap target pad and stub nets
-    # This preserves the P→P, N→N geometry and fixes polarity at the schematic level
-    if fix_polarity is None:
-        fix_polarity = config.fix_polarity
-    polarity_fixed = False
-    if polarity_swap_needed and fix_polarity:
-        print(f"  Polarity swap needed - will swap target pad and stub nets in output")
-        polarity_fixed = True
-
     # Always use source polarity
     p_sign = src_p_sign
 
-    return p_sign, polarity_fixed, polarity_swap_needed, has_layer_change
+    return p_sign, polarity_swap_needed, has_layer_change
 
 
 def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_sign):
@@ -1682,6 +1674,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     return None, total_iterations, blocked, None
 
 
+def _routed_length(result: dict) -> float:
+    """Total length of a route result's new segments, for comparing polarity
+    resolution candidates."""
+    return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+               for s in result.get('new_segments', []))
+
+
 def _pn_tracks_cross(new_segments, p_net_id: int, n_net_id: int) -> bool:
     """Check whether any P segment crosses (or touches) any N segment on the
     same layer. Used to validate flipped-polarity retry routes, which can wrap
@@ -1708,7 +1707,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     endpoints: Optional[Tuple] = None,
                                     forced_source_dir: Optional[Tuple[float, float]] = None,
                                     forced_target_dir: Optional[Tuple[float, float]] = None,
-                                    allow_pad_swap: bool = True) -> Optional[dict]:
+                                    swap_allowed_ends: Tuple[str, ...] = ('source', 'target'),
+                                    force_swap: bool = False) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -1727,9 +1727,15 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     forced_source_dir/forced_target_dir: explicit escape directions for the
     physical source/target end (multi-point chain continuation).
 
-    allow_pad_swap: when False, polarity mismatches are never resolved by
-    swapping pad nets (required when an endpoint terminal is already used by
-    a previous leg) - only the geometric opposite-side resolution is tried.
+    swap_allowed_ends: physical ends ('source'/'target') where a polarity pad
+    swap may be applied. Multi-point legs restrict this to chain-fresh
+    terminals - swapping a terminal that already has a routed leg attached
+    would break that leg. The swap lands at the ROUTING-target end, so the
+    permission is checked against the routing direction. Pass () to forbid
+    swaps entirely.
+
+    force_swap: internal - re-route committing to the pad-swap resolution
+    (used to generate the swap candidate for length comparison).
     """
     p_net_id = diff_pair.p_net_id
     n_net_id = diff_pair.n_net_id
@@ -2054,59 +2060,99 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     simplified_path_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], layer)
                              for gx, gy, layer in simplified_path]
 
-    # Detect polarity (which side of centerline P should be on).
-    # Pad swaps are disallowed when an endpoint terminal is already used by a
-    # previous multi-point leg (allow_pad_swap=False).
-    effective_fix_polarity = config.fix_polarity and allow_pad_swap
-    p_sign, polarity_fixed, polarity_swap_needed, has_layer_change = _detect_polarity(
+    # Detect polarity (which side of centerline P should be on)
+    p_sign, polarity_swap_needed, has_layer_change = _detect_polarity(
         simplified_path, coord,
         p_src_x, p_src_y, n_src_x, n_src_y,
         p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y,
-        config, fix_polarity=effective_fix_polarity
+        config
     )
     n_sign = -p_sign
 
-    if polarity_swap_needed and not effective_fix_polarity and not (flip_source or flip_target):
-        # Polarity fixing is disabled, so a pad-net swap is not allowed. Try to
-        # resolve the mismatch geometrically instead: take the connectors out
-        # the opposite side at ONE end (flipping one end flips its P/N
-        # handedness; flipping both would reintroduce the mismatch). Only
-        # bare-pad endpoints with synthesized directions can flip (forced ends
-        # report synthesized=False, so a chain-continuation end never flips).
-        for flip_kwargs, end_name, synth_key in (
-                ({'flip_source': True}, 'source', 'source_dir_synthesized'),
-                ({'flip_target': True}, 'target', 'target_dir_synthesized')):
-            if not route_data.get(synth_key):
-                continue
-            print(f"  Polarity mismatch with polarity fixing disabled - "
-                  f"retrying with {end_name} connectors out the opposite side")
-            retry = route_diff_pair_with_obstacles(
-                pcb_data, diff_pair, config, obstacles, base_obstacles,
-                unrouted_stubs, endpoints=endpoints,
-                forced_source_dir=forced_source_dir,
-                forced_target_dir=forced_target_dir,
-                allow_pad_swap=allow_pad_swap, **flip_kwargs)
-            if not retry or retry.get('failed') or retry.get('probe_blocked'):
-                continue
-            if retry.get('polarity_swap_needed'):
-                print(f"  Flipped {end_name} route still has mismatched polarity - rejecting")
-                continue
-            # The flipped route can wrap around to reach the far side; verify
-            # the offset P/N tracks did not end up crossing anywhere
-            if _pn_tracks_cross(retry.get('new_segments', []), p_net_id, n_net_id):
-                print(f"  Flipped {end_name} route crosses itself - rejecting")
-                continue
-            retry['iterations'] = retry.get('iterations', 0) + total_iterations
-            return retry
-        print(f"  WARNING: Polarity swap needed but polarity fixing is disabled and "
-              f"connectors cannot go out the opposite side - skipping diff pair")
-        return {
-            'failed': True,
-            'polarity_skip': True,
-            'iterations': total_iterations,
-            'blocked_cells_forward': [],
-            'blocked_cells_backward': [],
-        }
+    # Resolve a polarity mismatch. Two mechanisms:
+    # - pad swap: swap the P/N pad nets at the routing-target end (only when
+    #   polarity fixing is on AND that physical end permits swaps - multi-point
+    #   legs forbid swapping terminals that already have a routed leg)
+    # - connector flip: take the connectors out the opposite side at ONE end
+    #   (bare-pad ends with synthesized directions only; flipping both ends
+    #   would reintroduce the mismatch)
+    # When both mechanisms are available, route all candidates and keep the
+    # shortest - either one can resolve polarity with a needlessly long route
+    # (e.g. a flip that wraps all the way around its own terminal).
+    polarity_fixed = False
+    if polarity_swap_needed:
+        swap_end = 'source' if routing_backwards else 'target'
+        swap_allowed = config.fix_polarity and swap_end in swap_allowed_ends
+        can_flip = (not (flip_source or flip_target) and
+                    (route_data.get('source_dir_synthesized') or
+                     route_data.get('target_dir_synthesized')))
+
+        if force_swap or (swap_allowed and not can_flip):
+            # Commit to the pad swap (no competing flip candidates to compare)
+            print(f"  Polarity swap needed - will swap target pad and stub nets in output")
+            polarity_fixed = True
+        elif not (flip_source or flip_target):
+            spent_iterations = total_iterations
+            candidates = []
+
+            if swap_allowed:
+                # Swap candidate: same centerline, completed with the pad swap
+                swap_result = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=swap_allowed_ends, force_swap=True)
+                if swap_result and not swap_result.get('failed') and not swap_result.get('probe_blocked'):
+                    spent_iterations += swap_result.get('iterations', 0)
+                    candidates.append(('pad swap', swap_result))
+
+            for flip_kwargs, end_name, synth_key in (
+                    ({'flip_source': True}, 'source', 'source_dir_synthesized'),
+                    ({'flip_target': True}, 'target', 'target_dir_synthesized')):
+                if not route_data.get(synth_key):
+                    continue
+                print(f"  Polarity mismatch - trying {end_name} connectors out the opposite side")
+                retry = route_diff_pair_with_obstacles(
+                    pcb_data, diff_pair, config, obstacles, base_obstacles,
+                    unrouted_stubs, endpoints=endpoints,
+                    forced_source_dir=forced_source_dir,
+                    forced_target_dir=forced_target_dir,
+                    swap_allowed_ends=(), **flip_kwargs)
+                if not retry:
+                    continue
+                spent_iterations += retry.get('iterations', 0)
+                if retry.get('failed') or retry.get('probe_blocked'):
+                    continue
+                if retry.get('polarity_swap_needed') and not retry.get('polarity_fixed'):
+                    print(f"  Flipped {end_name} route still has mismatched polarity - rejecting")
+                    continue
+                # The flipped route can wrap around to reach the far side; verify
+                # the offset P/N tracks did not end up crossing anywhere
+                if _pn_tracks_cross(retry.get('new_segments', []), p_net_id, n_net_id):
+                    print(f"  Flipped {end_name} route crosses itself - rejecting")
+                    continue
+                candidates.append((f'flipped {end_name}', retry))
+
+            if candidates:
+                best_name, best = min(candidates, key=lambda c: _routed_length(c[1]))
+                if len(candidates) > 1:
+                    lengths = ", ".join(f"{name}={_routed_length(r):.2f}mm"
+                                        for name, r in candidates)
+                    print(f"  Using {best_name} route ({lengths})")
+                best['iterations'] = spent_iterations
+                return best
+
+            print(f"  WARNING: Polarity mismatch cannot be resolved (pad swap "
+                  f"{'failed' if swap_allowed else 'not allowed'}, no opposite-side "
+                  f"connector option) - skipping diff pair")
+            return {
+                'failed': True,
+                'polarity_skip': True,
+                'iterations': spent_iterations,
+                'blocked_cells_forward': [],
+                'blocked_cells_backward': [],
+            }
 
     # Create P and N paths using perpendicular offsets from centerline
     # Use actual setback directions at endpoints so perpendicular offsets maintain

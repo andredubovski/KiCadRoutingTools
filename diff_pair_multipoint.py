@@ -27,7 +27,18 @@ from diff_pair_routing import (
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+from polarity_swap import apply_polarity_swap, undo_polarity_swap
 from routing_context import build_diff_pair_obstacles
+
+
+def _oriented(terminal: Tuple[Pad, Pad], pair: DiffPairNet) -> Tuple[Pad, Pad]:
+    """Return the terminal as (current P pad, current N pad). A polarity pad
+    swap flips the pads' net assignments, so the original ordering can be
+    stale for subsequent legs."""
+    pp, nn = terminal
+    if pp.net_id == pair.n_net_id and nn.net_id == pair.p_net_id:
+        return (nn, pp)
+    return terminal
 
 
 def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
@@ -249,16 +260,36 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
 
     centers = [_terminal_center(t) for t in chain]
     leg_results = []
+    applied_swaps = []  # polarity pad swaps applied by this attempt's legs
     forced_dir_next = None  # forced source direction for the next leg (opposite
                             # side of the previous leg at the shared terminal)
 
+    def rip_attempt():
+        for committed in reversed(leg_results):
+            remove_route_from_pcb_data(pcb_data, committed)
+        # Undo this attempt's pad swaps (their legs no longer exist)
+        for entry in reversed(applied_swaps):
+            undo_polarity_swap(pcb_data, entry)
+            if entry in state.pad_swaps:
+                state.pad_swaps.remove(entry)
+        if applied_swaps:
+            state.polarity_swapped_pairs.discard(pair_name)
+
     for i in range(len(chain) - 1):
-        term_a, term_b = chain[i], chain[i + 1]
+        # A pad swap at a terminal flips its pads' net assignments - re-orient
+        # each terminal tuple to (current P pad, current N pad)
+        term_a = _oriented(chain[i], pair)
+        term_b = _oriented(chain[i + 1], pair)
         print(f"  Leg {i + 1}/{len(chain) - 1}: "
               f"{term_a[0].component_ref}:{term_a[0].pad_number}/{term_a[1].pad_number} -> "
               f"{term_b[0].component_ref}:{term_b[0].pad_number}/{term_b[1].pad_number}")
 
         endpoints = (_make_endpoint(term_a, config), _make_endpoint(term_b, config))
+
+        # Pad swaps are only safe at chain-fresh terminals: the target terminal
+        # is always fresh, the source only on the first leg (a swap at a shared
+        # terminal would break the previous leg)
+        swap_ends = ('source', 'target') if i == 0 else ('target',)
 
         # Corridor exemptions: forced side only at a shared terminal, both
         # sides at fresh terminals
@@ -295,7 +326,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             pcb_data, pair, config, obstacles, state.base_obstacles,
             unrouted_stubs, endpoints=endpoints,
             forced_source_dir=forced_dir_next,
-            allow_pad_swap=False)
+            swap_allowed_ends=swap_ends)
 
         failed_reason = None
         if not result or result.get('failed') or result.get('probe_blocked'):
@@ -309,9 +340,20 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
         if failed_reason:
             print(f"  Leg {i + 1} FAILED ({failed_reason}) - "
                   f"ripping {len(leg_results)} committed leg(s)")
-            for committed in reversed(leg_results):
-                remove_route_from_pcb_data(pcb_data, committed)
+            rip_attempt()
             return None
+
+        # Apply a polarity pad swap decided by this leg BEFORE committing the
+        # route: the appendix cleanup must see the swapped pad nets
+        if result.get('polarity_fixed'):
+            if apply_polarity_swap(pcb_data, result, state.pad_swaps):
+                applied_swaps.append(state.pad_swaps[-1])
+                state.polarity_swapped_pairs.add(pair_name)
+            else:
+                print(f"  Leg {i + 1} FAILED (pad swap could not be applied) - "
+                      f"ripping {len(leg_results)} committed leg(s)")
+                rip_attempt()
+                return None
 
         # Commit this leg so the next leg sees it (as obstacle and topology)
         add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
