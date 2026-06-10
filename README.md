@@ -485,7 +485,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
-| [Claude Skills](docs/claude-skills.md) | All seven AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, failure diagnosis, board review |
+| [Claude Skills](docs/claude-skills.md) | All eight AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 

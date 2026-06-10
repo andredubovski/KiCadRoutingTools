@@ -1,6 +1,6 @@
 # Claude Code Skills
 
-The repository ships seven [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`. They combine the project's deterministic Python tooling (`kicad_parser`, `list_nets.py`, `analyze_power_paths.py`, the checkers) with AI judgment where it's actually needed — reading datasheets, classifying components, planning workflows, and diagnosing failures. Outputs are formatted as ready-to-use CLI arguments so they feed straight back into the routing tools.
+The repository ships eight [Claude Code](https://claude.ai/claude-code) skills in `.claude/skills/`. They combine the project's deterministic Python tooling (`kicad_parser`, `list_nets.py`, `analyze_power_paths.py`, the checkers) with AI judgment where it's actually needed — reading datasheets, classifying components, planning workflows, and diagnosing failures. Outputs are formatted as ready-to-use CLI arguments so they feed straight back into the routing tools.
 
 ## Using the Skills
 
@@ -12,7 +12,7 @@ claude
 > /plan-pcb-routing /absolute/path/to/my_board.kicad_pcb
 ```
 
-Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, `/identify-diff-pairs`, `/recommend-stackup`) use WebSearch and can take a few minutes on boards with many unique ICs.
+Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, `/identify-diff-pairs`, `/recommend-stackup`, `/recommend-plane-mappings`) use WebSearch and can take a few minutes on boards with many unique ICs.
 
 ## The Skills
 
@@ -23,6 +23,7 @@ Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, 
 | [`/find-high-speed-nets`](#find-high-speed-nets) | Classify nets by speed tier via datasheets | `--gnd-via-distance` recommendation |
 | [`/identify-diff-pairs`](#identify-diff-pairs) | Find diff pairs by pin function, not just naming | Per-interface `route_diff.py` commands |
 | [`/recommend-stackup`](#recommend-stackup) | Review/recommend the board stackup | Stackup table + `--impedance`/plane-layer arguments |
+| [`/recommend-plane-mappings`](#recommend-plane-mappings) | Recommend net → plane-layer assignments with SI rationale | Assignment list for the Planes tab / `route_planes.py` arguments |
 | [`/diagnose-routing-failures`](#diagnose-routing-failures) | Root-cause failed routes from logs + board | Targeted retry command for the failed nets |
 | [`/review-routed-board`](#review-routed-board) | Post-route QA and sign-off | Pass/fail report with next actions |
 
@@ -47,6 +48,10 @@ Finds differential pairs by **pin function** rather than net naming: checks pad 
 ### /recommend-stackup
 
 Reviews the board's stackup and flags untouched KiCad defaults — which silently skew `--impedance` width calculations and `--time-matching` delays. Gathers impedance targets from the board's interfaces, looks up the user's fab's standard stackups, and recommends layer roles and dielectric thicknesses, validated with the project's own IPC-2141 formulas in `impedance.py` so the recommendation matches what the router will compute. Outputs the resulting routing arguments; never modifies the board file.
+
+### /recommend-plane-mappings
+
+Recommends which nets deserve copper planes and on which layers. Reads the stackup and existing zones, identifies plane-worthy nets by pad count and datasheet current estimates (the `/analyze-power-nets` approach), and assigns layers with signal-integrity rationale: GND adjacent to the primary signal layers for return paths, power planes paired against GND for interplane capacitance, and split layers for multiple low-current rails (flagging the seams). On 2-layer boards it recommends pours and points at `/recommend-stackup` when the signal content justifies four layers. Ends with a machine-readable `RESULT=GND:In1.Cu;VCC:In2.Cu` line that maps 1:1 onto the Planes tab's assignment list.
 
 ### /diagnose-routing-failures
 

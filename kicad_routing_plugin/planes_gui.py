@@ -19,13 +19,51 @@ from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 
 
+def parse_plane_mappings_result(value, copper_layers, net_names):
+    """Parse a /recommend-plane-mappings RESULT line (issue #53).
+
+    Format: assignment groups separated by ';', nets within a group joined
+    by '|', one copper layer per group after the final ':', e.g.
+    'GND:In1.Cu;VCC|+3V3:In2.Cu'.
+
+    Returns (assignments, notes): assignments as the panel's
+    (nets_list, layers_list) tuples (empty if nothing valid), notes listing
+    what was rejected. Unknown nets and non-copper layers are dropped.
+    """
+    assignments, notes = [], []
+    copper = set(copper_layers)
+    known = set(net_names)
+    for group in str(value).split(";"):
+        group = group.strip()
+        if not group:
+            continue
+        nets_part, sep, layer = group.rpartition(":")
+        layer = layer.strip()
+        if not sep or not nets_part:
+            notes.append(f"plane mappings: unparseable group {group!r}")
+            continue
+        if layer not in copper:
+            notes.append(f"plane mappings: {layer!r} is not a copper layer, group dropped")
+            continue
+        nets = [n.strip() for n in nets_part.split("|") if n.strip()]
+        unknown = [n for n in nets if n not in known]
+        nets = [n for n in nets if n in known]
+        if unknown:
+            notes.append(f"plane mappings: unknown nets {unknown} dropped")
+        if nets:
+            assignments.append((nets, [layer]))
+        else:
+            notes.append(f"plane mappings: group {group!r} had no known nets")
+    return assignments, notes
+
+
 class PlaneAssignmentPanel(wx.Panel):
     """Panel for managing net-to-layer assignments for plane creation.
 
     Each assignment maps a group of nets (joined with "|") to one or more target layers.
     """
 
-    def __init__(self, parent, pcb_data, get_selected_nets_callback):
+    def __init__(self, parent, pcb_data, get_selected_nets_callback, on_ask_claude=None):
         """
         Create a plane assignment panel.
 
@@ -33,10 +71,13 @@ class PlaneAssignmentPanel(wx.Panel):
             parent: Parent window
             pcb_data: PCBData object with board info
             get_selected_nets_callback: Function that returns currently selected nets
+            on_ask_claude: Callback for the "Ask Claude" button that recommends
+                net -> layer mappings (issue #53); button hidden if None.
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.get_selected_nets = get_selected_nets_callback
+        self.on_ask_claude = on_ask_claude
         self.assignments = []  # List of (nets_list, layers_list) tuples
 
         self._create_ui()
@@ -82,6 +123,15 @@ class PlaneAssignmentPanel(wx.Panel):
         self.remove_btn.SetToolTip("Remove selected assignments")
         self.remove_btn.Bind(wx.EVT_BUTTON, self._on_remove)
         btn_sizer.Add(self.remove_btn, 0)
+
+        if self.on_ask_claude is not None:
+            self.ask_claude_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+            self.ask_claude_btn.SetToolTip(
+                "Run the /recommend-plane-mappings skill: recommends which nets "
+                "deserve planes and on which layers (GND adjacency, GND/VCC pairing), "
+                "then fills this assignment list. Takes a few minutes.")
+            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            btn_sizer.Add(self.ask_claude_btn, 0, wx.LEFT, 5)
 
         sizer.Add(btn_sizer, 0, wx.EXPAND)
 
@@ -488,7 +538,8 @@ class PlanesTab(wx.Panel):
 
         self.assignment_panel = PlaneAssignmentPanel(
             self, self.pcb_data,
-            get_selected_nets_callback=lambda: self.net_panel.get_selected_nets()
+            get_selected_nets_callback=lambda: self.net_panel.get_selected_nets(),
+            on_ask_claude=self._on_ask_claude_plane_mappings
         )
         self.assign_sizer.Add(self.assignment_panel, 1, wx.EXPAND | wx.ALL, 5)
 
@@ -610,6 +661,82 @@ class PlanesTab(wx.Panel):
         dlg.Destroy()
         if value is not None:
             self._apply_gnd_via_recommendation(value)
+
+    def _on_ask_claude_plane_mappings(self):
+        """Run /recommend-plane-mappings headless and fill the assignment
+        list from its recommendation (issue #53)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = self.board_filename
+        if not board or not os.path.isfile(board):
+            wx.MessageBox(
+                "Board file not found on disk. Save the board first so the "
+                f"analysis sees the current state.\n\nLooked for: {board}",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+
+        prompt = (
+            f"/recommend-plane-mappings {os.path.abspath(board)} — analysis only, "
+            "do not modify any files. After the report, end your reply with exactly "
+            "one line of the form RESULT=<net>:<layer>;<net>|<net>:<layer> "
+            "(groups separated by ';', nets sharing a layer joined by '|', exact "
+            "net names, one copper layer per group), e.g. RESULT=GND:In1.Cu;VCC:In2.Cu"
+        )
+        model = effort = None
+        if self.get_claude_params:
+            claude_params = self.get_claude_params()
+            model = claude_params.get('model')
+            effort = claude_params.get('effort')
+        dlg = ClaudeSkillDialog(
+            self, "Claude: recommend plane mappings", prompt,
+            claude_path=claude_path, model=model, effort=effort,
+            intro=f"Running /recommend-plane-mappings on {os.path.basename(board)} ...\n"
+                  "(board analysis; typically a few minutes)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            self._apply_plane_mappings_recommendation(value)
+
+    def _apply_plane_mappings_recommendation(self, value):
+        """Validate Claude's RESULT value and fill the assignment list."""
+        net_names = {net.name for net in self.pcb_data.nets.values() if net.name}
+        copper = self.assignment_panel._get_copper_layers()
+        assignments, notes = parse_plane_mappings_result(value, copper, net_names)
+        for note in notes:
+            if self.append_log:
+                self.append_log(f"Claude: {note}\n")
+        if not assignments:
+            if self.append_log:
+                self.append_log(f"Claude: no usable plane mappings in {value!r}\n")
+            return
+
+        existing = self.assignment_panel.get_assignments()
+        if existing:
+            choice = wx.MessageBox(
+                "The assignment list already has entries.\n\n"
+                "Yes = replace them with Claude's recommendation\n"
+                "No = merge (keep existing, add new ones)",
+                "Plane mappings", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
+            if choice == wx.CANCEL:
+                return
+            if choice == wx.NO:
+                seen = {(tuple(nets), tuple(layers)) for nets, layers in existing}
+                assignments = existing + [
+                    (nets, layers) for nets, layers in assignments
+                    if (tuple(nets), tuple(layers)) not in seen]
+        self.assignment_panel.set_assignments(assignments)
+        if self.append_log:
+            shown = ", ".join(f"{'|'.join(nets)} -> {'/'.join(layers)}"
+                              for nets, layers in assignments)
+            self.append_log(f"Claude recommended plane mappings: {shown}\n")
 
     def _apply_gnd_via_recommendation(self, value):
         """Validate Claude's RESULT value and apply it to the GUI controls."""

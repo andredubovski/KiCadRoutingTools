@@ -179,60 +179,15 @@ Report to user:
 - Whether `route_diff.py` is needed
 - Whether DDR/length-matching is needed
 
-### Lightweight High-Speed Signal Detection
+### High-Speed Signal Check (delegate to /find-high-speed-nets)
 
-Scan net names and footprint names for speed indicators to determine whether GND return
-vias should be included in the plan and what `--gnd-via-distance` to use.
-
-> **Tip:** For thorough analysis with datasheet lookup and per-net rise time estimates,
-> run `/find-high-speed-nets` first.
-
-```python
-# Quick speed classification by net name patterns (no datasheet lookup)
-hs_patterns = {
-    'ultra_high': ['DDR3', 'DDR4', 'DDR5', 'LPDDR', 'PCIE', 'SATA', 'USB3',
-                   'SGMII', 'XGMII', 'TMDS'],     # >1 GHz
-    'high':       ['DDR', 'DQ', 'DQS', 'RGMII', 'RMII', 'QSPI', 'QIO',
-                   'SDIO', 'LVDS', 'HDMI', 'USB', 'ETH', 'ULPI', 'EMMC'],  # 100 MHz-1 GHz
-    'medium':     ['SPI', 'SCK', 'SCLK', 'MOSI', 'MISO', 'CLK', 'MCLK',
-                   'BCLK', 'JTAG', 'TCK', 'SWDIO', 'SWCLK', 'CAN'],       # 10-100 MHz
-}
-
-# Check net names (case-insensitive) - stop at first (fastest) match
-highest_tier = None
-matched_nets = []
-for net in pcb.nets.values():
-    if not net.name:
-        continue
-    name_upper = net.name.upper()
-    for tier in ['ultra_high', 'high', 'medium']:
-        if any(pat in name_upper for pat in hs_patterns[tier]):
-            matched_nets.append((net.name, tier))
-            if highest_tier is None or ['ultra_high','high','medium'].index(tier) < \
-               ['ultra_high','high','medium'].index(highest_tier):
-                highest_tier = tier
-            break
-
-# Also check footprint names for high-speed ICs
-hs_footprint_kw = ['FPGA', 'CPLD', 'DDR', 'SDRAM', 'PHY', 'USB', 'ETH', 'SERDES']
-for ref, fp in pcb.footprints.items():
-    if any(kw in fp.footprint_name.upper() for kw in hs_footprint_kw):
-        if highest_tier is None:
-            highest_tier = 'high'  # Conservative default for HS components
-```
-
-Based on the highest speed tier found, select GND return via parameters:
-
-| Speed Tier | Frequency | `--gnd-via-distance` | Action |
-|------------|-----------|----------------------|--------|
-| Ultra-high | >1 GHz | 2.0 mm | Strongly recommend GND return vias |
-| High | 100 MHz - 1 GHz | 3.0 mm | Recommend GND return vias |
-| Medium | 10 - 100 MHz | 5.0 mm | Recommend (can skip if desired) |
-| Low / none | <10 MHz | Skip | Suggest skipping; offer to include |
-
-**Minimum physical limit:** `--gnd-via-distance` should not be set below 3 x (via_size + clearance),
-typically ~2.5 mm for standard 0.8 mm vias with 0.25 mm clearance. Values below this will not find
-valid placement positions.
+Whether the plan includes GND return vias - and the `--gnd-via-distance` to use -
+is the `/find-high-speed-nets` skill's job: it classifies nets into speed tiers
+(datasheet lookup, rise-time estimates) and maps tiers to recommended distances.
+Follow that skill's methodology here (its quick net-name/footprint scan decides
+whether the deeper datasheet pass is worth it) and put the recommended distance
+into the plan's GND-via step. Remember its physical floor: never set
+`--gnd-via-distance` below 3 x (via_size + clearance), ~2.5 mm for standard vias.
 
 Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
@@ -242,22 +197,21 @@ Report to user when presenting the plan:
   low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
   for this board. Want me to remove the step?"
 
-## Step 5: Review Power and Ground Net Strategy
+## Step 5: Review Power and Ground Net Strategy (delegate to /recommend-plane-mappings)
 
-From the `list_nets.py --power` output, analyze:
-
-### Power Net Routing Strategies
-
-| Net Type | Strategy | Rationale |
-|----------|----------|-----------|
-| GND (many pads) | `route_planes.py` on bottom/inner layer | Low impedance return path |
-| VCC/Power (many pads) | Wide traces (0.5mm+) or plane | Current carrying capacity |
-| VCC/Power (few pads) | Wide traces with `--power-nets` | Simpler than plane |
+Which nets deserve planes and on which copper layers is the
+`/recommend-plane-mappings` skill's job: it weighs pad counts and datasheet
+current estimates, and assigns layers with SI rationale (GND adjacent to signal
+layers for return paths, power planes paired against GND, split layers for
+multiple rails). Follow its methodology here, seeded by the `list_nets.py --power`
+output, and put the resulting net -> layer assignments into the plan's
+`route_planes` steps. Nets it leaves to wide traces become `--power-nets` /
+`--power-nets-widths` on the route step instead.
 
 Report to user:
 - Identified GND nets and pad counts
 - Identified power nets and pad counts
-- Recommended strategy (plane vs wide traces)
+- Recommended strategy (plane vs wide traces) with layer assignments
 
 ## Step 6: Generate Routing Plan
 
