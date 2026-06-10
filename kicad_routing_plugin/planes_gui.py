@@ -173,9 +173,15 @@ class PlaneAssignmentPanel(wx.Panel):
 class CreatePlanesOptionsPanel(wx.Panel):
     """Options panel for creating copper planes (route_planes.py)."""
 
-    def __init__(self, parent):
-        """Create the options panel."""
+    def __init__(self, parent, on_ask_claude=None):
+        """Create the options panel.
+
+        Args:
+            on_ask_claude: Callback for the "Ask Claude" button next to the
+                GND via distance field (issue #39); button hidden if None.
+        """
         super().__init__(parent)
+        self.on_ask_claude = on_ask_claude
         self._create_ui()
 
     def _create_ui(self):
@@ -264,7 +270,19 @@ class CreatePlanesOptionsPanel(wx.Panel):
                                                    initial=defaults.GND_VIA_DISTANCE, inc=r['inc'])
         self.gnd_via_distance.SetDigits(r['digits'])
         self.gnd_via_distance.SetToolTip("Maximum distance from signal via to place GND via")
-        gnd_grid.Add(self.gnd_via_distance, 0, wx.EXPAND)
+        if self.on_ask_claude is not None:
+            dist_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            dist_sizer.Add(self.gnd_via_distance, 1, wx.EXPAND | wx.RIGHT, 5)
+            self.ask_claude_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+            self.ask_claude_btn.SetToolTip(
+                "Run the /find-high-speed-nets skill: looks up component datasheets to "
+                "classify nets by speed and recommends this distance for GND return "
+                "vias. Takes a few minutes (web lookups).")
+            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            dist_sizer.Add(self.ask_claude_btn, 0)
+            gnd_grid.Add(dist_sizer, 0, wx.EXPAND)
+        else:
+            gnd_grid.Add(self.gnd_via_distance, 0, wx.EXPAND)
 
         gnd_grid.Add(wx.StaticText(self, label="GND Net Name:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.gnd_via_net = wx.TextCtrl(self, value=defaults.GND_VIA_NET)
@@ -481,7 +499,8 @@ class PlanesTab(wx.Panel):
         options_scroll_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Create options panel
-        self.create_options = CreatePlanesOptionsPanel(self.options_scroll)
+        self.create_options = CreatePlanesOptionsPanel(
+            self.options_scroll, on_ask_claude=self._on_ask_claude_gnd_via)
         options_scroll_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Repair options panel (initially hidden)
@@ -545,6 +564,60 @@ class PlanesTab(wx.Panel):
         self.options_scroll.Layout()
         self.options_scroll.FitInside()
         self.Layout()
+
+    def _on_ask_claude_gnd_via(self):
+        """Run /find-high-speed-nets headless and fill the GND via distance
+        field from its recommendation (issue #39)."""
+        from .claude_gui import find_claude, ClaudeSkillDialog
+
+        claude_path = find_claude()
+        if claude_path is None:
+            wx.MessageBox(
+                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
+                "and make sure `claude` is on your PATH.",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+        board = self.board_filename
+        if not board or not os.path.isfile(board):
+            wx.MessageBox(
+                "Board file not found on disk. Save the board first so the "
+                f"analysis sees the current state.\n\nLooked for: {board}",
+                "Claude", wx.OK | wx.ICON_WARNING)
+            return
+
+        prompt = (
+            f"/find-high-speed-nets {os.path.abspath(board)} — analysis only, do not "
+            "modify any files. After the report, end your reply with exactly one "
+            "line of the form RESULT=<recommended --gnd-via-distance in mm> "
+            "(a bare number), e.g. RESULT=2.5"
+        )
+        dlg = ClaudeSkillDialog(
+            self, "Claude: recommend GND via distance", prompt,
+            claude_path=claude_path,
+            intro=f"Running /find-high-speed-nets on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)")
+        dlg.ShowModal()
+        value = dlg.result_value
+        dlg.Destroy()
+        if value is not None:
+            self._apply_gnd_via_recommendation(value)
+
+    def _apply_gnd_via_recommendation(self, value):
+        """Validate Claude's RESULT value and apply it to the GUI controls."""
+        try:
+            distance = float(value)
+        except ValueError:
+            if self.append_log:
+                self.append_log(f"Claude: unusable GND via distance {value!r}\n")
+            return
+        r = defaults.PARAM_RANGES['gnd_via_distance']
+        clamped = max(r['min'], min(r['max'], distance))
+        self.create_options.gnd_via_distance.SetValue(clamped)
+        self.create_options.add_gnd_vias_check.SetValue(True)
+        if self.append_log:
+            note = "" if clamped == distance else f" (clamped from {distance})"
+            self.append_log(f"Claude recommended GND via distance: {clamped} mm{note}; "
+                            "enabled 'Add GND vias near signal vias'\n")
 
     def _on_cancel_or_close(self, event):
         """Handle cancel/close button."""
