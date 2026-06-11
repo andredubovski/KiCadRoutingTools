@@ -2113,6 +2113,27 @@ def route_multipoint_taps(
         # Combine blocked cells from both directions for rip-up analysis
         blocked_cells = forward_blocked + backward_blocked
 
+        # Neck-down retry (issue #72): a wide power tap that cannot fit may
+        # still route at the layer's default width (e.g. escaping a
+        # fine-pitch pad walled in by a neighboring power net)
+        necked_down = False
+        if path is None and track_margin > 0 and config.power_tap_neckdown:
+            print(f"      {YELLOW}Wide tap blocked - retrying at default track width (neck-down){RESET}")
+            path, nd_iterations, nd_fwd_blocked, nd_bwd_blocked, reversed_tap_path, _, _ = _route_main_connection(
+                router, obstacles, config, sources, targets, 0,
+                pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
+                waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
+            )
+            tap_iterations += nd_iterations
+            if path is not None:
+                necked_down = True
+                if reversed_tap_path:
+                    path = list(reversed(path))
+            # On narrow failure keep the WIDE attempt's blocked cells for
+            # rip-up analysis: ripping based on the narrow frontier finds
+            # blockers whose removal only helps a narrow route, but ripped
+            # nets re-route at their wide width and can fail entirely
+
         tap_elapsed = time.time() - tap_start_time
         total_iterations += tap_iterations
 
@@ -2145,6 +2166,9 @@ def route_multipoint_taps(
             (tgt_x, tgt_y, path_end_layer),  # end_original (target pad on actual reached layer)
             through_hole_positions
         )
+        if necked_down:
+            segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                              coord, layer_names, track_margin)
         all_segments.extend(segments)
         all_vias.extend(vias)
 
@@ -2310,3 +2334,169 @@ def _path_to_segments_vias(
             segments.append(seg)
 
     return segments, vias
+
+
+def _seg_length(seg) -> float:
+    return math.hypot(seg.end_x - seg.start_x, seg.end_y - seg.start_y)
+
+
+def _split_segment_at(seg, dist_from_end: float):
+    """Split a segment at dist_from_end mm before its end point.
+
+    Returns (near_part, far_part) where far_part is the dist_from_end-long
+    piece touching seg's end. Returns (None, seg) if the segment is shorter
+    than dist_from_end.
+    """
+    length = _seg_length(seg)
+    if length <= dist_from_end:
+        return None, seg
+    t = 1.0 - dist_from_end / length
+    mx = seg.start_x + (seg.end_x - seg.start_x) * t
+    my = seg.start_y + (seg.end_y - seg.start_y) * t
+    near = Segment(start_x=seg.start_x, start_y=seg.start_y, end_x=mx, end_y=my,
+                   width=seg.width, layer=seg.layer, net_id=seg.net_id)
+    far = Segment(start_x=mx, start_y=my, end_x=seg.end_x, end_y=seg.end_y,
+                  width=seg.width, layer=seg.layer, net_id=seg.net_id)
+    return near, far
+
+
+def _segment_fits_wide(seg, obstacles, coord: GridCoord, layer_idx: int, margin: int) -> bool:
+    """True if every grid cell along the segment clears the wide-track margin."""
+    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+    for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+        if obstacles.is_blocked_with_margin(gx, gy, layer_idx, margin):
+            return False
+    return True
+
+
+def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
+                           obstacles, coord: GridCoord, layer_names: List[str],
+                           track_margin: int):
+    """Assign widths to a neck-down tap route (issue #72).
+
+    The path was routed at the layer's default width because the power width
+    did not fit. Segments within config.neckdown_length of the target pad
+    (the END of the list) stay narrow; farther segments return to the power
+    width wherever the wide clearance fits, with an optional stepped taper
+    at each narrow->wide transition.
+
+    Returns a new segment list (segments may be split for the taper).
+    """
+    layer_map = {name: i for i, name in enumerate(layer_names)}
+
+    # Walk from the target pad (end of list) toward the tap point, assigning
+    # widths. wide[i] mirrors segments order.
+    out = []  # built in reverse (target-first)
+    wide_flags = []
+    cum = 0.0
+    for seg in reversed(segments):
+        narrow_w = config.get_track_width(seg.layer)
+        wide_w = config.get_net_track_width(net_id, seg.layer)
+        length = _seg_length(seg)
+        if cum >= config.neckdown_length and wide_w > narrow_w:
+            layer_idx = layer_map.get(seg.layer, 0)
+            is_wide = _segment_fits_wide(seg, obstacles, coord, layer_idx, track_margin)
+            seg.width = wide_w if is_wide else narrow_w
+            out.append(seg)
+            wide_flags.append(is_wide)
+        elif cum + length > config.neckdown_length and wide_w > narrow_w:
+            # Segment straddles the neck boundary: split it there (the far
+            # piece, touching the pad side, is neckdown_length - cum long)
+            near, far = _split_segment_at(seg, config.neckdown_length - cum)
+            far.width = narrow_w
+            out.append(far)
+            wide_flags.append(False)
+            if near is not None:
+                layer_idx = layer_map.get(seg.layer, 0)
+                is_wide = _segment_fits_wide(near, obstacles, coord, layer_idx, track_margin)
+                near.width = wide_w if is_wide else narrow_w
+                out.append(near)
+                wide_flags.append(is_wide)
+        else:
+            seg.width = narrow_w
+            out.append(seg)
+            wide_flags.append(False)
+        cum += length
+
+    out.reverse()
+    wide_flags.reverse()
+
+    # Suppress short wide islands (a wide run between narrow pinches that is
+    # barely longer than its tapers just adds notch noise)
+    min_island = 2 * config.neckdown_taper_length
+    i = 0
+    while i < len(out):
+        if not wide_flags[i]:
+            i += 1
+            continue
+        j = i
+        run_len = 0.0
+        while j < len(out) and wide_flags[j]:
+            run_len += _seg_length(out[j])
+            j += 1
+        is_island = i > 0 and j < len(out)  # narrow (or pad) on both sides
+        if is_island and run_len <= min_island:
+            for k in range(i, j):
+                out[k].width = config.get_track_width(out[k].layer)
+                wide_flags[k] = False
+        i = j
+
+    if config.neckdown_taper_length <= 0:
+        return out
+
+    # Stepped taper wherever a wide segment meets a narrow one on the same
+    # layer: carve the wide segment's adjoining end into width steps
+    TAPER_STEPS = 4
+
+    def _taper_pieces(seg, narrow_end: str):
+        """Split seg into [body + taper steps]; narrow_end is 'start' or 'end'."""
+        narrow_w = config.get_track_width(seg.layer)
+        wide_w = seg.width
+        taper_len = min(config.neckdown_taper_length, _seg_length(seg) / 3)
+        if taper_len <= 0:
+            return [seg]
+        flipped = narrow_end == 'start'
+        if flipped:  # work as if the narrow side is at the end
+            seg = Segment(start_x=seg.end_x, start_y=seg.end_y,
+                          end_x=seg.start_x, end_y=seg.start_y,
+                          width=seg.width, layer=seg.layer, net_id=seg.net_id)
+        body, taper = _split_segment_at(seg, taper_len)
+        if body is None:
+            return [seg]
+        pieces = [body]
+        step_len = taper_len / TAPER_STEPS
+        remaining = taper
+        for s in range(TAPER_STEPS):
+            if s < TAPER_STEPS - 1 and _seg_length(remaining) > step_len:
+                piece, remaining = _split_segment_at(remaining, _seg_length(remaining) - step_len)
+            else:
+                piece, remaining = remaining, None
+            piece.width = wide_w + (narrow_w - wide_w) * (s + 1) / (TAPER_STEPS + 1)
+            pieces.append(piece)
+            if remaining is None:
+                break
+        if flipped:  # restore original direction and order
+            pieces = [Segment(start_x=p.end_x, start_y=p.end_y,
+                              end_x=p.start_x, end_y=p.start_y,
+                              width=p.width, layer=p.layer, net_id=p.net_id)
+                      for p in reversed(pieces)]
+        return pieces
+
+    tapered = []
+    for i, seg in enumerate(out):
+        if not wide_flags[i]:
+            tapered.append(seg)
+            continue
+        narrow_after = (i + 1 < len(out) and not wide_flags[i + 1]
+                        and out[i + 1].layer == seg.layer)
+        narrow_before = (i > 0 and not wide_flags[i - 1]
+                         and out[i - 1].layer == seg.layer)
+        pieces = [seg]
+        if narrow_after:
+            pieces = _taper_pieces(seg, 'end')
+        if narrow_before:
+            head = _taper_pieces(pieces[0], 'start')
+            pieces = head + pieces[1:]
+        tapered.extend(pieces)
+    return tapered
