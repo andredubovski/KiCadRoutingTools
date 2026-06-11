@@ -491,6 +491,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | Document | Description |
 |----------|-------------|
 | [Routing Architecture](docs/routing-architecture.md) | Module structure, obstacle maps, A* algorithm |
+| [Python API](docs/python-api.md) | Using the modules as a library: parser, writer, modification, config, net analysis, impedance — with runnable examples |
 | [Configuration](docs/configuration.md) | Command-line options, GridRouteConfig parameters |
 | [Differential Pairs](docs/differential-pairs.md) | P/N pairing, polarity swaps, via handling |
 | [Net Ordering](docs/net-ordering.md) | MPS algorithm, inside-out ordering, strategy comparison |
@@ -631,6 +632,10 @@ KiCadRoutingTools/
 ```
 
 ## Module Overview
+
+One-line summaries below; the [Python API documentation](docs/python-api.md)
+has full per-module references (signatures, dataclass fields, gotchas) with
+runnable examples.
 
 ### Core Routing
 
