@@ -1015,6 +1015,9 @@ Features:
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
+- Fine grid steps (e.g. 0.05mm) can leave sub-cell pad-clearance DRC encroachments
+  (obstacle expansion floors where pad clearance needs ceiling) - see
+  [issue #70](https://github.com/drandyhaas/KiCadRoutingTools/issues/70)
 
 ## License
 
