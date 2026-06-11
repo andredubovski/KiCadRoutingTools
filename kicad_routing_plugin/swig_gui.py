@@ -773,13 +773,6 @@ class RoutingDialog(wx.Dialog):
         self.enable_layer_switch.SetToolTip("Enable stub layer switching optimization")
         options_inner.Add(self.enable_layer_switch, 0, wx.ALL, 3)
 
-        # Power route neck-down (issue #72)
-        self.power_tap_neckdown_check = wx.CheckBox(options_scroll, label="Power route neck-down")
-        self.power_tap_neckdown_check.SetValue(True)
-        self.power_tap_neckdown_check.SetToolTip("Retry failed wide power routes at the default track width, "
-                                                 "narrow near the pads and wide where clearance allows")
-        options_inner.Add(self.power_tap_neckdown_check, 0, wx.ALL, 3)
-
         # Move copper text
         self.move_text_check = wx.CheckBox(options_scroll, label="Move copper text to silkscreen")
         self.move_text_check.SetValue(True)
@@ -863,6 +856,13 @@ class RoutingDialog(wx.Dialog):
         self.power_widths_ctrl.SetToolTip("Track widths in mm for each power-net pattern (space-separated)")
         widths_sizer.Add(self.power_widths_ctrl, 1, wx.EXPAND)
         options_inner.Add(widths_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Power route neck-down (issue #72)
+        self.power_tap_neckdown_check = wx.CheckBox(options_scroll, label="Power route neck-down")
+        self.power_tap_neckdown_check.SetValue(True)
+        self.power_tap_neckdown_check.SetToolTip("Retry failed wide power routes at the default track width, "
+                                                 "narrow near the pads and wide where clearance allows")
+        options_inner.Add(self.power_tap_neckdown_check, 0, wx.ALL, 3)
 
         # No BGA zones
         bga_sizer = wx.BoxSizer(wx.HORIZONTAL)
