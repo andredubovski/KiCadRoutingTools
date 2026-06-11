@@ -68,6 +68,13 @@ class GridRouteConfig:
     hole_to_hole_clearance: float = 0.2  # mm - minimum clearance between drill holes (edge to edge)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
+    # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
+    # retry it at the layer's default track width. The narrow neck extends
+    # neckdown_length mm from the target pad; beyond that the track returns
+    # to the power width wherever the wide clearance fits.
+    power_tap_neckdown: bool = True
+    neckdown_length: float = 2.5  # mm of narrow track from the target pad
+    neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
     vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
