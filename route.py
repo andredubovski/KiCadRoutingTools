@@ -103,7 +103,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
                 power_tap_neckdown: bool = True,
-                neckdown_length: float = 5.0,
+                neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
                 clearance: float = 0.1,
                 via_size: float = 0.3,
@@ -899,7 +899,7 @@ For differential pair routing, use route_diff.py:
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
     parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
-                             "returns to the power width beyond this where clearance allows (default: 5.0)")
+                             "returns to the power width beyond this where clearance allows (default: 2.5)")
     parser.add_argument("--neckdown-taper-length", type=float, default=defaults.NECKDOWN_TAPER_LENGTH,
                         help="Length in mm of the stepped narrow-to-wide width taper on neck-down tap routes "
                              "(0 = abrupt width change, default: 0.5)")

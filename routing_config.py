@@ -73,7 +73,7 @@ class GridRouteConfig:
     # neckdown_length mm from the target pad; beyond that the track returns
     # to the power width wherever the wide clearance fits.
     power_tap_neckdown: bool = True
-    neckdown_length: float = 5.0  # mm of narrow track from the target pad
+    neckdown_length: float = 2.5  # mm of narrow track from the target pad
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack

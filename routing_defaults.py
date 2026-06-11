@@ -23,7 +23,7 @@ TRACK_PROXIMITY_COST = 0.0
 
 # Distance parameters
 STUB_PROXIMITY_RADIUS = 2.0  # mm
-NECKDOWN_LENGTH = 5.0  # mm of narrow track from the pad on neck-down routes (issue #72)
+NECKDOWN_LENGTH = 2.5  # mm of narrow track from the pad on neck-down routes (issue #72)
 NECKDOWN_TAPER_LENGTH = 0.5  # mm narrow->wide width taper (0 = abrupt)
 TRACK_PROXIMITY_DISTANCE = 2.0  # mm
 BGA_PROXIMITY_RADIUS = 7.0  # mm
