@@ -897,10 +897,10 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
                         help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
-    parser.add_argument("--neckdown-length", type=float, default=5.0,
+    parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
                              "returns to the power width beyond this where clearance allows (default: 5.0)")
-    parser.add_argument("--neckdown-taper-length", type=float, default=0.5,
+    parser.add_argument("--neckdown-taper-length", type=float, default=defaults.NECKDOWN_TAPER_LENGTH,
                         help="Length in mm of the stepped narrow-to-wide width taper on neck-down tap routes "
                              "(0 = abrupt width change, default: 0.5)")
 

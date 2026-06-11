@@ -870,7 +870,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         print(f"    GridRouter targets: {forward_targets[:3]}{'...' if len(forward_targets) > 3 else ''}")
         if use_single_direction:
             print(f"    Bus routing: single-direction mode (start from clustered endpoints)")
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
         router, obstacles, config, forward_sources, forward_targets, track_margin,
         pcb_data, net_id, print_prefix="", direction_labels=direction_labels,
         single_direction=use_single_direction
@@ -989,6 +989,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 net_id=net_id
             )
             new_segments.append(seg)
+
+    if necked_down:
+        # Both endpoints are pads: neck the start side too
+        new_segments = _apply_neckdown_widths(new_segments, config, net_id, obstacles,
+                                              coord, layer_names, track_margin, neck_start=True)
 
     return {
         'new_segments': new_segments,
@@ -1152,6 +1157,34 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                            pcb_data, net_id, print_prefix="",
                            direction_labels=("forward", "backward"), single_direction=False,
                            waypoints=None):
+    """Route sources->targets; wide routes that fail retry narrow (issue #72).
+
+    Same return shape as _route_connection_at_margin plus a trailing
+    necked_down flag: when a wide power route cannot fit, it is retried at
+    the layer's default width and the caller applies neck-down widths to
+    the resulting segments (_apply_neckdown_widths).
+    """
+    result = _route_connection_at_margin(
+        router, obstacles, config, sources, targets, track_margin,
+        pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+    if result[0] is not None or track_margin == 0 or not config.power_tap_neckdown:
+        return result + (False,)
+    print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
+    retry = _route_connection_at_margin(
+        router, obstacles, config, sources, targets, 0,
+        pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
+    if retry[0] is None:
+        # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
+        # by the narrow frontier only help a narrow route, but ripped nets
+        # re-route at their own wide width and can fail entirely
+        return (result[0], result[1] + retry[1]) + result[2:] + (False,)
+    return (retry[0], result[1] + retry[1]) + retry[2:] + (True,)
+
+
+def _route_connection_at_margin(router, obstacles, config, sources, targets, track_margin,
+                                pcb_data, net_id, print_prefix="",
+                                direction_labels=("forward", "backward"), single_direction=False,
+                                waypoints=None):
     """Route sources->targets, steering through the guide corridor (issue #7).
 
     A drop-in replacement for _probe_route_with_frontier with the SAME return
@@ -1762,7 +1795,7 @@ def route_multipoint_main(
 
     # Use probe routing helper, steered through this edge's bucket of corridor
     # waypoints (the tap edges follow their own buckets in route_multipoint_taps).
-    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters = _route_main_connection(
+    path, total_iterations, forward_blocked, backward_blocked, reversed_path, fwd_iters, bwd_iters, necked_down = _route_main_connection(
         router, obstacles, config, sources, targets, track_margin,
         pcb_data, net_id, print_prefix="  ", direction_labels=("forward", "backward"),
         waypoints=waypoint_buckets.get(frozenset((idx_a, idx_b)), [])
@@ -1794,6 +1827,10 @@ def route_multipoint_main(
         (pad_b[3], pad_b[4], layer_names[pad_b[2]]),  # end_original
         through_hole_positions
     )
+    if necked_down:
+        # Both endpoints are pads: neck the start side too
+        segments = _apply_neckdown_widths(segments, config, net_id, obstacles,
+                                          coord, layer_names, track_margin, neck_start=True)
 
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
 
@@ -2100,7 +2137,7 @@ def route_multipoint_taps(
         # Use probe routing helper to detect stuck directions early
         tap_start_time = time.time()
 
-        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _ = _route_main_connection(
+        path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path, _, _, necked_down = _route_main_connection(
             router, obstacles, config, sources, targets, track_margin,
             pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
             waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
@@ -2112,27 +2149,6 @@ def route_multipoint_taps(
 
         # Combine blocked cells from both directions for rip-up analysis
         blocked_cells = forward_blocked + backward_blocked
-
-        # Neck-down retry (issue #72): a wide power tap that cannot fit may
-        # still route at the layer's default width (e.g. escaping a
-        # fine-pitch pad walled in by a neighboring power net)
-        necked_down = False
-        if path is None and track_margin > 0 and config.power_tap_neckdown:
-            print(f"      {YELLOW}Wide tap blocked - retrying at default track width (neck-down){RESET}")
-            path, nd_iterations, nd_fwd_blocked, nd_bwd_blocked, reversed_tap_path, _, _ = _route_main_connection(
-                router, obstacles, config, sources, targets, 0,
-                pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
-                waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
-            )
-            tap_iterations += nd_iterations
-            if path is not None:
-                necked_down = True
-                if reversed_tap_path:
-                    path = list(reversed(path))
-            # On narrow failure keep the WIDE attempt's blocked cells for
-            # rip-up analysis: ripping based on the narrow frontier finds
-            # blockers whose removal only helps a narrow route, but ripped
-            # nets re-route at their wide width and can fail entirely
 
         tap_elapsed = time.time() - tap_start_time
         total_iterations += tap_iterations
@@ -2370,57 +2386,70 @@ def _segment_fits_wide(seg, obstacles, coord: GridCoord, layer_idx: int, margin:
     return True
 
 
+def _flip_segments(segments):
+    """Reverse a connected segment run end-to-end (order and direction)."""
+    return [Segment(start_x=s.end_x, start_y=s.end_y, end_x=s.start_x, end_y=s.start_y,
+                    width=s.width, layer=s.layer, net_id=s.net_id)
+            for s in reversed(segments)]
+
+
+def _neck_pass(segments, config: GridRouteConfig, obstacles, coord: GridCoord,
+               layer_map: Dict[str, int], track_margin: int):
+    """Narrow the last neckdown_length mm of the run (the pad is at the list
+    END); beyond that, keep the wide width only where the wide clearance
+    fits. Never re-widens an already-narrow segment (so a second pass from
+    the other end preserves the first pass's neck)."""
+    def fits(s):
+        return _segment_fits_wide(s, obstacles, coord, layer_map.get(s.layer, 0), track_margin)
+
+    out = []  # built in reverse (pad-first)
+    cum = 0.0
+    for seg in reversed(segments):
+        narrow_w = config.get_track_width(seg.layer)
+        length = _seg_length(seg)
+        if seg.width <= narrow_w:
+            out.append(seg)
+        elif cum >= config.neckdown_length:
+            if not fits(seg):
+                seg.width = narrow_w
+            out.append(seg)
+        elif cum + length > config.neckdown_length:
+            # Straddles the neck boundary: split there (the far piece,
+            # touching the pad side, is neckdown_length - cum long)
+            near, far = _split_segment_at(seg, config.neckdown_length - cum)
+            far.width = narrow_w
+            out.append(far)
+            if not fits(near):
+                near.width = narrow_w
+            out.append(near)
+        else:
+            seg.width = narrow_w
+            out.append(seg)
+        cum += length
+    out.reverse()
+    return out
+
+
 def _apply_neckdown_widths(segments, config: GridRouteConfig, net_id: int,
                            obstacles, coord: GridCoord, layer_names: List[str],
-                           track_margin: int):
-    """Assign widths to a neck-down tap route (issue #72).
+                           track_margin: int, neck_start: bool = False):
+    """Assign widths to a neck-down route (issue #72).
 
     The path was routed at the layer's default width because the power width
     did not fit. Segments within config.neckdown_length of the target pad
-    (the END of the list) stay narrow; farther segments return to the power
-    width wherever the wide clearance fits, with an optional stepped taper
-    at each narrow->wide transition.
+    (the END of the list; also the start when neck_start is set, for routes
+    that end on pads at both ends) stay narrow; farther segments return to
+    the power width wherever the wide clearance fits, with an optional
+    stepped taper at each narrow->wide transition.
 
     Returns a new segment list (segments may be split for the taper).
     """
     layer_map = {name: i for i, name in enumerate(layer_names)}
-
-    # Walk from the target pad (end of list) toward the tap point, assigning
-    # widths. wide[i] mirrors segments order.
-    out = []  # built in reverse (target-first)
-    wide_flags = []
-    cum = 0.0
-    for seg in reversed(segments):
-        narrow_w = config.get_track_width(seg.layer)
-        wide_w = config.get_net_track_width(net_id, seg.layer)
-        length = _seg_length(seg)
-        if cum >= config.neckdown_length and wide_w > narrow_w:
-            layer_idx = layer_map.get(seg.layer, 0)
-            is_wide = _segment_fits_wide(seg, obstacles, coord, layer_idx, track_margin)
-            seg.width = wide_w if is_wide else narrow_w
-            out.append(seg)
-            wide_flags.append(is_wide)
-        elif cum + length > config.neckdown_length and wide_w > narrow_w:
-            # Segment straddles the neck boundary: split it there (the far
-            # piece, touching the pad side, is neckdown_length - cum long)
-            near, far = _split_segment_at(seg, config.neckdown_length - cum)
-            far.width = narrow_w
-            out.append(far)
-            wide_flags.append(False)
-            if near is not None:
-                layer_idx = layer_map.get(seg.layer, 0)
-                is_wide = _segment_fits_wide(near, obstacles, coord, layer_idx, track_margin)
-                near.width = wide_w if is_wide else narrow_w
-                out.append(near)
-                wide_flags.append(is_wide)
-        else:
-            seg.width = narrow_w
-            out.append(seg)
-            wide_flags.append(False)
-        cum += length
-
-    out.reverse()
-    wide_flags.reverse()
+    out = _neck_pass(segments, config, obstacles, coord, layer_map, track_margin)
+    if neck_start:
+        out = _flip_segments(_neck_pass(_flip_segments(out), config, obstacles,
+                                        coord, layer_map, track_margin))
+    wide_flags = [s.width > config.get_track_width(s.layer) for s in out]
 
     # Suppress short wide islands (a wide run between narrow pinches that is
     # barely longer than its tapers just adds notch noise)
