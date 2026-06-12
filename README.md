@@ -629,7 +629,8 @@ KiCadRoutingTools/
     ├── identify-diff-pairs/  # Datasheet-based diff pair detection skill
     ├── recommend-stackup/    # Stackup review/recommendation skill
     ├── diagnose-routing-failures/  # Failure root-cause and retry skill
-    └── review-routed-board/  # Post-route QA and sign-off skill
+    ├── review-routed-board/  # Post-route QA and sign-off skill
+    └── stress-test-router/   # Batch stress-test on real-world boards + issue filing (dev/QA)
 ```
 
 ## Module Overview

@@ -255,6 +255,35 @@ python3 tests/test_multipoint_diff_route.py
 python3 tests/test_multipoint_diff_route.py -v
 ```
 
+### stress/ - Real-World Board Stress Test
+
+Stress-tests the router against open-source boards downloaded from GitHub
+(keyboards up to 6-layer SoC carriers), measuring routing completion rates
+and DRC violations on each. Boards are **not** checked into the repo — the
+harness downloads, format-normalizes (KiCad `pcbnew` round-trip), and strips
+them (tracks/vias/pours removed) into an external corpus directory
+(`$STRESS_DIR`, default `~/Documents/kicad_stress_test`). Each board is then
+routed end-to-end following the plan-pcb-routing skill workflow (fanout →
+diff pairs → signals → planes → repair → verification) and produces a
+per-board results JSON.
+
+```bash
+cd tests/stress
+python3 fetch_boards.py        # download corpus (needs gh auth)
+# normalize + strip with KiCad's bundled python — see stress/README.md
+python3 validate_boards.py     # corpus sanity check
+```
+
+See `tests/stress/README.md` for the full pipeline, the per-board run
+procedure (`RUNBOOK.md`), the ~1 GB memory watchdog (`run_limited.sh`), and
+the list of kicad_parser issues the corpus preparation currently works
+around.
+
+The whole suite can be driven by Claude Code with the `/stress-test-router`
+skill (see `docs/claude-skills.md`): it prepares the corpus if missing, runs
+the boards two-at-a-time under the memory cap, aggregates the results, and
+drafts GitHub issues for new findings (filed only after user approval).
+
 ### run_doc_examples.py - Python API Documentation Examples
 
 Extracts every ` ```python ` block from `docs/python-api.md` and the
