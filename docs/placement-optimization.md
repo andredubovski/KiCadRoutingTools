@@ -269,6 +269,58 @@ us whether the whole direction is worth building out. If the proxy improves
 but route completion doesn't, add the spreading term before anything else —
 that's the documented failure mode of wirelength-driven placement.
 
+## Experiment results (June 2026)
+
+Implemented as `place_optimize.py` + `placement/quench.py`: greedy quench
+(nudge within `--max-displacement` of the seed, 90° rotations with correct
+pad-angle rewriting, same-footprint swaps), cost = `length_weight`·airwire
+length + `crossing_penalty`·crossings + pin-count-scaled halo + soft edge
+margin. Test board: `interf_u` (25 parts, PGA120 + bus connectors, 2 layers),
+pipeline `route_planes` → `bga_fanout U9` → `route.py` with the
+`tests/test_interf_u.py` arguments. Router iterations ≈ effort; vias and
+completion are the quality metrics.
+
+| placement | single-ended | multipoint pads | vias | router iterations |
+|---|---|---|---|---|
+| hand (KiCad demo) | 108/108 | 80/80 | 136 | 2.3 M |
+| hand + quench, default weights | 106/108 (2 fail) | 80/80 | 150 | 3.1 M |
+| hand + quench, strong halo | 100% of attempted | — | 157 | 6.7 M |
+| hand + quench, crossing-focused¹ | 108/108 | 80/80 | 135 | 2.6 M |
+| `place.py` from-scratch seed | 106/108 (2 fail) | 65/77 (12 fail) | 202 | 1 141 M |
+| from-scratch seed + quench¹ | 108/108 | 71/80 (9 fail) | 240 | 364 M |
+
+¹ `--length-weight 0.3 --crossing-penalty 30 --halo-weight 10 --halo-coef 0.5 --edge-halo 3`
+
+**Conclusions:**
+
+1. **The hand placement is dramatically better than from-scratch constructive
+   placement** — 500× less router effort, no failures. The constraint-capture
+   story is real even on a 25-part board: the human's bus-flow arrangement
+   (BUS1 → buffers → PGA → RAM) is what makes it routable, and its
+   "suboptimal" wirelength is buying that structure.
+2. **Quenching an already-good seed is neutral at best.** Proxy improvements
+   (crossings −13%, length −12%) did not translate: default weights *caused*
+   2 failures, strong-halo variants tripled router effort. The
+   crossing-focused parameter set merely matched the hand placement. On a
+   board with no completion headroom there is nothing for the proxy to win,
+   and chasing it perturbs structure the proxies can't see.
+3. **Quenching a mediocre seed genuinely helps**: from-scratch + quench fixed
+   both single-ended failures, cut multipoint failures 12 → 9, and reduced
+   router effort 3× (1 141 M → 364 M iterations). Refinement works exactly
+   where the literature says it does — when there is headroom.
+4. **Proxy–routability correlation is weak**, confirming the MIT-thesis
+   finding: the variant with the *best* crossing reduction (length weight 0)
+   failed 2 nets. Any production version of this tool should rank candidate
+   placements by an actual trial route (our router does this board in ~1–2 s
+   of routing time), not by the proxy alone.
+
+**Practical upshot:** ship the quench as a *repair* tool for rough/generated
+placements (`place.py` output, imported or auto-generated layouts), not as a
+polish pass on careful hand placements. The next-step experiments are (a)
+router-in-the-loop candidate ranking, since single routes are cheap, and
+(b) a proxy that models *escape/fanout room* around high-pin-count parts
+explicitly rather than via the generic halo.
+
 ## References and further reading
 
 ### PCB-specific placement research
