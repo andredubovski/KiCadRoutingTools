@@ -2038,7 +2038,8 @@ def route_multipoint_taps(
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
     failed_edge_blocking = {}  # Track blocking info for failed edges: edge_key -> (blocked_cells, tgt_xy)
-    max_passes = len(remaining_edges) * 2  # Safety limit
+    fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
+    max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
     for pass_num in range(max_passes):
         if len(routed_indices) == len(pad_info):
@@ -2064,6 +2065,32 @@ def route_multipoint_taps(
             elif b_routed and not a_routed:
                 edge_to_route = (idx_b, idx_a, length)  # Route from b to a
                 break
+
+        if edge_to_route is None:
+            # Fallback: a failed MST edge orphans its entire downstream
+            # subtree - those pads' edges are never eligible because their
+            # source side never becomes routed. Since tap routing launches
+            # from ALL existing copper anyway (the MST edge is only an
+            # ordering), attempt each orphaned pad directly once. Even when
+            # the attempt fails, its blocked frontier feeds the Phase 3
+            # rip-up analysis with the pads' ACTUAL blockers (issues
+            # #101/#103: previously a walled-off region produced no frontier
+            # data at all, so nothing was ever ripped).
+            best = None
+            for i in range(len(pad_info)):
+                if i in routed_indices or pad_components.get(i, i) in routed_components:
+                    continue
+                if i in fallback_attempted:
+                    continue
+                xi, yi = pad_info[i][3], pad_info[i][4]
+                for j in routed_indices:
+                    d = abs(xi - pad_info[j][3]) + abs(yi - pad_info[j][4])
+                    if best is None or d < best[2]:
+                        best = (j, i, d)
+            if best is not None:
+                fallback_attempted.add(best[1])
+                edge_to_route = best
+                print(f"    Fallback: attempting orphaned pad {best[1]} directly from connected copper")
 
         if edge_to_route is None:
             # Count effectively unrouted pads (not in routed_indices AND not in a routed component)

@@ -169,7 +169,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 progress_callback=None,
                 return_results: bool = False,
                 pcb_data=None,
-                net_clearances: dict = None) -> Tuple[int, int, float]:
+                net_clearances: dict = None,
+                rip_existing_nets: Optional[List[str]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -466,6 +467,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
+
+    # Issue #103: pre-existing routed nets matching --rip-existing-nets become
+    # ELIGIBLE for rip-up when blocking analysis names them. Their copper is
+    # excluded from the static base map and registered like in-process routed
+    # nets (per-net obstacles + routed_results), so the normal rip/re-route/
+    # restore machinery applies. Without this, tracks committed by a previous
+    # run are unrippable and every rechained retry dies with
+    # 'no rippable blockers found'.
+    existing_rippable: List[int] = []
+    if rip_existing_nets:
+        from net_queries import matches_net_filter
+        to_route_set = set(all_net_ids_to_route)
+        zone_net_ids = {z.net_id for z in pcb_data.zones}
+        seg_net_ids = {s.net_id for s in pcb_data.segments}
+        for nid in sorted(seg_net_ids):
+            if nid == 0 or nid in to_route_set:
+                continue
+            if nid in zone_net_ids:
+                continue  # plane nets belong to route_planes, not rip-up
+            net = pcb_data.nets.get(nid)
+            if not net or not net.name:
+                continue
+            if matches_net_filter(net.name, rip_existing_nets):
+                existing_rippable.append(nid)
+        if existing_rippable:
+            names = [pcb_data.nets[n].name for n in existing_rippable[:6]]
+            print(f"{len(existing_rippable)} pre-existing net(s) eligible for rip-up: "
+                  f"{', '.join(names)}{'...' if len(existing_rippable) > 6 else ''}")
     if progress_callback:
         progress_callback(0, 0, "Building base obstacle map...")
     print("Building base obstacle map...")
@@ -473,15 +502,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Use visualization-aware building if callback is provided
     base_vis_data = None
+    base_map_exclusions = all_net_ids_to_route + existing_rippable
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
-            pcb_data, config, all_net_ids_to_route,
+            pcb_data, config, base_map_exclusions,
             net_clearances=net_clearances)
         # Set bounds for visualization
         base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
     else:
         base_obstacles = build_base_obstacle_map(
-            pcb_data, config, all_net_ids_to_route,
+            pcb_data, config, base_map_exclusions,
             net_clearances=net_clearances)
 
     base_elapsed = time.time() - base_start
@@ -527,6 +557,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         pcb_data, list(all_unrouted_net_ids), config,
         extra_clearance=0.0, diagonal_margin=0.25
     )
+    # Rippable pre-existing nets need cache entries too: the working obstacle
+    # map is base + cache, and their copper was excluded from base (issue #103).
+    if existing_rippable:
+        from obstacle_cache import precompute_net_obstacles
+        for nid in existing_rippable:
+            net_obstacles_cache[nid] = precompute_net_obstacles(
+                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=0.25)
+
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
     if debug_memory:
@@ -576,6 +614,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = state.routed_results
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
+
+    # Register rippable pre-existing nets as already-routed (issue #103):
+    # blocking analysis iterates routed_net_paths (cells are recomputed from
+    # pcb_data, so an empty path is fine), filter_rippable_blockers requires
+    # routed_results membership, and rip_up_net removes exactly the
+    # 'new_segments'/'new_vias' listed - the net's own file copper here.
+    for nid in existing_rippable:
+        state.routed_net_ids.append(nid)
+        state.routed_net_paths[nid] = []
+        state.routed_results[nid] = {
+            'net_id': nid,
+            'new_segments': [s for s in pcb_data.segments if s.net_id == nid],
+            'new_vias': [v for v in pcb_data.vias if v.net_id == nid],
+            'iterations': 0,
+            'is_existing_route': True,
+        }
     ripup_success_pairs = state.ripup_success_pairs
     rerouted_pairs = state.rerouted_pairs
     remaining_net_ids = state.remaining_net_ids
@@ -878,6 +932,13 @@ For differential pair routing, use route_diff.py:
                         help="Direction search order for each net route")
     parser.add_argument("--no-bga-zones", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
+    parser.add_argument("--rip-existing-nets", nargs="+", default=None,
+                        metavar="PATTERN",
+                        help="Net name patterns of PRE-EXISTING routed nets that may be "
+                             "ripped up and re-routed when they block a net being routed "
+                             "(e.g. on a board routed by a previous run). Use '*' to allow "
+                             "any non-plane net. Without this flag, committed tracks are "
+                             "never ripped.")
     parser.add_argument("--layers", "-l", nargs="+",
                         default=None,
                         help="Routing layers to use (default: all of the board's "
@@ -1146,6 +1207,7 @@ For differential pair routing, use route_diff.py:
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
+                rip_existing_nets=args.rip_existing_nets,
                 layers=args.layers,
                 track_width=args.track_width,
                 impedance=args.impedance,

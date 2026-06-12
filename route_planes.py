@@ -55,6 +55,13 @@ from plane_zone_geometry import (
     find_polygon_groups,
     sample_route_for_voronoi
 )
+from plane_pad_tap import (
+    pad_is_fine_pitch,
+    tap_pad_with_escalation,
+    FINE_TAP_GRID_STEP,
+    FINE_TAP_CLEARANCE,
+    FINE_TAP_TRACK_WIDTH
+)
 from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
@@ -1164,9 +1171,44 @@ def _write_output_and_reroute(
             finally:
                 sys.setrecursionlimit(old_recursion_limit)
         else:
-            print(f"WARNING: {len(all_ripped_net_ids)} net(s) were removed from output and need re-routing!")
-            if ripped_net_names:
-                print(f"  Ripped nets: {', '.join(ripped_net_names)}")
+            # Verify which ripped nets are actually broken in the written
+            # output before warning (issue #104 item 4): on KiCad 10 boards
+            # the net filter only matches numeric-id net refs, so "ripped"
+            # nets can remain fully routed in the output - warning about
+            # those would trigger pointless re-route rounds in automated
+            # workflows.
+            broken_names = list(ripped_net_names)
+            try:
+                from check_connected import check_net_connectivity
+                out_pcb = parse_kicad_pcb(output_file)
+                segs_by_net: Dict[int, List] = {}
+                for s in out_pcb.segments:
+                    segs_by_net.setdefault(s.net_id, []).append(s)
+                vias_by_net: Dict[int, List] = {}
+                for v in out_pcb.vias:
+                    vias_by_net.setdefault(v.net_id, []).append(v)
+                zones_by_net: Dict[int, List] = {}
+                for z in out_pcb.zones:
+                    zones_by_net.setdefault(z.net_id, []).append(z)
+                broken_names = []
+                for rid in all_ripped_net_ids:
+                    result = check_net_connectivity(
+                        rid,
+                        segs_by_net.get(rid, []),
+                        vias_by_net.get(rid, []),
+                        out_pcb.pads_by_net.get(rid, []),
+                        zones_by_net.get(rid, []))
+                    if not result.get('connected', False):
+                        net = pcb_data.nets.get(rid)
+                        broken_names.append(net.name if net else f"net_{rid}")
+            except Exception:
+                pass  # verification failed - fall back to warning about all ripped nets
+            if broken_names:
+                print(f"WARNING: {len(broken_names)} net(s) were removed from output and need re-routing!")
+                print(f"  Ripped nets: {', '.join(broken_names)}")
+            else:
+                print(f"Note: {len(all_ripped_net_ids)} net(s) were ripped during via placement "
+                      f"but remain fully connected in the output; no re-routing needed.")
 
     return True
 
@@ -1529,6 +1571,10 @@ def create_plane(
         if pads_needing_vias:
             print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
 
+        # Index into failed_pad_infos where this net's failures start (for
+        # the fine-pitch retry pass below).
+        net_failed_start = len(failed_pad_infos)
+
         for pad_idx, pad_info in enumerate(pads_needing_vias):
             pad = pad_info['pad']
             pad_layer = pad_info.get('pad_layer')
@@ -1840,6 +1886,73 @@ def create_plane(
                 print(f"{RED}FAILED - no valid position{RESET}")
                 failed_pads += 1
                 failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
+
+        # Step 9.5: Fine-pitch retry pass (issue #104). Pads whose tap failed
+        # at the run parameters get one scoped retry with fine parameters
+        # (grid 0.05 / clearance 0.15 / track <= 0.15, verified on
+        # castor_pollux) if they are fine-pitch: a same-component neighbor
+        # pad within 0.65mm or pad min dimension < 0.35mm. Obstacle maps for
+        # the retry are built on a small window around the pad, so the fine
+        # grid stays cheap even on large boards.
+        net_failed = failed_pad_infos[net_failed_start:]
+        fine_candidates = [e for e in net_failed
+                           if pad_is_fine_pitch(e[3]['pad'], pcb_data)]
+        if fine_candidates:
+            print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
+                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance "
+                  f"{FINE_TAP_CLEARANCE}mm, track <= {FINE_TAP_TRACK_WIDTH}mm):")
+            recovered_entries = []
+            for entry in fine_candidates:
+                pad_info = entry[3]
+                pad = pad_info['pad']
+                pad_layer = pad_info.get('pad_layer')
+                current_pad_key = (pad.global_x, pad.global_y)
+                if current_pad_key in processed_pad_ids:
+                    continue
+                pending_pads = [
+                    pp for pp in base_pending_pads
+                    if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
+                    and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
+                ]
+                print(f"  Pad {pad.component_ref}.{pad.pad_number} (fine retry)...", end=" ", flush=True)
+                result = tap_pad_with_escalation(
+                    pad, pad_layer, net_id, pcb_data, config,
+                    max_search_radius, via_size, via_drill,
+                    same_net_pad_clearance=same_net_pad_clearance,
+                    pending_pads=pending_pads,
+                    extra_vias=new_vias,
+                    extra_segments=new_segments,
+                    verbose=verbose,
+                    try_default=False,  # run params already failed for this pad
+                )
+                if result.success:
+                    if result.via is not None:
+                        new_vias.append(result.via)
+                        vias_placed += 1
+                        available_vias.append((result.via['x'], result.via['y']))
+                        via_index.add(result.via['x'], result.via['y'])
+                        block_via_position(obstacles, result.via['x'], result.via['y'],
+                                           coord, hole_to_hole_clearance, via_drill)
+                    else:
+                        vias_reused += 1
+                    if result.segments:
+                        new_segments.extend(result.segments)
+                        traces_added += len(result.segments)
+                    processed_pad_ids.add(current_pad_key)
+                    failed_pads -= 1
+                    recovered_entries.append(entry)
+                    if result.via is not None:
+                        print(f"{GREEN}placed via at ({result.via['x']:.2f}, {result.via['y']:.2f}), "
+                              f"{len(result.segments)} trace segment(s){RESET}")
+                    else:
+                        print(f"{GREEN}reused via at ({result.reused_via_pos[0]:.2f}, "
+                              f"{result.reused_via_pos[1]:.2f}), {len(result.segments)} trace segment(s){RESET}")
+                else:
+                    print(f"{RED}STILL FAILED{RESET}")
+            for entry in recovered_entries:
+                failed_pad_infos.remove(entry)
+            if recovered_entries:
+                print(f"  Fine-pitch retry recovered {len(recovered_entries)}/{len(fine_candidates)} pad(s)")
 
         # Step 10: Generate zone for this net (if needed)
         # For multi-net layers, defer zone generation until all nets are processed

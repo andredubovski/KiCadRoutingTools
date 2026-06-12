@@ -111,6 +111,23 @@ def block_circle(obstacles: GridObstacleMap, cx: int, cy: int, radius_sq: float,
                     obstacles.add_blocked_cell(cx + ex, cy + ey, layer_idx)
 
 
+def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bool:
+    """Return True if (x, y) lies within the pad's copper rectangle (rotation-aware).
+
+    `extra` expands the pad bounds, e.g. by a via radius so that a via whose
+    copper overlaps the pad edge still counts as touching.
+    """
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    rot = math.radians(pad.rotation or 0.0)
+    cos_r = math.cos(rot)
+    sin_r = math.sin(rot)
+    lx = dx * cos_r + dy * sin_r
+    ly = -dx * sin_r + dy * cos_r
+    return (abs(lx) <= pad.size_x / 2 + extra and
+            abs(ly) <= pad.size_y / 2 + extra)
+
+
 def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
                             pcb_data: PCBData, tolerance: float = 0.01) -> bool:
     """Return True if the SMD `pad` already has an electrical path to
@@ -122,6 +139,11 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
       - Same-net segment endpoints connect their two states.
       - Same-net via positions connect all layers in the via's span.
       - Same-net through-hole pad positions connect all copper layers.
+
+    The walk is seeded from the pad center AND from any same-net via or
+    segment endpoint that lands inside the pad's copper (route_planes places
+    in-pad stitching vias off-center, which previously went undetected and
+    caused duplicate taps on re-runs, issue #104).
     """
     pad_layer = None
     for layer in pad.layers:
@@ -177,6 +199,29 @@ def _smd_pad_reaches_layer(pad: Pad, target_layer: str, net_id: int,
     start = (pkey(pad.global_x, pad.global_y), pad_layer)
     visited = {start}
     queue = [start]
+
+    # Seed from same-net copper that lands inside this pad's copper:
+    # - a via overlapping the pad connects the pad to all the via's layers
+    # - a segment endpoint inside the pad (on the pad's layer) connects there
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
+            continue
+        if _point_in_pad_copper(pad, v.x, v.y, extra=v.size / 2):
+            for vl in (v.layers if v.layers else all_cu):
+                state = (pkey(v.x, v.y), vl)
+                if state not in visited:
+                    visited.add(state)
+                    queue.append(state)
+    for s in pcb_data.segments:
+        if s.net_id != net_id or s.layer != pad_layer:
+            continue
+        for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            if _point_in_pad_copper(pad, ex, ey):
+                state = (pkey(ex, ey), pad_layer)
+                if state not in visited:
+                    visited.add(state)
+                    queue.append(state)
+
     while queue:
         pos, layer = queue.pop(0)
         if layer == target_layer:
