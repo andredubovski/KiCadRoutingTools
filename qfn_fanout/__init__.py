@@ -184,6 +184,28 @@ def generate_qfn_fanout(footprint: Footprint,
 
     print(f"  Generated {len(tracks)} track segments ({len(stubs)} stubs x 2 segments)")
 
+    # Fine-pitch escape warning (issue #97): the 45-degree fan keeps adjacent
+    # stubs parallel at pitch/sqrt(2) forever - fanning separates tips along
+    # the diagonal, not laterally. At common defaults (clearance 0.25) the
+    # router cannot launch from or pass between these stubs and every net
+    # fails with 'no rippable blockers found'. Tell the user the workable
+    # parameters up front instead.
+    if layout.pad_pitch and layout.pad_pitch < 0.8:
+        lateral = layout.pad_pitch / math.sqrt(2)
+        # Escape at the stub's own width: route_track/2 + clearance +
+        # stub_track/2 must fit in `lateral`.
+        max_clear = lateral - track_width
+        # One 0.05 grid step of margin for quantization, rounded down to 0.05,
+        # capped at 0.15 (the combination verified to escape 0.5 mm LQFP fans).
+        suggest_clear = min(max(0.05, int((max_clear - 0.05) / 0.05) * 0.05), 0.15)
+        print(f"  NOTE: {layout.pad_pitch:.2f} mm pitch keeps adjacent fan stubs only "
+              f"{lateral:.3f} mm apart (pitch/sqrt2).")
+        print(f"  Routing these nets needs clearance below {max_clear:.2f} mm (with "
+              f"{track_width:.2f} mm track) plus grid-quantization margin; the "
+              f"default 0.25 clearance / 0.1 grid will fail to escape.")
+        print(f"  Suggested: route.py --grid-step 0.05 --clearance {suggest_clear:.2f} "
+              f"--track-width {track_width:.2f} for this component's nets.")
+
     # Validate endpoint spacing
     min_spacing = track_width + extension
     collisions = check_endpoint_spacing(stubs, min_spacing)
@@ -269,7 +291,9 @@ def main():
 
     if tracks:
         print(f"\nWriting {len(tracks)} tracks to {args.output}...")
-        add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias)
+        net_id_to_name = {nid: net.name for nid, net in pcb_data.nets.items()}
+        add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias,
+                                   net_id_to_name=net_id_to_name)
         print("Done!")
     else:
         print("\nNo fanout tracks generated")

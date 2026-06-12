@@ -1140,8 +1140,12 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         )
         vias.append(via)
 
-    if not vias and name_to_id:
-        # KiCad 10 format: (net "name")
+    if name_to_id:
+        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
+        # pattern and merge: a file can legally mix both styles (e.g. a tool
+        # that writes numeric refs into a v10 board), and each via matches
+        # exactly one pattern. An either/or fallback silently dropped every
+        # name-style via when any numeric one existed (issue #79).
         # Use flexible matching between layers and net to handle new v10 fields
         # (tenting, covering, plugging, capping, filling) that appear after layers.
         via_pattern_v10 = r'\(via\s+\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
@@ -1194,8 +1198,10 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         )
         segments.append(segment)
 
-    if not segments and name_to_id:
-        # KiCad 10 format: (net "name")
+    if name_to_id:
+        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
+        # pattern and merge — mixed-style files are legal and each segment
+        # matches exactly one pattern (issue #79).
         segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
@@ -2203,6 +2209,23 @@ def get_nets_to_route(pcb_data: PCBData,
     return routes
 
 
+def _is_ball_grid(pads) -> bool:
+    """Gate for geometry-based BGA classification: only a genuine ball/pin grid
+    qualifies — enough pads and near-uniform pad size. Guards against
+    keyswitches, SMD diode pairs, thermal-via exposed pads, and connector
+    arrays being classified as BGAs and walled off behind exclusion zones
+    (issue #82). BGA/PGA balls are identical; the false positives all mix pad
+    sizes (switch pins + stabilizer holes, EP via grid + perimeter pads).
+    """
+    if len(pads) < 16:
+        return False
+    size_counts = {}
+    for p in pads:
+        key = (round(p.size_x, 2), round(p.size_y, 2))
+        size_counts[key] = size_counts.get(key, 0) + 1
+    return max(size_counts.values()) >= 0.9 * len(pads)
+
+
 def detect_package_type(footprint: Footprint) -> str:
     """
     Detect the package type of a footprint based on its characteristics.
@@ -2261,9 +2284,11 @@ def detect_package_type(footprint: Footprint) -> str:
             else:
                 interior_pads += 1
 
-        # BGA has many interior pads, QFN/QFP has mostly perimeter pads
+        # BGA has many interior pads, QFN/QFP has mostly perimeter pads.
+        # Either way the geometry path only declares BGA for a genuine
+        # uniform ball/pin grid (issue #82).
         if interior_pads > perimeter_pads:
-            return 'BGA'
+            return 'BGA' if _is_ball_grid(pads) else 'OTHER'
         elif perimeter_pads > 0:
             # Check pad shapes - QFN typically has rectangular pads, BGA has circular
             circular_pads = sum(1 for p in pads if p.shape in ('circle', 'oval'))
@@ -2271,7 +2296,7 @@ def detect_package_type(footprint: Footprint) -> str:
             if rect_pads > circular_pads:
                 return 'QFN'
             else:
-                return 'BGA'
+                return 'BGA' if _is_ball_grid(pads) else 'OTHER'
 
     return 'OTHER'
 

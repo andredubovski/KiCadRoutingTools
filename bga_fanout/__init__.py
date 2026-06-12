@@ -1615,7 +1615,9 @@ def main():
             print(f"  Adding {len(vias_to_add)} vias")
         if vias_to_remove:
             print(f"  Removing {len(vias_to_remove)} vias")
-        add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias_to_add, vias_to_remove)
+        net_names = {nid: net.name for nid, net in pcb_data.nets.items()}
+        add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias_to_add,
+                                   vias_to_remove, net_id_to_name=net_names)
         print("Done!")
     else:
         print("\nNo fanout tracks generated")

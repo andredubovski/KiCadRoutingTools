@@ -41,13 +41,14 @@ non-interactively and record everything.
    power listing first).
 5. Fanout: only for BGA/PGA/QFN/QFP components per the skill's depth rule.
    Through-hole connectors/DIPs don't need fanout.
-   KNOWN BUG WORKAROUND (mandatory): immediately after EVERY bga_fanout.py or
-   qfn_fanout.py step, run
+   FIX VERIFICATION (issues #79/#80, fixed): fanout tools now write name-style
+   net refs on KiCad 10 boards and the parser merges mixed styles. After each
+   fanout step, still run
    `python3 ~/Documents/kicad_stress_test/scripts/fix_mixed_net_refs.py <fanout_output.kicad_pcb>`
-   before any further tool touches the file. The fanout tools write
-   KiCad-9-style numeric net refs into KiCad 10 boards and the parser then
-   silently drops all name-style segments (known finding — do not re-report,
-   but DO note in issues if the normalizer reports rewrites, with the count).
+   — it should report "rewrote 0 numeric net refs". If it reports >0, that is
+   a REGRESSION: record it prominently in issues with the count.
+   Heed the fanout tool's fine-pitch NOTE (issue #97 warning): use the
+   suggested --grid-step/--clearance/--track-width for that component's nets.
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap 0.15 default; use --no-gnd-vias).
    If pair detection looks like a false positive (e.g. random net names that
@@ -55,13 +56,15 @@ non-interactively and record everything.
 7. BASELINE: before routing, run check_drc.py on the unrouted input and record
    the violation count — real boards have pre-existing pad-to-pad proximity
    that is not the router's fault. Report post-route DRC as total AND delta.
-8. KNOWN OOM (mandatory check): obstacle-map memory scales with
-   grid_cells x outline_vertices (known finding - do not re-report, but DO
-   record any MEMORY_LIMIT_EXCEEDED kill with its command). Before routing,
-   estimate: cells = board_area_mm2 / grid_step^2, bytes = cells x
-   (outline+cutout vertices) x 8. If the estimate exceeds ~0.8 GB, start
-   with `--grid-step 0.2` (fine for coarse-pitch boards) and note it in the
-   results JSON.
+8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
+   now chunked; default grids should stay well under the 1 GB cap on every
+   board. Use the default --grid-step unless component pitch demands finer.
+   Any MEMORY_LIMIT_EXCEEDED kill is now a REGRESSION - record the command
+   and RSS prominently in issues.
+   BGA-zone check (issue #82, fixed): keyswitches/diodes/thermal-via arrays
+   should no longer be detected as BGA zones. Try WITHOUT --no-bga-zone
+   first; if non-array footprints still get zones (or array parts lose
+   them), record it as a regression with the detection printout.
 9. Routing params: start with skill defaults. For boards with fine-pitch
    (<0.65mm) components, consider `--grid-step 0.05` and/or smaller clearance
    (record what you chose and why). For dense/2-layer boards use the skill's

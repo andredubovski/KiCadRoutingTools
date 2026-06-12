@@ -348,3 +348,26 @@ def format_suggestions_for_dialog(suggestions: List[str]) -> str:
     for s in suggestions:
         lines.append(f"  - {s}")
     return "\n".join(lines)
+
+
+def static_boxin_hint(result, config) -> str:
+    """One-line hint when a route died immediately with nothing rippable.
+
+    A failure with almost no A* iterations and no rippable blockers means the
+    start/target cells are boxed in by STATIC obstacles (neighboring pads plus
+    clearance expansion) - typical for fine-pitch (0.4-0.65 mm) packages at
+    coarse grid/clearance settings - not by other nets' routes (issue #95).
+    Returns '' when the failure doesn't match that signature.
+    """
+    if result is None:
+        return ""
+    iters = result.get('iterations_forward', 0) + result.get('iterations_backward', 0)
+    if iters >= 20000:
+        return ""
+    return (f"Hint: search exhausted after only {iters} iterations with no rippable "
+            f"blockers - the start/target pads are boxed in by static obstacles "
+            f"(neighboring pads + clearance), not by congestion. For fine-pitch "
+            f"parts try a finer grid and/or smaller clearance/track, e.g. "
+            f"--grid-step {config.grid_step / 2:g} --clearance 0.15 --track-width 0.15 "
+            f"(current: grid {config.grid_step:g}, clearance {config.clearance:g}, "
+            f"track {config.track_width:g} mm)")
