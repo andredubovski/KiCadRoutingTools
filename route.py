@@ -688,13 +688,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net_id': net_id,
                     'failed_pads': failed_pads_info
                 })
-    # Derive final counts from what is actually routed rather than the loop
-    # counters: a multipoint net with unconnected tap pads is not fully
-    # routed, and a net ripped during Phase 3 whose re-route failed never
-    # reaches the failure counter even though it has no route
-    attempted = successful + failed
-    failed = len(failed_single) + len(failed_multipoint)
-    successful = attempted - failed
+    # Derive final counts set-based from this run's scope rather than the
+    # loop counters: a multipoint net with unconnected tap pads is not fully
+    # routed, a net ripped during Phase 3 whose re-route failed never reaches
+    # the failure counter, and on re-chained boards the loop counters don't
+    # include skipped already-routed nets - mixing them produced negative
+    # "successful" values like -2215 (issue #87).
+    scope_ids = {nid for _, nid in single_ended_nets}
+    failed_multipoint_ids = {m['net_id'] for m in failed_multipoint}
+    fully_routed_ids = {nid for nid in scope_ids
+                        if nid in routed_results and nid not in failed_multipoint_ids}
+    successful = len(fully_routed_ids)
+    failed = len(scope_ids) - successful
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
@@ -874,8 +879,9 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-bga-zones", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--layers", "-l", nargs="+",
-                        default=defaults.DEFAULT_LAYERS,
-                        help="Routing layers to use (default: F.Cu B.Cu)")
+                        default=None,
+                        help="Routing layers to use (default: all of the board's "
+                             "copper layers)")
 
     # Track and via geometry
     parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH,
@@ -1061,6 +1067,16 @@ For differential pair routing, use route_diff.py:
     # Load PCB to expand wildcards
     print(f"Loading {args.input_file} to expand net patterns...")
     pcb_data = parse_kicad_pcb(args.input_file)
+
+    # Default --layers to ALL of the board's copper layers (issue #98: the old
+    # F.Cu/B.Cu default silently routed 4-layer boards as 2-layer). The layer
+    # cost defaults keep the documented bias (2-layer: F=1.0/B=3.0; 4+: 1.0).
+    if args.layers is None:
+        copper = pcb_data.board_info.copper_layers
+        args.layers = list(copper) if copper else list(defaults.DEFAULT_LAYERS)
+        if len(args.layers) > 2:
+            print(f"Using all {len(args.layers)} copper layers: "
+                  f"{' '.join(args.layers)} (override with --layers)")
 
     # Combine positional net_patterns and --nets argument
     all_patterns = list(args.net_patterns) if args.net_patterns else []

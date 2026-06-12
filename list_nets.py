@@ -62,29 +62,58 @@ def find_differential_pairs(pcb_data):
 
 
 def find_power_nets(pcb_data):
-    """Find power and ground nets by name patterns and connection count."""
+    """Find power and ground nets by name patterns and connection count.
+
+    Returns (gnd_nets, vcc_nets, candidate_nets) - candidates are unmatched
+    nets whose pad count rivals the detected power rails (issue #91: rails
+    like '-12V', '/5V', '/3V3', and bare 'VDC' defeat prefix patterns; pad
+    count catches them).
+    """
+    import re
     gnd_patterns = ['GND', 'VSS', 'AGND', 'DGND', 'PGND', 'GNDA', 'GNDD']
     vcc_patterns = ['VCC', 'VDD', '+3.3', '+5', '+12', '+1.8', '+2.5', 'VBUS', 'VBAT', 'VIN']
+    # Rail-shaped names, checked against the LAST hierarchical path component:
+    # +5V, -12V, 5V, 3V3, 1V8, 12V0, 3.3V ...
+    rail_re = re.compile(r'^[+-]?(\d+(\.\d+)?V\d*|\d+V\d+)$')
 
     gnd_nets = []
     vcc_nets = []
+    matched = set()
 
     for net in pcb_data.nets.values():
         if not net.name:
             continue
         name_upper = net.name.upper()
+        leaf = name_upper.rsplit('/', 1)[-1]
         pad_count = len(net.pads)
 
         if any(g in name_upper for g in gnd_patterns):
             gnd_nets.append((net.name, pad_count))
-        elif any(v in name_upper for v in vcc_patterns) or (net.name.startswith('+') and any(c.isdigit() for c in net.name)):
+            matched.add(net.name)
+        elif (any(v in name_upper for v in vcc_patterns)
+              or (net.name[0] in '+-' and any(c.isdigit() for c in net.name))
+              or rail_re.match(leaf)):
             vcc_nets.append((net.name, pad_count))
+            matched.add(net.name)
 
     # Sort by pad count descending
     gnd_nets.sort(key=lambda x: -x[1])
     vcc_nets.sort(key=lambda x: -x[1])
 
-    return gnd_nets, vcc_nets
+    # High pad-count nets the patterns missed: anything rivaling the known
+    # POWER rails is probably a power net with an unconventional name (e.g.
+    # VDC). Threshold from the largest vcc rail, not GND - GND's pad count
+    # dwarfs everything and would hide real rails.
+    vcc_counts = [c for _, c in vcc_nets]
+    threshold = max(10, max(vcc_counts) // 2) if vcc_counts else 10
+    candidates = sorted(
+        ((net.name, len(net.pads)) for net in pcb_data.nets.values()
+         if net.name and net.name not in matched
+         and not net.name.lower().startswith('unconnected')
+         and len(net.pads) >= threshold),
+        key=lambda x: -x[1])[:8]
+
+    return gnd_nets, vcc_nets, candidates
 
 
 def find_high_connection_nets(pcb_data, top_n=10):
@@ -143,13 +172,18 @@ def main():
 
     # Power net detection
     if args.power:
-        gnd_nets, vcc_nets = find_power_nets(pcb_data)
+        gnd_nets, vcc_nets, candidates = find_power_nets(pcb_data)
         print(f"\nGround Nets ({len(gnd_nets)} found):")
         for name, count in gnd_nets:
             print(f"  {name}: {count} pads")
         print(f"\nPower Nets ({len(vcc_nets)} found):")
         for name, count in vcc_nets:
             print(f"  {name}: {count} pads")
+        if candidates:
+            print(f"\nHigh pad-count nets NOT matched by power patterns "
+                  f"(possible power rails - verify):")
+            for name, count in candidates:
+                print(f"  {name}: {count} pads")
         print()
 
     # Component-specific listing

@@ -764,7 +764,7 @@ def route_single_ended_nets(
                 })
                 print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 from routing_diagnostics import static_boxin_hint
-                hint = static_boxin_hint(result, config)
+                hint = static_boxin_hint(result, config, pcb_data)
                 if hint:
                     print(f"  {hint}")
                 failed += 1

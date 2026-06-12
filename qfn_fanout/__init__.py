@@ -240,8 +240,9 @@ def main():
                         help='Output PCB file')
     parser.add_argument('--component', '-c', default=None,
                         help='Component reference (auto-detected if not specified)')
-    parser.add_argument('--layer', '-l', default='F.Cu',
-                        help='Routing layer')
+    parser.add_argument('--layer', '-l', default=None,
+                        help='Routing layer (default: the layer the component '
+                             'is mounted on)')
     parser.add_argument('--width', '-w', type=float, default=0.1,
                         help='Track width in mm')
     parser.add_argument('--extension', type=float, default=0.1,
@@ -280,11 +281,23 @@ def main():
     print(f"  Rotation: {footprint.rotation}deg")
     print(f"  Pads: {len(footprint.pads)}")
 
+    # Default the stub layer to the component's mounted layer (issue #96:
+    # B.Cu-mounted parts silently got F.Cu stubs floating over their pads,
+    # and route.py then reported their nets routed while electrically open).
+    layer = args.layer
+    if layer is None:
+        layer = footprint.layer or 'F.Cu'
+        print(f"  Layer: {layer} (from footprint)")
+    elif footprint.layer and layer != footprint.layer:
+        print(f"  WARNING: --layer {layer} differs from {args.component}'s "
+              f"mounted layer {footprint.layer} - stubs will NOT touch the "
+              f"SMD pads unless this is intentional")
+
     tracks, vias, _failed_nets = generate_qfn_fanout(
         footprint,
         pcb_data,
         net_filter=args.nets,
-        layer=args.layer,
+        layer=layer,
         track_width=args.width,
         extension=args.extension
     )
