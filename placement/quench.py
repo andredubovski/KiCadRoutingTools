@@ -162,7 +162,9 @@ class QuenchState:
                  edge_halo: float, edge_weight: float,
                  grid_step: float, length_weight: float = 1.0,
                  ignore_net_ids: Optional[Set[int]] = None,
-                 extra_locked_refs: Optional[Set[str]] = None):
+                 extra_locked_refs: Optional[Set[str]] = None,
+                 move_refs: Optional[Set[str]] = None,
+                 net_weights: Optional[Dict[int, float]] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -173,6 +175,7 @@ class QuenchState:
         self.clearance = clearance
         self.crossing_penalty = crossing_penalty
         self.length_weight = length_weight
+        self.net_weights = net_weights or {}
         self.halo_weight = halo_weight
         self.edge_halo = edge_halo
         self.edge_weight = edge_weight
@@ -188,7 +191,9 @@ class QuenchState:
         for ref, fp in pcb_data.footprints.items():
             if not fp.pads:
                 continue
-            self.parts[ref] = _Part(ref, fp, courtyards, ref in locked_refs,
+            locked = (ref in locked_refs
+                      or (move_refs is not None and ref not in move_refs))
+            self.parts[ref] = _Part(ref, fp, courtyards, locked,
                                     halo_base, halo_coef)
             # Ignored nets (e.g. plane-routed power) don't contribute airwires
             self.parts[ref].nets = [n for n in self.parts[ref].nets
@@ -275,6 +280,16 @@ class QuenchState:
                 return False
         return True
 
+    def _weighted_length(self, arr: np.ndarray) -> float:
+        if len(arr) == 0:
+            return 0.0
+        lengths = np.hypot(arr[:, 2] - arr[:, 0], arr[:, 3] - arr[:, 1])
+        if self.net_weights:
+            w = np.array([self.net_weights.get(int(n), 1.0)
+                          for n in arr[:, 4]])
+            lengths = lengths * w
+        return float(np.sum(lengths))
+
     def nets_cost(self, net_airwires_subset: Dict[int, List],
                   other_airwires: np.ndarray):
         """Length + crossing cost of the given nets' airwires, counting
@@ -283,8 +298,7 @@ class QuenchState:
         for lst in net_airwires_subset.values():
             own.extend(lst)
         own_arr = _aw_array(own)
-        length = float(np.sum(np.hypot(own_arr[:, 2] - own_arr[:, 0],
-                                       own_arr[:, 3] - own_arr[:, 1]))) if len(own_arr) else 0.0
+        length = self._weighted_length(own_arr)
         crossings = _count_crossings_np(own_arr, other_airwires)
         crossings += _count_crossings_within(own_arr)
         return self.length_weight * length + self.crossing_penalty * crossings, crossings
@@ -293,8 +307,7 @@ class QuenchState:
 
     def total_cost(self):
         all_aw = _aw_array([aw for lst in self.net_airwires.values() for aw in lst])
-        length = float(np.sum(np.hypot(all_aw[:, 2] - all_aw[:, 0],
-                                       all_aw[:, 3] - all_aw[:, 1]))) if len(all_aw) else 0.0
+        length = self._weighted_length(all_aw)
         crossings = _count_crossings_within(all_aw)
         halo = 0.0
         edge = 0.0
@@ -359,6 +372,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
            max_passes: int = 10,
            ignore_nets: Optional[List[str]] = None,
            lock_refs: Optional[List[str]] = None,
+           move_refs: Optional[Set[str]] = None,
+           net_weights: Optional[Dict[int, float]] = None,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
@@ -385,7 +400,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         crossing_penalty, halo_base, halo_coef, halo_weight,
                         edge_halo, edge_weight, grid_step, length_weight,
                         ignore_net_ids=ignore_net_ids,
-                        extra_locked_refs=extra_locked)
+                        extra_locked_refs=extra_locked,
+                        move_refs=move_refs,
+                        net_weights=net_weights)
 
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "

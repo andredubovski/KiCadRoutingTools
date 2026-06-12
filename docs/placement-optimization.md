@@ -360,6 +360,46 @@ Refined conclusions:
 - Lock connectors (`--lock`) and exclude plane-routed power nets
   (`--ignore-nets`) — both matter for honest objectives on real boards.
 
+### Router-in-the-loop repair (`place_route_loop.py`)
+
+The proxy-only results above motivated closing the loop: use the *router's
+own failure diagnostics* to decide what to move. Each round:
+
+1. Route the board; parse the JSON summary (failed nets, iterations) and the
+   frontier blocking analysis (which nets wall off each failed route).
+2. Build the movable set: parts owning pads of the **failed nets** (move the
+   endpoint out of the congested pocket) and of the **blocker nets** (move
+   the anchor so the blocking wall re-routes) — excluding high-pin-count
+   parts (`--max-target-pins 40`: moving a resistor that anchors a blocker
+   is low-risk; dragging a 144-pin QFP is how placements get destroyed).
+3. Micro-quench only those parts, with failed nets' airwires weighted 3×.
+4. Re-route. Accept only if (failures, then iterations) improves; otherwise
+   revert and widen the displacement cap 1.5× for the next attempt.
+
+Result on kit-dev-coldfire from the hand placement:
+
+| round | action | failures | router iterations | vias |
+|---|---|---|---|---|
+| 0 | initial route | 3 | 122.4 M | 346 |
+| 1 | moved 35 small parts near failed/blocker nets | 2 | 90.6 M | 360 | accepted |
+| 2–3 | candidates worse (4, 3 failures) | — | — | — | rejected, cap widened |
+| 4 | retry at 6.75 mm cap | **0** | **25.7 M** | 382 | accepted |
+
+**The loop fully repaired the hand placement — 3 → 0 failed nets and 4.8×
+less router effort — by moving only resistors/caps/jumpers** (49 parts
+total; the ICs and connectors never moved). The reject-and-revert mechanism
+did real work: two of four candidate placements made things worse and were
+discarded, which is exactly the proxy-blindness the loop exists to catch.
+Costs: +36 vias, and same-footprint swaps are not displacement-capped (one
+resistor traveled 32 mm via swap — fine for generic pull-ups, but worth a
+cap or flag for parts where location is meaningful). DRC: the same
+PAD-SEGMENT micro-overlap artifact the router produces on the baseline (16
+occurrences) appears somewhat more often on the repaired board (30).
+
+This validates the core hypothesis of the whole investigation: **proxies
+propose, the router disposes.** Wall-clock cost was ~5 routing runs
+(~4 minutes total on this board).
+
 ## References and further reading
 
 ### PCB-specific placement research
