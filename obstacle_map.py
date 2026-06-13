@@ -414,40 +414,36 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         if gx_flat is None:
             continue
 
-        # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
-        # Cells deep inside a hole (>= the relevant clearance from the hole edge)
-        # are routable; cells in the ring, or in the hole but within clearance of
-        # its edge (where the ring copper is close), stay blocked (issue #95).
-        track_exempt = set()
-        via_exempt = set()
-        for hole in (ko.get('holes') or []):
-            hgx, hgy, hinside, hedge = _rasterize_polygon(hole, coord, margin)
-            if hgx is None:
-                continue
-            for x, y in zip(hgx[hinside & (hedge >= track_clear)],
-                            hgy[hinside & (hedge >= track_clear)]):
-                track_exempt.add((int(x), int(y)))
-            for x, y in zip(hgx[hinside & (hedge >= via_clear)],
-                            hgy[hinside & (hedge >= via_clear)]):
-                via_exempt.add((int(x), int(y)))
+        track_mask = inside | (edge_dist < track_clear)
+        via_mask = inside | (edge_dist < via_clear)
 
-        def _drop_exempt(mask, exempt):
-            if not exempt:
-                return mask
-            keep = np.fromiter(
-                ((int(x), int(y)) not in exempt for x, y in zip(gx_flat, gy_flat)),
-                dtype=bool, count=gx_flat.size)
-            return mask & keep
+        # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
+        # Cells deep inside a hole (>= the relevant clearance from the hole
+        # edge) are routable; cells in the ring, or in the hole but within
+        # clearance of the ring copper, stay blocked (issue #95). Evaluated
+        # vectorized on the OUTER cell array - the earlier per-cell Python set +
+        # generator was O(cells*holes) and dominated every obstacle-map build
+        # (76s of an 86s plane pad-repair on glasgow's whole-board ring keepout).
+        holes = ko.get('holes') or []
+        if holes:
+            px = gx_flat.astype(np.float64) * coord.grid_step
+            py = gy_flat.astype(np.float64) * coord.grid_step
+            for hole in holes:
+                hp = np.asarray(hole, dtype=np.float64)
+                if hp.shape[0] < 3:
+                    continue
+                hx1, hy1 = hp[:, 0], hp[:, 1]
+                hx2, hy2 = np.roll(hp[:, 0], -1), np.roll(hp[:, 1], -1)
+                h_inside = _points_inside_polygon(px, py, hx1, hy1, hx2, hy2)
+                h_edge = _points_edge_distance(px, py, hx1, hy1, hx2, hy2)
+                track_mask &= ~(h_inside & (h_edge >= track_clear))
+                via_mask &= ~(h_inside & (h_edge >= via_clear))
 
         if block_tracks:
-            _block_cells_on_layers(obstacles, gx_flat, gy_flat,
-                                   _drop_exempt(inside | (edge_dist < track_clear), track_exempt),
-                                   layer_idxs)
-        if block_vias:
-            via_mask = _drop_exempt(inside | (edge_dist < via_clear), via_exempt)
-            if via_mask.any():
-                obstacles.add_blocked_vias_batch(
-                    np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+            _block_cells_on_layers(obstacles, gx_flat, gy_flat, track_mask, layer_idxs)
+        if block_vias and via_mask.any():
+            obstacles.add_blocked_vias_batch(
+                np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
