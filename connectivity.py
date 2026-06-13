@@ -677,6 +677,44 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
             groups.sort(key=len, reverse=True)
+
+            # If the net also has pads connected to none of the copper groups,
+            # those pads are genuine terminals and must not be dropped. A freshly
+            # fanned-out stub can fragment into several co-located groups (e.g. a
+            # layer swap splitting it across a via); treating two such fragments
+            # as the net's two terminals discards the real far pad and collapses
+            # the span to ~0. So when unconnected pads exist, use ALL groups'
+            # free ends as one side and the unconnected pads as the other -
+            # the same shape as the single-group Case 2 below, generalized.
+            if use_stub_free_ends:
+                all_seg_points = set()
+                for g in groups:
+                    for seg in g:
+                        all_seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
+                        all_seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
+                unconnected_pads = []
+                for pad in net_pads:
+                    px, py = round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS)
+                    if not any(abs(px - sx) < 0.05 and abs(py - sy) < 0.05 for sx, sy in all_seg_points):
+                        unconnected_pads.append(pad)
+                if unconnected_pads:
+                    sources = []
+                    for g in groups:
+                        for x, y, layer in find_stub_free_ends(g, net_pads):
+                            layer_idx = layer_map.get(layer)
+                            if layer_idx is not None:
+                                gx, gy = coord.to_grid(x, y)
+                                sources.append((gx, gy, layer_idx, x, y))
+                    targets = []
+                    for pad in unconnected_pads:
+                        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                        for layer in expand_pad_layers(pad.layers, config.layers):
+                            layer_idx = layer_map.get(layer)
+                            if layer_idx is not None:
+                                targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+                    if sources and targets:
+                        return sources, targets, None
+
             source_segs = groups[0]
             target_segs = groups[1]
 
@@ -747,16 +785,35 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                     unconnected_pads.append(pad)
 
             if unconnected_pads:
-                # Use all segment endpoints as source, unconnected pad(s) as target
+                # Build source endpoints from the segment group, unconnected pad(s)
+                # as target.
                 sources = []
-                for seg in seg_group:
-                    layer_idx = layer_map.get(seg.layer)
-                    if layer_idx is not None:
-                        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-                        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-                        sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
-                        if (gx1, gy1) != (gx2, gy2):
-                            sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
+                stub_free_ends = (find_stub_free_ends(seg_group, net_pads)
+                                  if use_stub_free_ends else [])
+                if stub_free_ends:
+                    # Diff pairs: launch only from the genuine stub tip (the free
+                    # end NOT coincident with a pad). Using all segment endpoints
+                    # here would expose the end sitting on the BGA ball pad and the
+                    # interior dogleg vertices as candidates - both inside the
+                    # keepout - and the closest-pair selector would pick the ball
+                    # pad (tightly pitched, perfectly aligned P||N) over the
+                    # escaped tip outside the zone, placing the launch inside the
+                    # blocked region.
+                    for x, y, layer in stub_free_ends:
+                        layer_idx = layer_map.get(layer)
+                        if layer_idx is not None:
+                            gx, gy = coord.to_grid(x, y)
+                            sources.append((gx, gy, layer_idx, x, y))
+                else:
+                    # Single-ended (or no free tip found): use all segment endpoints.
+                    for seg in seg_group:
+                        layer_idx = layer_map.get(seg.layer)
+                        if layer_idx is not None:
+                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                            sources.append((gx1, gy1, layer_idx, seg.start_x, seg.start_y))
+                            if (gx1, gy1) != (gx2, gy2):
+                                sources.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
                 targets = []
                 for pad in unconnected_pads:
@@ -779,6 +836,16 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                         if abs(via.x - pad.global_x) < 0.1 and abs(via.y - pad.global_y) < 0.1:
                             near_unconnected = True
                             break
+                    # For diff pairs, if we already have a routable stub-tip source
+                    # (sources non-empty from find_stub_free_ends above), don't also
+                    # expose the layer-spanning via that anchors the stub to its BGA
+                    # ball pad: that via sits inside the keepout and, being a tight
+                    # ball-pitch P||N pair, would beat the fanned-out escaped tips in
+                    # the closest-pair selector and launch the pair from inside the
+                    # blocked zone. Only keep the via when no tip was usable (e.g.
+                    # the tip is on an unmapped layer) or it lands on the target pad.
+                    if (use_stub_free_ends and sources and not near_unconnected):
+                        continue
                     # Add via as endpoint on ALL routing layers (vias are through-hole)
                     for layer in config.layers:
                         layer_idx = layer_map.get(layer)

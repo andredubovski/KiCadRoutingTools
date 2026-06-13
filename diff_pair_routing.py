@@ -946,22 +946,53 @@ def get_diff_pair_endpoints(pcb_data: PCBData, p_net_id: int, n_net_id: int,
                     best_p, best_n = p, n
         return best_p, best_n, best_dist
 
-    # Find the closest P-N pair - this becomes one end (we'll call it "source")
-    p_src, n_src, src_dist = find_closest_pair(p_all, n_all)
-    if p_src is None or n_src is None:
-        return [], [], "Could not find matching P and N endpoints on same layer"
+    # Honor get_net_endpoints' source/target split so a multi-point cluster on
+    # one end (e.g. a BGA diff-pair escape stub, returned as many clustered
+    # points) can't be picked for BOTH terminals - the old "two closest P-N
+    # pairs over the merged set" landed both terminals inside that one cluster,
+    # collapsing the pair to a degenerate ~0.1mm corridor that downstream then
+    # refused. Each terminal is now the closest P-N pair WITHIN one labeled
+    # group, so the two terminals stay on opposite ends.
+    #
+    # P/N agreement: get_net_endpoints labels each net independently, so N's
+    # "source" group may be the end P calls "target" (asymmetric copper). Try
+    # both ways of matching P's sides to N's sides and keep the one whose two
+    # P-N pairs are tighter (each P endpoint actually adjacent to its N) - the
+    # wrong matching pairs opposite ends and comes back far apart.
+    def labeled_pair(p_grp, n_grp):
+        p, n, d = find_closest_pair(p_grp, n_grp)
+        return (p, n, d) if p is not None and n is not None else None
 
-    # Remove the matched endpoints from consideration
-    p_remaining = [p for p in p_all if p != p_src]
-    n_remaining = [n for n in n_all if n != n_src]
+    def matching_cost(src_pair, tgt_pair):
+        if src_pair is None or tgt_pair is None:
+            return None
+        return src_pair[2] + tgt_pair[2]  # sum of the two P-N gaps; smaller = P/N agree
 
-    if not p_remaining or not n_remaining:
-        return [], [], "Not enough endpoints for source and target"
+    aligned = (labeled_pair(p_sources, n_sources), labeled_pair(p_targets, n_targets))
+    crossed = (labeled_pair(p_sources, n_targets), labeled_pair(p_targets, n_sources))
+    cost_a, cost_c = matching_cost(*aligned), matching_cost(*crossed)
 
-    # Find the closest P-N pair from remaining - this becomes the other end ("target")
-    p_tgt, n_tgt, tgt_dist = find_closest_pair(p_remaining, n_remaining)
-    if p_tgt is None or n_tgt is None:
-        return [], [], "Could not find matching P and N target endpoints on same layer"
+    chosen = None
+    if cost_a is not None and (cost_c is None or cost_a <= cost_c):
+        chosen = aligned
+    elif cost_c is not None:
+        chosen = crossed
+
+    if chosen is not None:
+        (p_src, n_src, _), (p_tgt, n_tgt, _) = chosen
+    else:
+        # Labels unusable (e.g. a net has no separable target group): fall back
+        # to the original two-closest-pairs search over the merged endpoint set.
+        p_src, n_src, src_dist = find_closest_pair(p_all, n_all)
+        if p_src is None or n_src is None:
+            return [], [], "Could not find matching P and N endpoints on same layer"
+        p_remaining = [p for p in p_all if p != p_src]
+        n_remaining = [n for n in n_all if n != n_src]
+        if not p_remaining or not n_remaining:
+            return [], [], "Not enough endpoints for source and target"
+        p_tgt, n_tgt, tgt_dist = find_closest_pair(p_remaining, n_remaining)
+        if p_tgt is None or n_tgt is None:
+            return [], [], "Could not find matching P and N target endpoints on same layer"
 
     # Build the paired source and target tuples
     paired_sources = [(
