@@ -320,6 +320,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     all_segment_modifications = []
     # Track all vias added during stub layer swapping
     all_swap_vias = []
+    # Track new stub segments synthesized by bare-pad target swaps
+    all_swap_segments = []
     # Track total number of layer swaps applied
     total_layer_swaps = 0
 
@@ -388,7 +390,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if enable_layer_switch and diff_pair_ids_to_route_set:
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
-            can_swap_to_top_layer, all_segment_modifications, all_swap_vias
+            can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
+            all_swap_segments=all_swap_segments
         )
 
     # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
@@ -702,6 +705,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         results_data = {
             'results': results,
             'all_swap_vias': all_swap_vias,
+            'all_swap_segments': all_swap_segments,
             'pad_swaps': pad_swaps,
             'target_swap_info': target_swap_info,
             'all_segment_modifications': all_segment_modifications,
@@ -715,6 +719,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             results=results,
             all_segment_modifications=all_segment_modifications,
             all_swap_vias=all_swap_vias,
+            all_swap_segments=all_swap_segments,
             target_swap_info=target_swap_info,
             single_ended_target_swap_info=[],
             pad_swaps=pad_swaps,

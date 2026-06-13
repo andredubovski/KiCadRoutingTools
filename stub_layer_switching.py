@@ -241,6 +241,56 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
     return new_vias, segment_mods
 
 
+def apply_bare_pad_target_via(pcb_data: PCBData, net_id: int, pad_x: float, pad_y: float,
+                              new_layer: str, toward_x: float, toward_y: float,
+                              config: GridRouteConfig,
+                              stub_len: float = 0.6) -> Tuple[Via, Segment]:
+    """Fan out a bare target pad onto an inner layer (target-side layer swap).
+
+    A diff pair whose copper lives on an inner layer can't land on a surface-only
+    connector pad that is boxed in by neighbouring pads (e.g. the front row of a
+    2-row header). Dropping a through-via on the pad and growing a short stub on
+    `new_layer` turns the bare pad into an inner-layer stub the router can reach -
+    the via carries the connection back up to the F.Cu pad. This is the bare-pad
+    analogue of apply_stub_layer_switch (which can only MOVE existing stub copper).
+
+    Args:
+        pad_x, pad_y: target pad position (mm)
+        new_layer: destination layer for the synthesized stub (the pair's source layer)
+        toward_x, toward_y: a point the stub should aim at (the pair's source center),
+            so the stub free end opens toward where the route comes from
+        stub_len: stub length in mm
+
+    Returns:
+        (via, stub_segment) - both already appended to pcb_data.
+    """
+    dx, dy = toward_x - pad_x, toward_y - pad_y
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        dx, dy = 0.0, 1.0
+    else:
+        dx, dy = dx / norm, dy / norm
+    end_x, end_y = pad_x + dx * stub_len, pad_y + dy * stub_len
+
+    via = Via(
+        x=pad_x, y=pad_y,
+        size=config.via_size, drill=config.via_drill,
+        layers=['F.Cu', 'B.Cu'],  # through-hole
+        net_id=net_id,
+    )
+    pcb_data.vias.append(via)
+
+    stub = Segment(
+        start_x=pad_x, start_y=pad_y,
+        end_x=end_x, end_y=end_y,
+        width=config.track_width,
+        layer=new_layer,
+        net_id=net_id,
+    )
+    pcb_data.segments.append(stub)
+    return via, stub
+
+
 def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_vias: List) -> None:
     """
     Revert a previously applied stub layer switch.
