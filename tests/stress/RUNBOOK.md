@@ -31,6 +31,15 @@ non-interactively and record everything.
    diff pairs via `list_nets.py <board> --diff-pairs --power`, power strategy,
    plan generation) but DO NOT invoke other skills and DO NOT ask the user
    anything — use the skill's inline name-pattern heuristics and your judgment.
+   DESIGN RULES: also run `list_nets.py <board> --design-rules` and use the
+   Default class's clearance/track/via as the BASELINE
+   `--clearance/--track-width/--via-size/--via-drill` on every route.py,
+   qfn_fanout.py, bga_fanout.py and route_planes.py command (and the diff-pair
+   `--track-width/--gap` on route_diff.py) — the router does NOT read net
+   classes and its generic 0.25mm default is often wider than the board's own
+   rule, which boxes pads in and fails nets with "no rippable blockers". Route
+   any non-Default-class nets separately with that class's values. A
+   fine-pitch component's fanout NOTE still overrides locally for its nets.
 3. Skip GND return vias / impedance / length matching unless the board
    obviously needs them (DDR memory). Keep `--add-gnd-vias` OFF to keep runs
    comparable. Skip schematic sync. Skip teardrops.

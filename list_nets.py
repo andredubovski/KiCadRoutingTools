@@ -20,8 +20,124 @@ Examples:
 """
 
 import argparse
+import json
+import os
+import re
 from fnmatch import fnmatch
 from kicad_parser import parse_kicad_pcb, find_components_by_type
+
+
+# KiCad netclass field -> the routing-CLI flag that consumes it.
+_NETCLASS_FIELDS = [
+    ('clearance', 'clearance', '--clearance'),
+    ('track_width', 'track_width', '--track-width'),
+    ('via_diameter', 'via_size', '--via-size'),
+    ('via_drill', 'via_drill', '--via-drill'),
+    ('diff_pair_gap', 'diff_pair_gap', '--diff-pair-gap (route_diff.py)'),
+    ('diff_pair_width', 'diff_pair_width', '--track-width (route_diff.py)'),
+]
+
+
+def read_design_rules(pcb_path):
+    """Read net-class design rules so a skill can pass them to the routing CLIs.
+
+    Net classes live in the sibling .kicad_pro (KiCad 8+, JSON under
+    net_settings.classes) or, for KiCad 6/7, in (net_class ...) blocks inside
+    the .kicad_pcb. The router itself does not read these - it defaults to
+    routing_defaults.CLEARANCE etc. - so the analysis step should read them
+    here and pass --clearance/--track-width/--via-size/--via-drill (and the
+    diff-pair gap) explicitly, instead of over-/under-clearancing the board.
+
+    Returns {'classes': {name: {clearance, track_width, via_diameter,
+    via_drill, diff_pair_gap, diff_pair_width}}, 'assignments': {net: class},
+    'source': str}. Missing values are omitted per class.
+    """
+    classes = {}
+    assignments = {}
+    source = None
+
+    pro_path = os.path.splitext(pcb_path)[0] + '.kicad_pro'
+    if os.path.exists(pro_path):
+        try:
+            with open(pro_path, encoding='utf-8') as f:
+                pro = json.load(f)
+            ns = pro.get('net_settings', {}) or {}
+            for c in ns.get('classes', []) or []:
+                name = c.get('name', 'Default')
+                classes[name] = {k: c[k] for k in
+                                 ('clearance', 'track_width', 'via_diameter',
+                                  'via_drill', 'diff_pair_gap', 'diff_pair_width')
+                                 if k in c}
+            # net -> class assignment (dict in newer files; list of pairs in some)
+            na = ns.get('netclass_assignments') or {}
+            if isinstance(na, dict):
+                assignments = dict(na)
+            if classes:
+                source = pro_path
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if not classes:
+        # KiCad 6/7 fallback: (net_class "Name" (clearance X) (trace_width Y) ...)
+        try:
+            with open(pcb_path, encoding='utf-8') as f:
+                content = f.read()
+        except OSError:
+            content = ''
+        # KiCad 6/7: (net_class <name|"name"> "description" (clearance ..)
+        # (trace_width ..) (via_dia ..) (via_drill ..) (add_net <name>) ...)
+        for m in re.finditer(r'\(net_class\s+(?:"([^"]+)"|([^\s"]+))(.*?)\n\s*\)',
+                             content, re.DOTALL):
+            name = m.group(1) or m.group(2)
+            body = m.group(3)
+            cls = {}
+            for src_key, key in (('clearance', 'clearance'), ('trace_width', 'track_width'),
+                                 ('via_dia', 'via_diameter'), ('via_drill', 'via_drill'),
+                                 ('diff_pair_gap', 'diff_pair_gap'),
+                                 ('diff_pair_width', 'diff_pair_width')):
+                vm = re.search(r'\(' + src_key + r'\s+([\d.]+)\)', body)
+                if vm:
+                    cls[key] = float(vm.group(1))
+            classes[name] = cls
+            for am in re.finditer(r'\(add_net\s+(?:"([^"]+)"|([^\s")]+))\)', body):
+                assignments[am.group(1) or am.group(2)] = name
+            source = pcb_path
+
+    return {'classes': classes, 'assignments': assignments, 'source': source}
+
+
+def print_design_rules(pcb_path):
+    """Human + skill-friendly dump of the board's net-class design rules."""
+    dr = read_design_rules(pcb_path)
+    if not dr['classes']:
+        print("No net classes found (no sibling .kicad_pro and no (net_class) "
+              "in the PCB). Use routing defaults or pass values explicitly.")
+        return
+    print(f"\nNet-class design rules (from {os.path.basename(dr['source'])}):")
+    for name, c in sorted(dr['classes'].items()):
+        fields = "  ".join(f"{k}={c[k]}" for k in
+                           ('clearance', 'track_width', 'via_diameter', 'via_drill',
+                            'diff_pair_gap', 'diff_pair_width') if k in c)
+        print(f"  [{name}] {fields}")
+    non_default = {n: c for n, c in dr['assignments'].items() if c != 'Default'}
+    if non_default:
+        print(f"  ({len(non_default)} net(s) assigned to non-default classes — "
+              f"route those separately with that class's flags)")
+    # Ready-to-paste CLI flags from the Default class (router consumes these).
+    d = dr['classes'].get('Default') or next(iter(dr['classes'].values()))
+    flags = []
+    if 'clearance' in d:        flags.append(f"--clearance {d['clearance']}")
+    if 'track_width' in d:      flags.append(f"--track-width {d['track_width']}")
+    if 'via_diameter' in d:     flags.append(f"--via-size {d['via_diameter']}")
+    if 'via_drill' in d:        flags.append(f"--via-drill {d['via_drill']}")
+    if flags:
+        print("\nSUGGESTED route.py/qfn_fanout/bga_fanout/route_planes flags "
+              "(Default class):\n  " + " ".join(flags))
+    if 'diff_pair_gap' in d or 'diff_pair_width' in d:
+        dp = []
+        if 'diff_pair_width' in d: dp.append(f"--track-width {d['diff_pair_width']}")
+        if 'diff_pair_gap' in d:   dp.append(f"--gap {d['diff_pair_gap']}")
+        print("SUGGESTED route_diff.py flags (Default class):\n  " + " ".join(dp))
 
 
 def find_differential_pairs(pcb_data):
@@ -138,10 +254,20 @@ def main():
     parser.add_argument('--pads', action='store_true', help='Show pad-to-net assignments')
     parser.add_argument('--diff-pairs', '-d', action='store_true', help='Detect differential pairs')
     parser.add_argument('--power', '-p', action='store_true', help='Show power/ground nets')
+    parser.add_argument('--design-rules', '-r', action='store_true',
+                        help="Show net-class design rules (clearance/track/via/diff-pair) "
+                             "from the .kicad_pro (or .kicad_pcb net_class) and the CLI "
+                             "flags to pass them to the routing tools")
     parser.add_argument('--top', '-t', type=int, default=10, help='Show top N most-connected nets (default: 10)')
     parser.add_argument('--pattern', help='Filter nets by glob pattern')
 
     args = parser.parse_args()
+
+    # Design rules read from project metadata, not the parsed PCB object.
+    if args.design_rules:
+        print_design_rules(args.pcb)
+        if not (args.component or args.diff_pairs or args.power):
+            return
 
     pcb_data = parse_kicad_pcb(args.pcb)
 

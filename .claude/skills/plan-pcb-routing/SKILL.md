@@ -151,6 +151,27 @@ Use `list_nets.py` to detect differential pairs and power/ground nets:
 python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
+### Read the board's design rules and pass them to the CLI
+
+The router does NOT read the board's net classes — it falls back to a generic
+`--clearance 0.25` / `--track-width` default, which is often WIDER than the
+board's own rule and can box pads in so nets fail with "no rippable blockers".
+Read the board's real rules and pass them explicitly:
+
+```bash
+python3 list_nets.py path/to/file.kicad_pcb --design-rules
+```
+
+It reads net classes from the sibling `.kicad_pro` (KiCad 8+) or `(net_class)`
+in the `.kicad_pcb` (KiCad 6/7) and prints ready-to-paste flags, e.g.
+`--clearance 0.2 --track-width 0.2 --via-size 0.6 --via-drill 0.3` and the
+diff-pair `--gap`. Use the **Default class** values as the baseline
+`--clearance/--track-width/--via-size/--via-drill` for every `route.py`,
+`qfn_fanout.py`, `bga_fanout.py`, and `route_planes.py` command, and the
+diff-pair `--track-width/--gap` for `route_diff.py`. Route any nets assigned to
+a non-Default class separately with that class's values. Only fall back to tool
+defaults when no net classes are found.
+
 This will output:
 - Differential pairs detected (P/N naming conventions)
 - Ground nets with pad counts
