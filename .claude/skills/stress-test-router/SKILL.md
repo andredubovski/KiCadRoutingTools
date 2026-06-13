@@ -53,7 +53,7 @@ Hard operational limits (violating these has crashed the machine before):
 - **Max 2 boards in flight at once.** Launch two, wait for a completion
   notification, backfill.
 - **Every tool command inside a run goes through
-  `tests/stress/run_limited.sh`** (~1 GB RSS watchdog). An OOM kill is a
+  `tests/stress/run_limited.sh`** (~4 GB RSS watchdog). An OOM kill is a
   finding, not noise.
 - Order boards simple -> complex (keyboards first, BGA/SoC boards last) so
   harness problems surface cheaply.

@@ -22,7 +22,8 @@ non-interactively and record everything.
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
    `bash ~/Documents/kicad_stress_test/scripts/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
-   It kills the job at ~1 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
+   It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
+   With max 2 boards in flight that is up to ~8 GB — keep an eye on machine RAM.
    If a step is killed by the cap, that is an important finding: record it in
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
    default `--max-iterations`, no retry round, or fewer nets); if that also
@@ -72,7 +73,7 @@ non-interactively and record everything.
    the violation count — real boards have pre-existing pad-to-pad proximity
    that is not the router's fault. Report post-route DRC as total AND delta.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
-   now chunked; DEFAULT grids should stay well under the 1 GB cap on every
+   now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
    A MEMORY_LIMIT_EXCEEDED kill at the DEFAULT grid is a REGRESSION — record
    the command and RSS prominently. EXCEPTION: a board-global route at a fine

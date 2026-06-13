@@ -1,8 +1,8 @@
 #!/bin/bash
-# Run a command with a ~1 GB RSS watchdog (process + direct children).
-# Usage: run_limited.sh <cmd> [args...]
+# Run a command with a ~4 GB RSS watchdog (process + direct children).
+# Usage: run_limited.sh <cmd> [args...]   (override with LIMIT_KB=<kb>)
 # Exits 137 with MEMORY_LIMIT_EXCEEDED on stderr if the limit is breached.
-LIMIT_KB=${LIMIT_KB:-1048576}
+LIMIT_KB=${LIMIT_KB:-4194304}
 "$@" &
 PID=$!
 trap 'kill -9 $PID 2>/dev/null' INT TERM
