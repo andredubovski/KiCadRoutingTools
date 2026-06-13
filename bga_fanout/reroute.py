@@ -593,6 +593,34 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         )
                         if result:
                             new_jogged_route, new_layer, new_jogged_tracks = result
+
+                            # If to_jog is one half of a diff pair, its partner must
+                            # move to the SAME layer too - jogging just one half splits
+                            # P and N across layers (and can leave the partner shorting
+                            # another net on the vacated channel), making the pair
+                            # unroutable downstream. Jog the partner onto new_layer
+                            # (layer forced, and seeing to_jog's new tracks so the two
+                            # halves don't collide). If the partner can't follow,
+                            # abandon this jog rather than split the pair.
+                            partner = None
+                            partner_result = None
+                            if to_jog.pair_id is not None:
+                                partner = next((r for r in routes
+                                                if r.pair_id == to_jog.pair_id
+                                                and r.net_id != to_jog.net_id), None)
+                                if partner is None:
+                                    continue
+                                partner_ch = get_farther_channel(partner, channels, grid)
+                                if partner_ch is None:
+                                    continue
+                                partner_result = try_jogged_route(
+                                    partner, partner_ch, grid, exit_margin,
+                                    tracks + new_jogged_tracks, existing_tracks, [new_layer],
+                                    track_width, clearance, None, no_inner_top_layer
+                                )
+                                if partner_result is None:
+                                    continue
+
                             jogged_net_name = net_names.get(to_jog.net_id, f"net_{to_jog.net_id}")
 
                             # Remove old tracks for the route being jogged
@@ -609,6 +637,18 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                             tracks.extend(new_jogged_tracks)
 
                             print(f"    Moved {jogged_net_name} to jogged path on {new_layer}")
+
+                            # Move the diff-pair partner onto the same layer
+                            if partner_result is not None:
+                                p_route, p_layer, p_tracks = partner_result
+                                p_old = [i for i, t in enumerate(tracks)
+                                         if t.get('net_id') == partner.net_id]
+                                for idx in sorted(p_old, reverse=True):
+                                    tracks.pop(idx)
+                                routes[routes.index(partner)] = p_route
+                                tracks.extend(p_tracks)
+                                p_name = net_names.get(partner.net_id, f"net_{partner.net_id}")
+                                print(f"    Moved {p_name} to jogged path on {p_layer} (diff-pair partner)")
 
                             if to_jog is route:
                                 # We jogged the original failing route - it's now resolved
