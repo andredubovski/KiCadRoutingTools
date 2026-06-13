@@ -57,6 +57,9 @@ Hard operational limits (violating these has crashed the machine before):
   finding, not noise.
 - Order boards simple -> complex (keyboards first, BGA/SoC boards last) so
   harness problems surface cheaply.
+- On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to
+  `bga_fanout.py` (`--layers F.Cu In1.Cu In2.Cu B.Cu`); its default is the two
+  outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
 - Subagents must not end their turn while a routing process is still
   running (the run gets orphaned — runbook rule 11).
 
@@ -86,10 +89,17 @@ For each distinct finding:
 3. **Present all drafts to the user and get approval BEFORE creating any
    issue.** File only approved ones with `gh issue create`.
 
-Known findings already on record (do not re-file; they are documented in
-`tests/stress/README.md`): power-type copper layers dropped by the parser;
-Edge.Cuts regex cross-matching through other graphics; KiCad 6/7
-fp_text-reference footprint collapse.
+Known findings already on record (do not re-file — search/comment instead).
+Now FIXED (re-file only as a regression, with a repro): power-type copper
+layers dropped (#76), Edge.Cuts regex cross-match (#77), KiCad 6/7
+fp_text-reference collapse (#78), oval/slot drills read as SMD (#106),
+multipoint `route_multipoint_main` UnboundLocalError on free-end-less nets.
+Still OPEN (add evidence, don't duplicate): multipoint orphan dead-end stubs
+(#84), router success-vs-connectivity mismatch (#8), fine-pitch pads boxed in
+by sub-clearance copper / misleading "no rippable blockers found" (#95), no
+incremental output so a killed run loses work (#100), thermal-via exposed-pad
+falsely reported disconnected (#108), board-global fine-grid OOM on large 4+
+layer boards (#109).
 
 ## Reporting
 

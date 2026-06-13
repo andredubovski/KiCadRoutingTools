@@ -131,6 +131,13 @@ Examples:
 
 Inner pins beyond depth 2 cannot escape without fanout routing through channels between outer pins.
 
+**Escape layers (multi-layer boards):** `bga_fanout.py` defaults to `--layers F.Cu B.Cu`
+only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
+`--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
+and those nets are silently dropped from the fanout (you'll see "Available layers:
+[F.Cu, B.Cu]" and a low escaped-net count). `qfn_fanout.py` is perimeter-only and
+doesn't take escape layers.
+
 Report to user:
 - List of components that may need fanout
 - Package type, pad count, and grid depth for each
@@ -272,9 +279,14 @@ avoiding `--no-bga-zone` workarounds during routing.
 plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
+On a 4+ layer board also pass every copper layer with `--layers` (default is
+F.Cu B.Cu only) so inner balls can escape — drop `--layers` only for true
+2-layer boards.
+
 python3 -X utf8 bga_fanout.py board.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
+    --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_step1.kicad_pcb \
     2>&1 | tee /tmp/step1_fanout.txt
 

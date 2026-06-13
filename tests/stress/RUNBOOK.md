@@ -49,6 +49,12 @@ non-interactively and record everything.
    a REGRESSION: record it prominently in issues with the count.
    Heed the fanout tool's fine-pitch NOTE (issue #97 warning): use the
    suggested --grid-step/--clearance/--track-width for that component's nets.
+   ESCAPE LAYERS (BGA/PGA): bga_fanout.py defaults to `--layers F.Cu B.Cu`
+   only. On 4+ layer boards you MUST pass the board's inner copper layers too,
+   e.g. `--layers F.Cu In1.Cu In2.Cu B.Cu`, or deep balls can't escape and are
+   silently dropped (only the ~2 outer layers' worth of nets fan out — this
+   capped ottercast_audio at ~23%). qfn_fanout.py is perimeter-only and
+   doesn't need this.
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap 0.15 default; use --no-gnd-vias).
    If pair detection looks like a false positive (e.g. random net names that
@@ -57,10 +63,13 @@ non-interactively and record everything.
    the violation count — real boards have pre-existing pad-to-pad proximity
    that is not the router's fault. Report post-route DRC as total AND delta.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
-   now chunked; default grids should stay well under the 1 GB cap on every
+   now chunked; DEFAULT grids should stay well under the 1 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
-   Any MEMORY_LIMIT_EXCEEDED kill is now a REGRESSION - record the command
-   and RSS prominently in issues.
+   A MEMORY_LIMIT_EXCEEDED kill at the DEFAULT grid is a REGRESSION — record
+   the command and RSS prominently. EXCEPTION: a board-global route at a fine
+   grid (e.g. --grid-step 0.05) on a physically large 4+ layer board is the
+   KNOWN issue #109, not a #81 regression — note it against #109 and, if you
+   need a fine grid there, scope it per-component/region instead of board-wide.
    BGA-zone check (issue #82, fixed): keyswitches/diodes/thermal-via arrays
    should no longer be detected as BGA zones. Try WITHOUT --no-bga-zone
    first; if non-array footprints still get zones (or array parts lose
