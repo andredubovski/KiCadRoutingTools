@@ -26,7 +26,6 @@ BOARDS = {
     "skot__bitaxe__bitaxeUltra": "bitaxe_ultra",
     "Ottercast__OtterCastAudioV2__OtterCastAudioV2": "ottercast_audio",
     "wntrblm__Castor_and_Pollux__hardware_mainboard_mainboard": "castor_pollux",
-    "SPIRIT-org__SPIRIT__EDA-kicad_cm5-carrier": "spirit_cm5",
     "opulo-inc__lumenpnp__pnp_pcb_mobo_mobo.kicad_pcb": "lumenpnp_mobo",
     "GlasgowEmbedded__glasgow__hardware_boards_glasgow_glasgow.kicad_pcb": "glasgow_revC",
     "greatscottgadgets__hackrf__hardware_hackrf-one_hackrf-one": "hackrf_one",

@@ -20,7 +20,6 @@ REPOS = [
     ("skot/bitaxe", "Bitcoin ASIC miner, medium-complex"),
     ("Ottercast/OtterCastAudioV2", "Allwinner SoC + DDR, complex"),
     ("wntrblm/Castor_and_Pollux", "SAMD21 synth module"),
-    ("SPIRIT-org/SPIRIT", "CM5 smartphone, complex"),
     ("jakkra/ZSWatch", "nRF5340 smartwatch, dense"),
     ("opulo-inc/lumenpnp", "pick-and-place machine boards"),
     ("GlasgowEmbedded/glasgow", "FPGA BGA interface tool"),
