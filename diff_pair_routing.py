@@ -2459,6 +2459,21 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'n_net_id': n_net_id,  # N net ID to find target pad
         }
 
+    # Issue #102: never report a pair routed whose P and N copper touches.
+    # Orientation-flipped terminals (e.g. USB-C dual-row interleaves, where
+    # the pad order reverses between the rows) make a same-layer P/N crossing
+    # topologically unavoidable; without this check such pairs shipped as
+    # claimed-good output with genuine P-to-N shorts (neo6502 /D_P //D_N).
+    if _pn_tracks_cross(result.get('new_segments', []), p_net_id, n_net_id):
+        print("  P/N tracks cross in final geometry - rejecting pair route")
+        print("  (terminals likely have opposite P/N pad order; needs a polarity "
+              "swap, a layer change, or opposite-side joins)")
+        return {
+            'failed': True,
+            'iterations': result.get('iterations', 0),
+            'pn_crossing': True,
+        }
+
     return result
 
 
