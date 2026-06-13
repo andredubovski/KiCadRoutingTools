@@ -1087,6 +1087,94 @@ def _generate_multinet_layer_zones(
     return zone_sexprs, debug_line_sexprs, zone_data_list
 
 
+def _geometric_plane_verification(
+    output_file: str,
+    net_ids: List[int],
+    net_names: List[str],
+    plane_layers: List[str],
+    ripped_net_ids: List[int],
+) -> Dict[int, Dict]:
+    """Geometric truth check of plane connectivity (issues #89 and #107).
+
+    Re-parses the written output and, for each plane net, uses
+    check_net_connectivity to count how many of the net's pads are actually
+    joined to that net's plane copper. This catches two classes of failure the
+    via-placement counters miss:
+
+      * #89: a stitching via was placed/reused but is not electrically joined
+        to the net's zone (so the via-placement success counter overcounts).
+      * #107: on a multi-net Voronoi layer, a through-hole pad sits inside the
+        OTHER net's Voronoi cell, so it never gets a via and is never counted,
+        yet its own net's zone does not cover it -> geometrically disconnected.
+
+    Returns a dict mapping net_id -> {name, layer, total, connected, failed,
+    disconnected_pads}. Returns {} (and prints a warning) if the check could
+    not be run, so callers fall back to the via-placement counters.
+    """
+    try:
+        from check_connected import check_net_connectivity
+        out_pcb = parse_kicad_pcb(output_file)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"WARNING: geometric plane verification could not run ({e}); "
+              f"reported counts are via-placement estimates only.")
+        return {}
+
+    segs_by_net: Dict[int, List] = {}
+    for s in out_pcb.segments:
+        segs_by_net.setdefault(s.net_id, []).append(s)
+    vias_by_net: Dict[int, List] = {}
+    for v in out_pcb.vias:
+        vias_by_net.setdefault(v.net_id, []).append(v)
+    zones_by_net: Dict[int, List] = {}
+    for z in out_pcb.zones:
+        zones_by_net.setdefault(z.net_id, []).append(z)
+
+    ripped_set = set(ripped_net_ids or [])
+    results: Dict[int, Dict] = {}
+    for net_id, net_name, plane_layer in zip(net_ids, net_names, plane_layers):
+        if net_id in results:
+            continue  # already verified (same net listed twice)
+        pads = out_pcb.pads_by_net.get(net_id, [])
+        r = check_net_connectivity(
+            net_id,
+            segs_by_net.get(net_id, []),
+            vias_by_net.get(net_id, []),
+            pads,
+            zones_by_net.get(net_id, []))
+        disconnected = r.get('disconnected_pads', []) or []
+        total = len(pads)
+        failed = len(disconnected)
+        results[net_id] = {
+            'name': net_name,
+            'layer': plane_layer,
+            'total': total,
+            'connected': total - failed,
+            'failed': failed,
+            'disconnected_pads': disconnected,
+        }
+
+    # Report the geometric truth so the summary matches reality.
+    print(f"\n{'='*60}")
+    print("GEOMETRIC VERIFICATION (re-parsed output)")
+    print(f"{'='*60}")
+    for net_id, info in results.items():
+        status = GREEN if info['failed'] == 0 else RED
+        print(f"  {status}{info['name']}: {info['connected']}/{info['total']} "
+              f"pads connected to plane on {info['layer']}{RESET}")
+        if info['failed']:
+            # Attribute each geometrically-failed pad with net + location so
+            # silently-skipped pads (#107) and unjoined vias (#89) are visible.
+            for loc in info['disconnected_pads']:
+                # disconnected_pads entries are (x, y, layer, component_ref)
+                try:
+                    px, py, player, pref = loc[0], loc[1], loc[2], loc[3]
+                    print(f"      {RED}unconnected pad {pref} on '{info['name']}' "
+                          f"at ({px:.2f}, {py:.2f}) [{player}]{RESET}")
+                except (TypeError, ValueError, IndexError):
+                    print(f"      {RED}unconnected pad on '{info['name']}': {loc}{RESET}")
+    return results
+
+
 def _write_output_and_reroute(
     input_file: str,
     output_file: str,
@@ -1109,7 +1197,8 @@ def _write_output_and_reroute(
     verbose: bool,
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
-    add_teardrops: bool = False
+    add_teardrops: bool = False,
+    no_bga_zone: bool = False
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
@@ -1151,6 +1240,14 @@ def _write_output_and_reroute(
                 if not routing_layers:
                     routing_layers = ['F.Cu', 'B.Cu']
                 all_copper_layers = list(set(all_layers + plane_layers))
+                # Issue #88.2: the reroute must use parameters compatible with
+                # the original signal-routing run, or nets that only routed with
+                # relaxed settings get silently dropped from the output. In
+                # particular BGA auto-exclusion zones (on by default in
+                # batch_route) can re-block escapes the original run permitted
+                # with --no-bga-zone. disable_bga_zones=[] disables all BGA
+                # zones; grid_step/clearance are forwarded from this run.
+                disable_bga = [] if no_bga_zone else None
                 routed, failed, route_time = batch_route(
                     input_file=output_file,
                     output_file=output_file,
@@ -1165,9 +1262,43 @@ def _write_output_and_reroute(
                     verbose=verbose,
                     minimal_obstacle_cache=True,
                     power_nets=power_nets,
-                    power_nets_widths=power_nets_widths
+                    power_nets_widths=power_nets_widths,
+                    disable_bga_zones=disable_bga
                 )
                 print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
+
+                # Issue #88.2: never silently drop a ripped net. After the
+                # reroute, geometrically verify each ripped net in the written
+                # output and WARN by name about any that are still broken, so
+                # the caller knows exactly which nets need attention.
+                if failed:
+                    try:
+                        from check_connected import check_net_connectivity
+                        out_pcb = parse_kicad_pcb(output_file)
+                        rsegs: Dict[int, List] = {}
+                        for s in out_pcb.segments:
+                            rsegs.setdefault(s.net_id, []).append(s)
+                        rvias: Dict[int, List] = {}
+                        for v in out_pcb.vias:
+                            rvias.setdefault(v.net_id, []).append(v)
+                        rzones: Dict[int, List] = {}
+                        for z in out_pcb.zones:
+                            rzones.setdefault(z.net_id, []).append(z)
+                        still_broken = []
+                        for rid in all_ripped_net_ids:
+                            res = check_net_connectivity(
+                                rid, rsegs.get(rid, []), rvias.get(rid, []),
+                                out_pcb.pads_by_net.get(rid, []), rzones.get(rid, []))
+                            if not res.get('connected', False):
+                                net = pcb_data.nets.get(rid)
+                                still_broken.append(net.name if net else f"net_{rid}")
+                        if still_broken:
+                            print(f"WARNING: {len(still_broken)} ripped net(s) failed to "
+                                  f"re-route and remain disconnected (NOT silently dropped):")
+                            print(f"  {', '.join(still_broken)}")
+                    except Exception:
+                        # Fall back to the generic failed-count message above.
+                        pass
             finally:
                 sys.setrecursionlimit(old_recursion_limit)
         else:
@@ -1251,6 +1382,7 @@ def create_plane(
     return_results: bool = False,
     same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
     skip_existing_zones: bool = False,
+    no_bga_zone: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Create copper plane zones and place vias to connect target pads for multiple nets.
@@ -1788,7 +1920,13 @@ def create_plane(
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
                     route_via_to_pad_fn=route_via_to_pad,
-                    pending_pads=pending_pads
+                    pending_pads=pending_pads,
+                    # Issue #88.1: pass all plane copper placed this run so a
+                    # failed rip-up restores only collision-free ripped copper.
+                    plane_vias=all_new_vias + new_vias,
+                    plane_segments=all_new_segments + new_segments,
+                    via_size=via_size,
+                    clearance=clearance,
                 )
 
                 if result.success:
@@ -1823,7 +1961,11 @@ def create_plane(
                     for rid in result.ripped_net_ids:
                         if rid not in ripped_net_ids:
                             ripped_net_ids.append(rid)
-                    # Empty ripped_net_ids means nets were restored after failure
+                    # Issue #88.1: result.ripped_net_ids is now non-empty when a
+                    # net was left ripped (not restored) because restoring it
+                    # would short onto plane copper. Those nets are excluded from
+                    # output and re-routed; restored (collision-free) nets are
+                    # absent from the list as before.
                     print(f"{RED}FAILED{RESET}")
 
             elif placement_success:
@@ -2078,6 +2220,7 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
+    geo_results: Dict[int, Dict] = {}
     if dry_run:
         print("\nDry run - no output file written")
     else:
@@ -2103,8 +2246,25 @@ def create_plane(
             verbose=verbose,
             power_nets=power_nets,
             power_nets_widths=power_nets_widths,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            no_bga_zone=no_bga_zone
         )
+
+        # Geometric truth check (issues #89 and #107): the via-placement
+        # counters above count a pad "done" when a via is placed/reused, but
+        # that via may not be electrically joined to the net's plane (#89), and
+        # multi-net Voronoi layers can silently skip TH pads that land in the
+        # other net's cell (#107). Re-parse the written output and report how
+        # many pads are actually connected so the summary matches geometry.
+        geo_results = _geometric_plane_verification(
+            output_file, net_ids, net_names, plane_layers, all_ripped_net_ids)
+        if geo_results:
+            geo_failed = sum(info['failed'] for info in geo_results.values())
+            if geo_failed != total_failed_pads:
+                print(f"\n  NOTE: via-placement counters reported "
+                      f"{total_failed_pads} failed pad(s), but geometric check "
+                      f"found {geo_failed} pad(s) not connected to their plane "
+                      f"(see per-net breakdown above).")
 
     if return_results:
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
@@ -2168,6 +2328,10 @@ Examples:
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
+    parser.add_argument("--no-bga-zone", action="store_true",
+                        help="Disable BGA auto-exclusion zones when re-routing ripped nets "
+                             "(issue #88.2). Use when the original signal routing used "
+                             "--no-bga-zones, so the reroute uses compatible parameters.")
     parser.add_argument("--power-nets", nargs="+", default=None,
                         help="Glob patterns for power nets to route with wider tracks (e.g., '*GND*' '*VCC*')")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,
@@ -2300,6 +2464,7 @@ Examples:
         add_teardrops=args.add_teardrops,
         same_net_pad_clearance=args.same_net_pad_clearance,
         skip_existing_zones=args.skip_existing_zones,
+        no_bga_zone=args.no_bga_zone,
     )
 
     # Add GND return vias if requested

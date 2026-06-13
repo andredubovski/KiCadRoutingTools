@@ -294,9 +294,19 @@ def write_plane_output(
     if zones_to_replace:
         content = filter_zones_from_content(content, zones_to_replace)
 
-    # Filter out excluded nets if specified
+    # Filter out excluded nets if specified.
+    # Issue #88.1: on KiCad 10 boards, segments/vias reference nets by NAME
+    # ((net "GND")) rather than numeric id, so filtering by id alone silently
+    # leaves ripped nets' copper in the output - which then shorts against the
+    # plane vias placed in the cleared spots. When a net_id->name map is
+    # available, also exclude by name so KiCad 10 ripped nets are truly removed.
     if exclude_net_ids:
-        content = filter_nets_from_content(content, exclude_net_ids)
+        exclude_names = None
+        if net_id_to_name:
+            exclude_names = [net_id_to_name[nid] for nid in exclude_net_ids
+                             if nid in net_id_to_name]
+        content = filter_nets_from_content(content, exclude_net_ids,
+                                           net_names_to_exclude=exclude_names)
 
     # Build routing text
     elements = []
