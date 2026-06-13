@@ -1718,14 +1718,21 @@ def route_multipoint_main(
 
     # Get stub free ends for proximity zone checking (consistent with route_net)
     free_end_sources, free_end_targets, _ = get_net_endpoints(pcb_data, net_id, config, use_stub_free_ends=True)
+    # Fallback to the net's pad grid positions when there are no stub free ends
+    # (a multipoint net with no prior copper, e.g. a fresh all-pad power net).
+    # The old code referenced undefined locals `sources`/`targets` here, which
+    # crashed route_multipoint_main with UnboundLocalError on exactly those
+    # nets (stress test: confirmed on 5+ boards). pad_info rows are
+    # (gx, gy, layer_idx, orig_x, orig_y, endpoint_obj).
+    pad_prox = [(info[0], info[1], info[2]) for info in pad_info]
     if free_end_sources:
         prox_check_sources = [(s[0], s[1], s[2]) for s in free_end_sources]
     else:
-        prox_check_sources = sources  # Fallback to pad positions
+        prox_check_sources = pad_prox
     if free_end_targets:
         prox_check_targets = [(t[0], t[1], t[2]) for t in free_end_targets]
     else:
-        prox_check_targets = targets  # Fallback to pad positions
+        prox_check_targets = pad_prox
 
     # Calculate vertical attraction parameters
     attraction_radius_grid = coord.to_grid_dist(config.vertical_attraction_radius) if config.vertical_attraction_radius > 0 else 0
