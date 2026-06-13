@@ -181,6 +181,12 @@ If differential pairs are found:
 - List each P/N pair
 - Note that `route_diff.py` should be used for these
 - Explain that diff pairs maintain consistent spacing and length matching
+- **If a pair's pads are on a BGA/PGA being fanned out, escape it with
+  `bga_fanout.py` too** — pass `--diff-pairs "<patterns>" --diff-pair-gap <gap>`
+  so P and N escape the array together on one layer. Don't just exclude the
+  pair from fanout and hand it to `route_diff.py`: it can't launch from the
+  deep balls ("no valid position at any setback"). `route_diff.py` then
+  connects the escaped stubs. Pairs not on an array package don't need fanout.
 
 > **Tip:** Name-based detection misses pairs with unconventional names. For boards with
 > high-speed ICs (PHYs, SerDes, USB, FPGA transceivers), or when detection finds suspiciously

@@ -66,7 +66,14 @@ non-interactively and record everything.
    capped ottercast_audio at ~23%). qfn_fanout.py is perimeter-only and
    doesn't need this.
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
-   AFTER fanout and BEFORE signal routing (gap 0.15 default; use --no-gnd-vias).
+   AFTER fanout and BEFORE signal routing (gap from --design-rules; use
+   --no-gnd-vias). CRITICAL: a pair whose pads are on a BGA/PGA being fanned
+   out MUST be escaped by bga_fanout itself — pass `--diff-pairs "<patterns>"
+   --diff-pair-gap <gap>` to bga_fanout so P and N escape together on one
+   layer. If you skip this (e.g. exclude the pair nets from fanout), the balls
+   never escape and route_diff fails to launch from the deep balls ("no valid
+   position at any setback"); route_diff then only connects the escaped stubs.
+   Pairs NOT on an array package (e.g. between connectors) don't need fanout.
    If pair detection looks like a false positive (e.g. random net names that
    happen to end in P/N), note it as a finding and skip those.
 7. BASELINE: before routing, run check_drc.py on the unrouted input and record
