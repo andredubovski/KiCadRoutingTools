@@ -1381,6 +1381,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     center_tgt_x = (p_tgt_x + n_tgt_x) / 2
     center_tgt_y = (p_tgt_y + n_tgt_y) / 2
 
+    # Degenerate pair: both terminal centers (nearly) coincide, so no pair
+    # corridor exists - the centerline can only leave and loop back to its
+    # own start, and the offset/connector geometry necessarily tangles
+    # (neo6502 /D_P //D_N: USB-C row-join nets whose A and B pad pairs share
+    # one midpoint). Refuse pair routing with a clear message; these nets
+    # are jumpers and should be routed single-ended.
+    center_dist = math.hypot(center_tgt_x - center_src_x, center_tgt_y - center_src_y)
+    if center_dist < 2 * spacing_mm + config.grid_step:
+        print(f"  Pair terminals nearly coincide (centers {center_dist:.2f}mm apart "
+              f"< pair width {2 * spacing_mm:.2f}mm) - no pair corridor exists. "
+              f"Route these nets single-ended (connector row-join).")
+        return None, 0, [], None
+
     # Get escape directions at source and target (averaged stub directions, or
     # synthesized from pad geometry when the endpoints are bare pads)
     src_dir_x, src_dir_y, src_dir_synth = get_pair_end_direction(
@@ -2167,7 +2180,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # shortest - either one can resolve polarity with a needlessly long route
     # (e.g. a flip that wraps all the way around its own terminal).
     polarity_fixed = False
-    if polarity_swap_needed:
+    # force_swap also enters when the detector saw NO mismatch: _detect_polarity
+    # is blind to a route's winding, so the crossing guard at the success exit
+    # can request an explicit swap for an undetected odd pad permutation.
+    if polarity_swap_needed or force_swap:
         swap_end = 'source' if routing_backwards else 'target'
         swap_allowed = config.fix_polarity and swap_end in swap_allowed_ends
         can_flip = (not (flip_source or flip_target) and
@@ -2466,6 +2482,26 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # claimed-good output with genuine P-to-N shorts (neo6502 /D_P //D_N).
     if _pn_tracks_cross(result.get('new_segments', []), p_net_id, n_net_id):
         print("  P/N tracks cross in final geometry - rejecting pair route")
+        # _detect_polarity is path-local and blind to a route's net winding,
+        # so an undetected odd pad permutation can land here. Before failing,
+        # try the polarity pad swap explicitly - it untangles interleaved
+        # terminals (e.g. USB-C rows) that the detector missed.
+        swap_end = 'source' if routing_backwards else 'target'
+        if (not force_swap and config.fix_polarity
+                and swap_end in swap_allowed_ends):
+            print("  Retrying with a polarity pad swap to untangle the crossing...")
+            swap_result = route_diff_pair_with_obstacles(
+                pcb_data, diff_pair, config, obstacles, base_obstacles,
+                unrouted_stubs, endpoints=endpoints,
+                forced_source_dir=forced_source_dir,
+                forced_target_dir=forced_target_dir,
+                swap_allowed_ends=swap_allowed_ends, force_swap=True)
+            if (swap_result and not swap_result.get('failed')
+                    and not swap_result.get('probe_blocked')):
+                swap_result['iterations'] = (swap_result.get('iterations', 0)
+                                             + result.get('iterations', 0))
+                return swap_result
+            print("  Pad-swap retry did not produce a clean route either")
         print("  (terminals likely have opposite P/N pad order; needs a polarity "
               "swap, a layer change, or opposite-side joins)")
         return {
