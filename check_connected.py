@@ -144,6 +144,45 @@ def point_on_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: 
     return dist_sq <= tolerance * tolerance
 
 
+def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: float = 0.05) -> bool:
+    """True if every pad of the net touches the others through overlapping
+    copper alone (no track needed).
+
+    Castellated modules represent each pin as a through-hole pad plus an SMD
+    pad at the same spot; such a net has pads but no segments yet is fully
+    connected, so it must not be reported as unrouted (issue #92).
+    """
+    if len(pads) < 2:
+        return True
+    parent = list(range(len(pads)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def shares_copper(pi, pj):
+        if pi.drill > 0 or pj.drill > 0:
+            return True  # through-hole spans all copper layers
+        li = set(expand_pad_layers(pi.layers, copper_layers))
+        lj = set(expand_pad_layers(pj.layers, copper_layers))
+        return bool(li & lj)
+
+    for i in range(len(pads)):
+        for j in range(i + 1, len(pads)):
+            pi, pj = pads[i], pads[j]
+            if not shares_copper(pi, pj):
+                continue
+            reach = (max(pi.size_x, pi.size_y) / 2
+                     + max(pj.size_x, pj.size_y) / 2 + tolerance)
+            dx = pi.global_x - pj.global_x
+            dy = pi.global_y - pj.global_y
+            if dx * dx + dy * dy <= reach * reach:
+                parent[find(i)] = find(j)
+    return len({find(i) for i in range(len(pads))}) == 1
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -571,9 +610,14 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
     if not routed_only:
+        copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
         for net_id, net_info in pcb_data.nets.items():
-            # Skip power nets (GND, VCC, etc.) - they're often connected via zones
-            if net_info.name in ('', 'GND', 'VCC', '+5V', '+3V3', '+3.3V'):
+            # Net 0 (empty name) is the unconnected catch-all, not a real net.
+            # Do NOT skip power nets by name (issue #92): a power net is only
+            # "fine when unrouted" if a zone actually covers it, which the
+            # has_zones check below decides. urchin's +3V3 had no plane on this
+            # board and was wrongly hidden by the old hardcoded name list.
+            if not net_info.name:
                 continue
             # Filter by component if specified
             if component_net_ids is not None and net_id not in component_net_ids:
@@ -586,6 +630,10 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             has_segments = net_id in segments_by_net
             has_zones = net_id in zones_by_net
             if has_pads and not has_segments and not has_zones:
+                # A net whose pads all overlap (e.g. a castellated module's
+                # co-located TH+SMD pad pairs) is already connected (issue #92).
+                if _net_pads_connected_by_overlap(pads_by_net[net_id], copper_layers):
+                    continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
     if not quiet:
