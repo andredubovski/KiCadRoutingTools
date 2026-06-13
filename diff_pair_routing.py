@@ -136,9 +136,86 @@ def get_pair_end_direction(pcb_data: PCBData, p_net_id: int, n_net_id: int,
     return (perp_x, perp_y, True)
 
 
+def _setback_ladder(setback, spacing_mm, pad_gap_half, config):
+    """Candidate setback radii to scan, preferred first (issue #90).
+
+    The old single fixed-radius search failed whole pairs whenever every
+    angle on that one ring was blocked - dense terminals (0402 resistor
+    rows, SOT-23s, USB-C) often have an open ring nearer or farther.
+
+    The geometric floor is the longitudinal room the P/N connector fan
+    needs to taper from the pad separation down to the pair spacing at
+    <= ~45 degrees: |pad_gap/2 - spacing| plus a grid step of margin,
+    never less than 2*spacing. Below that the connectors would kink.
+    Above the configured setback, 1.5x and 2x are also tried - sometimes
+    the neighborhood only opens up farther out.
+    """
+    floor = max(2 * spacing_mm,
+                abs(pad_gap_half - spacing_mm) + config.grid_step)
+    # The configured/default setback is always rung 1, even below the floor -
+    # an explicit --diff-pair-centerline-setback must be honored as given.
+    ladder = [setback]
+    for s in (0.75 * setback, 0.5 * setback, floor,
+              1.5 * setback, 2 * setback):
+        s = max(s, floor)
+        if all(abs(s - e) > 1e-6 for e in ladder):
+            ladder.append(s)
+    return ladder
+
+
+def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
+                                  setback, pad_gap_half, label, layer_names,
+                                  spacing_mm, config, obstacles,
+                                  connector_obstacles, coord, neighbor_stubs):
+    """_find_open_positions over a ladder of setback radii (issue #90).
+
+    Returns (candidates, used_setback, rotated); `rotated` is True when the
+    position was only found by rotating the launch direction away from the
+    escape direction (the centerline route must then wrap around the
+    endpoint, like a flipped attempt).
+    """
+    ladder = _setback_ladder(setback, spacing_mm, pad_gap_half, config)
+    for i, s in enumerate(ladder):
+        candidates = _find_open_positions(
+            center_x, center_y, dir_x, dir_y, layer_idx, s, label,
+            layer_names, spacing_mm, config, obstacles,
+            connector_obstacles, coord, neighbor_stubs,
+            quiet_failure=True)
+        if candidates:
+            if i > 0:
+                print(f"      {label}: setback {ladder[0]:.2f}mm blocked, "
+                      f"using {s:.2f}mm")
+            return candidates, s, False
+
+    # Full-sweep fallback: the angle fan only covers +-max_setback_angle
+    # around the escape direction, but buried terminals (SOT-23 chains,
+    # USB-C row-to-row legs) often only open sideways or backwards.
+    # Re-run the ladder with the launch direction rotated 90/180/270 deg -
+    # together with the fan this covers the whole circle.
+    for rot_deg in (90, -90, 180):
+        rot = math.radians(rot_deg)
+        rdx = dir_x * math.cos(rot) - dir_y * math.sin(rot)
+        rdy = dir_x * math.sin(rot) + dir_y * math.cos(rot)
+        for s in ladder:
+            candidates = _find_open_positions(
+                center_x, center_y, rdx, rdy, layer_idx, s, label,
+                layer_names, spacing_mm, config, obstacles,
+                connector_obstacles, coord, neighbor_stubs,
+                quiet_failure=True)
+            if candidates:
+                print(f"      {label}: escape direction blocked at every "
+                      f"setback - launching rotated {rot_deg:+d}deg at {s:.2f}mm")
+                return candidates, s, True
+
+    print(f"  Error: {label} - no valid position at any setback/direction "
+          f"(ladder {', '.join(f'{s:.2f}' for s in ladder)}mm x full sweep)")
+    return [], setback, False
+
+
 def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                          label, layer_names, spacing_mm, config, obstacles,
-                         connector_obstacles, coord, neighbor_stubs):
+                         connector_obstacles, coord, neighbor_stubs,
+                         quiet_failure=False):
     """Find open position for setback, preferring 0° but angling away from nearby stubs if needed.
 
     Only angles away from 0° if the nearest unrouted stub is too close (within
@@ -274,7 +351,8 @@ def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                 print(f"      {label} {angle_deg:+.1f}°: OK (dist={dist:.2f}mm)")
 
     if not valid_candidates:
-        print(f"  Error: {label} - no valid position at setback={setback:.2f}mm (all angles blocked)")
+        if not quiet_failure:
+            print(f"  Error: {label} - no valid position at setback={setback:.2f}mm (all angles blocked)")
         return []
 
     # Sort by clearance (larger better), then by angle magnitude (smaller better)
@@ -1356,16 +1434,23 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # Allow radius for finding open positions near blocked cells
     allow_radius = 2
 
-    # Get all valid setback positions for source and target, sorted by preference
-    src_candidates = _find_open_positions(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+    # Half pad separation per terminal, for the ladder's geometric floor
+    src_pad_gap_half = math.hypot(p_src_x - n_src_x, p_src_y - n_src_y) / 2
+    tgt_pad_gap_half = math.hypot(p_tgt_x - n_tgt_x, p_tgt_y - n_tgt_y) / 2
+
+    # Get all valid setback positions for source and target, sorted by
+    # preference, scanning a ladder of radii per terminal (issue #90)
+    src_candidates, _, src_rotated = _find_open_positions_laddered(
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+        src_pad_gap_half, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not src_candidates and src_dir_synth and not src_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
-        src_candidates = _find_open_positions(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback, "source",
+        src_candidates, _, src_rotated = _find_open_positions_laddered(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback,
+            src_pad_gap_half, "source",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not src_candidates:
@@ -1375,15 +1460,17 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         )
         return None, 0, blocked, None
 
-    tgt_candidates = _find_open_positions(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+    tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+        tgt_pad_gap_half, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not tgt_candidates and tgt_dir_synth and not tgt_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
-        tgt_candidates = _find_open_positions(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback, "target",
+        tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback,
+            tgt_pad_gap_half, "target",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not tgt_candidates:
@@ -1409,7 +1496,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     # in the hairpin.
     # Flipped or forced-direction ends (multi-point chain continuations) may
     # need to wrap around their endpoint to approach from the far side
-    wrapping = (src_flip or tgt_flip or
+    wrapping = (src_flip or tgt_flip or src_rotated or tgt_rotated or
                 src_forced is not None or tgt_forced is not None)
     spacing_multiplier = 3 if wrapping else 2
     diff_pair_spacing_grid = max(1, int(spacing_multiplier * spacing_mm / config.grid_step + 0.5))
