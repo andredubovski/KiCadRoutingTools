@@ -36,7 +36,7 @@ non-interactively and record everything.
    Default class's clearance/track/via as the BASELINE
    `--clearance/--track-width/--via-size/--via-drill` on every route.py,
    qfn_fanout.py, bga_fanout.py and route_planes.py command (and the diff-pair
-   `--track-width/--gap` on route_diff.py) — the router does NOT read net
+   `--track-width/--diff-pair-gap` on route_diff.py) — the router does NOT read net
    classes and its generic 0.25mm default is often wider than the board's own
    rule, which boxes pads in and fails nets with "no rippable blockers". Route
    any non-Default-class nets separately with that class's values. A

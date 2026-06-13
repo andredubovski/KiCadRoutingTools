@@ -136,7 +136,7 @@ def print_design_rules(pcb_path):
     if 'diff_pair_gap' in d or 'diff_pair_width' in d:
         dp = []
         if 'diff_pair_width' in d: dp.append(f"--track-width {d['diff_pair_width']}")
-        if 'diff_pair_gap' in d:   dp.append(f"--gap {d['diff_pair_gap']}")
+        if 'diff_pair_gap' in d:   dp.append(f"--diff-pair-gap {d['diff_pair_gap']}")
         print("SUGGESTED route_diff.py flags (Default class):\n  " + " ".join(dp))
 
 
