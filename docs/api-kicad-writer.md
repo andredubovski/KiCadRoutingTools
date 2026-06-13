@@ -279,7 +279,8 @@ dicts.
 
 Debug geometry layers (with `debug_lines=True`): raw A* path on `User.9`,
 simplified path on `User.8`, connector segments on `User.3`, stub arrows on
-`User.4`, exclusion zones on `User.5`, boundary labels on `User.6`.
+`User.4`, BGA exclusion-zone rectangles plus stub/pad proximity circles on
+`User.5`, boundary labels on `User.6`.
 
 ## Gotchas
 

@@ -253,6 +253,12 @@ These options control stub layer switching, which moves stubs to different layer
 - Stub layer switching moves one stub to match the other's layer, eliminating the via
 - For **swap pairs**, two nets exchange layers to help each other (e.g., Net1 src:A→B and Net2 src:B→A)
 - For **solo switches**, a single stub moves when it doesn't conflict with other stubs
+- For **bare-pad target swaps**, a diff-pair target that is a bare outer-layer pad
+  (F.Cu/B.Cu) with no stub - e.g. a connector pin boxed in by neighbouring pads
+  such as the front row of a 2-row header - is fanned out onto the pair's source
+  layer: a through-via is dropped on each pad and a short stub grown on the source
+  layer, so an inner-layer pair can land on the pad via the via instead of fighting
+  through the congested surface channel
 - Multiple swap options are tried: src/src, tgt/tgt, src/tgt, tgt/src
 
 ### Length Matching Options
@@ -332,7 +338,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers (zones + proximity circles on User.5) |
 | `--verbose` / `-v` | false | Print detailed diagnostic output (setback checks, bus routing order, etc.) |
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |

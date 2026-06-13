@@ -106,6 +106,19 @@ the partner polarity's pad mid-route. Capsule-shaped corridors from each
 pad-pair center out past the setback position stay open so the route can still
 reach its endpoints and fan out to the pads.
 
+### Bare-Pad Target on a Different Layer (Connector Fanout)
+
+When the target is a bare outer-layer pad (F.Cu/B.Cu) with no stub and the
+pair's source copper is on a different layer, the surface approach can be
+blocked - e.g. a connector pin in the **front row of a 2-row header** is boxed
+in between the board edge and the tall back-row pads, so an inner-layer pair
+can't reach it through the surface channel. The upfront layer-swap pass handles
+this with a **bare-pad target swap**: it drops a through-via on each pad and
+grows a short stub on the source layer (aimed toward the source), turning the
+bare pad into a stub the router lands on while the via carries the connection
+back to the pad's outer layer. See the layer-optimization options in
+[configuration.md](configuration.md#layer-optimization-options).
+
 ### Multi-Point Differential Pairs
 
 A diff pair cannot tap onto the middle of an existing pair of tracks - the
@@ -379,7 +392,9 @@ With `--debug-lines`, debug geometry is output on User layers as graphic lines:
 |-------|---------|
 | `User.3` | Connectors (stub to P/N track) |
 | `User.4` | Stub direction arrows (1mm arrows from midpoint at src/tgt) |
-| `User.7` | DRC violation debug lines (from `check_drc.py --debug-lines`) |
+| `User.5` | BGA exclusion-zone rectangles (inner zone + proximity outer) and stub/pad proximity circles |
+| `User.6` | Boundary position labels (from `--mps-unroll`) |
+| `User.7` | DRC violation lines (from `check_drc.py --debug-lines`) |
 | `User.8` | Simplified centerline path |
 | `User.9` | Raw A* centerline path |
 
@@ -398,7 +413,7 @@ This helps visualize the routing structure without affecting the actual routed c
 | `--no-gnd-vias` | false | Disable GND via placement near signal vias |
 | `--swappable-nets` | - | Glob patterns for diff pair nets that can have targets swapped |
 | `--crossing-penalty` | 1000.0 | Penalty for crossing assignments in target swap optimization |
-| `--debug-lines` | false | Output debug geometry on User.3/4/8/9 layers |
+| `--debug-lines` | false | Output debug geometry on User.3/4/5/6/8/9 layers |
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize routing (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty near stubs (mm equivalent) |
 | `--bga-proximity-radius` | 10.0 | Radius around BGA edges to penalize routing (mm) |

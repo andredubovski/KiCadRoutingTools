@@ -615,5 +615,5 @@ python list_nets.py board.kicad_pcb U2A --pads
 # Route with debug lines enabled
 python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
 
-# Open debug.kicad_pcb in KiCad, check User.3/4/8/9 layers
+# Open debug.kicad_pcb in KiCad, check User.3/4/5/6/8/9 layers
 ```
