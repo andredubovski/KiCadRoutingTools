@@ -100,12 +100,15 @@ The `--plane-track-via-clearance` parameter ensures MST routes don't pass throug
 | `--rip-blocker-nets` | off | Enable blocker identification and removal |
 | `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
 | `--reroute-ripped-nets` | off | Automatically re-route ripped nets after via placement |
+| `--no-bga-zone` | off | Disable BGA auto-exclusion zones when re-routing ripped nets — use when the original signal route used `--no-bga-zones`, so the reroute uses compatible parameters |
 | `--power-nets` | - | Glob patterns for power nets to route with wider tracks |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern |
 
-When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad.
+When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad. If an attempt ultimately fails, ripped nets are restored **collision-aware**: a net is put back only when none of its segments/vias overlap the plane copper placed this run; any piece that would overlap is left ripped (and returned for re-routing) instead of restoring a short.
 
-When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking.
+When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking. Pass `--no-bga-zone` so the reroute matches the original signal route's parameters; after the reroute the tool geometrically re-checks each ripped net and **warns by name** about any that remain disconnected (never silently dropped).
+
+After writing output, `route_planes.py` runs a **geometric verification** pass: it re-parses the board and reports, per plane net, how many pads are actually joined to the plane (via `check_net_connectivity`), and prints a NOTE when this disagrees with the via-placement counters. This surfaces pads whose stitching via is not electrically joined and TH pads on multi-net Voronoi layers that fell in the other net's region.
 
 **Note:** The plane nets being processed are protected and will never be ripped up, even if they block each other during multi-net processing.
 

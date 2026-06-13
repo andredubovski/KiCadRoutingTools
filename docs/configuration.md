@@ -18,6 +18,10 @@ python route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite i
 
 Use `route.py` for single-ended nets and `route_diff.py` for differential pairs. By default, all nets are routed. Use `--nets` to filter specific patterns.
 
+`route.py` always writes the output file, even when nothing routes (no valid nets, or all already connected) — it writes an unchanged copy of the input in that case, so output→input pipelines don't break on a missing file.
+
+Pads with no pad number (paste/thermal-via artifacts KiCad doesn't netlist individually) are not used as routing targets; they remain copper obstacles.
+
 ### Net Selection
 
 Net names support glob wildcards. Use `--nets` (or `-n`) to specify patterns:

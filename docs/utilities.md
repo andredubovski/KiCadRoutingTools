@@ -18,7 +18,14 @@ Options:
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
+  --max-print INT      Max violations listed per type before "... and N more"
+                       (0 = print all; default 20)
 ```
+
+The per-type listing is capped at `--max-print` (default 20); when a type has
+more, a `... and N more (use --max-print 0 to show all)` marker is printed so
+the listing is never silently truncated relative to the header count. Use
+`--max-print 0` to dump everything for log-based triage.
 
 ### Examples
 
@@ -97,6 +104,12 @@ Verifies that all nets are fully connected after routing. Detects two types of i
 
 1. **Unrouted nets** - Nets with pads but no tracks (routing was never attempted or failed)
 2. **Broken routes** - Nets with tracks that don't connect all pads (incomplete routing)
+
+Unrouted detection is based on whether a net is actually covered by a copper
+zone, not a hard-coded name list — a power net (GND, +3V3, …) with no plane on
+this board *is* reported as unrouted. Same-net pads whose copper overlaps (e.g.
+a castellated module's co-located through-hole + SMD pad pair) count as
+connected even with no track between them.
 
 ### Usage
 
@@ -244,7 +257,7 @@ Removed orphans (fixed): 2
 
 ## Net Analyzer (`list_nets.py`)
 
-Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, and identify power/ground nets.
+Analyzes nets in a PCB file. Can list nets on a component, detect differential pairs, identify power/ground nets, and report the board's net-class design rules.
 
 ### Usage
 
@@ -256,9 +269,32 @@ Options:
   --pads                Show pad-to-net assignments
   --diff-pairs, -d      Detect differential pairs
   --power, -p           Show power/ground nets with pad counts
+  --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
+                        and the CLI flags to pass them to the routing tools
   --top N               Show top N most-connected nets (default: 10)
   --pattern GLOB        Filter nets by pattern
 ```
+
+### Design rules
+
+The routers do **not** read the board's net classes — they fall back to a
+generic `--clearance 0.25` / default track width, which is often wider than the
+board's own rule and can box pads in (nets then fail with "no rippable
+blockers"). `--design-rules` reads the real rules so you can pass them
+explicitly:
+
+```bash
+python list_nets.py board.kicad_pcb --design-rules
+```
+
+It reads net classes from the sibling `.kicad_pro` (KiCad 8+, `net_settings.classes`)
+or from `(net_class …)` blocks in the `.kicad_pcb` (KiCad 6/7), and prints each
+class's `clearance`, `track_width`, `via_diameter`, `via_drill`,
+`diff_pair_gap`, `diff_pair_width`, plus ready-to-paste flags from the Default
+class — e.g. `--clearance 0.2 --track-width 0.2 --via-size 0.6 --via-drill 0.3`
+for `route.py`/`qfn_fanout.py`/`bga_fanout.py`/`route_planes.py`, and
+`--track-width …  --gap …` for `route_diff.py`. Nets assigned to a non-Default
+class are reported so they can be routed separately with that class's values.
 
 ### Examples
 
