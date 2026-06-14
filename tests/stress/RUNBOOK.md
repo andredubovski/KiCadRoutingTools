@@ -151,6 +151,18 @@ non-interactively and record everything.
     continue with remaining steps if possible.
 14. The JSON_SUMMARY line printed by route.py/route_diff.py has structured
     routed/failed counts — parse it for the results JSON.
+15. TIMING (for run-to-run comparison): at your VERY FIRST action capture
+    `T0=$(date +%s)`. Time EVERY routing/fanout/plane/check command — wrap as
+    `s=$(date +%s); <cmd> ...; echo "step_wall=$(($(date +%s)-s))s"` (works with
+    the run_limited.sh wrapper and background+poll too: record start before
+    launch, end at DONE) — and put each elapsed value in the matching
+    `steps[].wall_s`. Just before writing the JSON, compute
+    `AGENT=$(($(date +%s)-T0))`. Then fill: `timing.agent_wall_clock_s`=AGENT
+    (TOTAL wall-clock, INCLUDING model thinking + driving between commands),
+    `timing.tool_exec_s`=sum of all `steps[].wall_s`,
+    `timing.thinking_driving_s`=AGENT-tool_exec_s, and set
+    `wall_clock_total_s`=AGENT. These let us compare both raw tool cost and
+    end-to-end agent cost across runs.
 
 ## Results JSON schema
 
@@ -161,6 +173,7 @@ non-interactively and record everything.
   "routable_nets": 0,
   "plan": {"fanout_components": [], "diff_pairs": [], "plane_nets": [], "plane_layers": [], "notes": ""},
   "steps": [{"name": "", "cmd": "", "wall_s": 0, "outcome": ""}],
+  "timing": {"agent_wall_clock_s": 0, "tool_exec_s": 0, "thinking_driving_s": 0},
   "routing": {
     "nets_attempted": 0, "nets_routed": 0, "nets_failed": 0,
     "completion_pct": 0.0,
@@ -185,4 +198,5 @@ non-interactively and record everything.
 Return a compact summary: completion %, DRC delta (vs the ORIGINAL routed
 board's count at the design clearance), connectivity verdict, the
 compare-to-original highlights (vias/length/width/layer-balance vs original),
-plus the `issues` and `suggestions` lists verbatim. No file dumps.
+timing (agent_wall_clock_s + tool_exec_s), plus the `issues` and `suggestions`
+lists verbatim. No file dumps.
