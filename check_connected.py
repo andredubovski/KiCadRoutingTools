@@ -292,10 +292,13 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     pad_ids = []
     pad_locations = []
     copper_layers = set(all_copper_layers)
+    pad_repr_id = {}      # pad_idx -> a representative point id (its layers are all unioned)
+    pad_copper_layers = {}  # pad_idx -> set of copper layers the pad actually occupies
     for pad_idx, pad in enumerate(pads):
         # Expand wildcard layers like "*.Cu" to actual copper layers
         expanded_layers = expand_pad_layers(pad.layers, all_copper_layers)
         this_pad_ids = []  # Track all layer points for this pad
+        this_pad_layers = set()
         for layer in expanded_layers:
             if layer not in copper_layers:
                 continue
@@ -305,10 +308,14 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             pad_ids.append(point_id)
             pad_locations.append((pad.global_x, pad.global_y, layer, pad.component_ref))
             this_pad_ids.append(point_id)
+            this_pad_layers.add(layer)
             point_id += 1
         # Connect all layers of this pad together (through-hole pads act like vias)
         for pid in this_pad_ids[1:]:
             uf.union(this_pad_ids[0], pid)
+        if this_pad_ids:
+            pad_repr_id[pad_idx] = this_pad_ids[0]
+            pad_copper_layers[pad_idx] = this_pad_layers
 
     # Connect points through zones (power planes)
     # All points on the same layer that are inside the same zone are connected
@@ -346,6 +353,38 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             point_tolerance = max(max(size1, size2) / 4, tolerance)
             if points_match(x1, y1, x2, y2, point_tolerance):
                 uf.union(id1, id2)
+
+    # Same-net pads whose copper physically overlaps are connected even when
+    # their centres sit further apart than the tight point tolerance above —
+    # e.g. a large exposed-pad EP and the thermal-via pads scattered near its
+    # corners (issue #108). Mirror the generous sum-of-half-extents overlap
+    # test from _net_pads_connected_by_overlap onto the connectivity graph.
+    if len(pad_repr_id) > 1:
+        pad_reach = {idx: max(pads[idx].size_x, pads[idx].size_y) / 2
+                     for idx in pad_repr_id}
+        max_pad_reach = max(pad_reach.values())
+        pad_center_index = SpatialIndex(cell_size=1.0)
+        for idx in pad_repr_id:
+            pad = pads[idx]
+            pad_center_index.add(pad.global_x, pad.global_y, 'pad', idx, pad_reach[idx])
+        for idx in pad_repr_id:
+            pad = pads[idx]
+            query_radius = pad_reach[idx] + max_pad_reach + tolerance
+            for x2, y2, jdx, _ in pad_center_index.query_nearby(
+                    pad.global_x, pad.global_y, 'pad', query_radius):
+                if jdx <= idx:  # Avoid duplicate checks / self
+                    continue
+                other = pads[jdx]
+                # Copper only shares a layer when both pads occupy it (a
+                # drilled pad spans every copper layer, like a via).
+                if other.drill <= 0 and pad.drill <= 0:
+                    if not (pad_copper_layers[idx] & pad_copper_layers[jdx]):
+                        continue
+                reach = pad_reach[idx] + pad_reach[jdx] + tolerance
+                dx = pad.global_x - other.global_x
+                dy = pad.global_y - other.global_y
+                if dx * dx + dy * dy <= reach * reach:
+                    uf.union(pad_repr_id[idx], pad_repr_id[jdx])
 
     # Build spatial index for segments
     seg_index = SegmentIndex(cell_size=1.0)
