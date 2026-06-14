@@ -23,7 +23,9 @@ non-interactively and record everything.
    the watchdog wrapper, e.g.
    `bash ~/Documents/kicad_stress_test/scripts/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
-   With max 2 boards in flight that is up to ~8 GB — keep an eye on machine RAM.
+   Up to 4 boards run concurrently — in practice most jobs sit well under the
+   4 GB cap most of the time, so 4-in-flight is fine on an 8 GB machine; the
+   per-job watchdog still backstops any board that spikes. Keep an eye on RAM.
    If a step is killed by the cap, that is an important finding: record it in
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
    default `--max-iterations`, no retry round, or fewer nets); if that also

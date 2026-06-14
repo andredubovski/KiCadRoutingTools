@@ -45,8 +45,9 @@ Operational limits (learned the hard way):
 
 - Wrap every tool invocation in `run_limited.sh` (kills the job at ~4 GB RSS,
   overridable with `LIMIT_KB`).
-- Run at most 2 boards concurrently (on an 8 GB machine, often only 1 heavy
-  4-layer board + 1 small 2-layer board).
+- Run up to 4 boards concurrently — most jobs stay well under the 4 GB cap most
+  of the time, so 4-in-flight works on an 8 GB machine and the per-job watchdog
+  backstops any spike. (Drop to fewer only if you see swapping.)
 - Background subagents are killed after ~600 s with no streamed output, so run
   any command expected to exceed ~5 min in the background and poll it in
   short, separate steps rather than one long blocking call.
