@@ -6,15 +6,27 @@ non-interactively and record everything.
 
 ## Orchestration (parent driving several boards at once)
 
-If you are the PARENT running multiple board agents in parallel (not a single
-board agent), do NOT rely solely on completion notifications — they can be
-dropped or arrive stale/duplicated. POLL liveness about every 5 minutes:
-`ls results_<set>/*.json` (which boards have written results) and
-`pgrep -fl "route.py|bga_fanout|route_planes|route_diff|qfn_fanout"` (what is
-actually still running). If a board has neither a result nor a live process, its
-agent died silently or its notification was lost — relaunch it. Use this poll
-(not the notification stream) as the source of truth for refilling the
-concurrency slots and for deciding when the set is complete.
+If you are the PARENT running multiple board agents in parallel, do NOT rely
+solely on completion notifications — they can be dropped or arrive
+stale/duplicated. Poll about every 5 minutes, and read the signals correctly:
+
+- DONE (authoritative): the board's results JSON exists —
+  `ls results_<set>/*.json`. Drive refills and "is the set complete?" off this
+  set, NOT the notification stream.
+- ALIVE / PROGRESSING (authoritative): the board's run dir has RECENT file
+  activity — `ls -lt runs_<set>/<board>/ | head` (look at mtimes). An agent
+  spends most of its wall-clock thinking or in quick steps (list_nets, compare,
+  JSON write), so at any instant NO route process may be running even though the
+  agent is perfectly healthy.
+- `pgrep -fl "route.py|bga_fanout|route_planes|route_diff|qfn_fanout"` is only a
+  NOISY hint, never a board count: a single snapshot sweeps up each agent's shell
+  wrappers, `sleep` poll-loops, and pgrep itself, so it can read ~30 one moment
+  and 0 the next. NEVER treat `pgrep=0` as "agent dead" or its number as "N
+  boards running."
+
+A board is LOST (relaunch it) only if it has no results JSON AND its run dir has
+had no new files for ~15+ min (well past the 20-min/command cap) AND no live
+process. Otherwise it is still working — leave it alone.
 
 ## Paths
 

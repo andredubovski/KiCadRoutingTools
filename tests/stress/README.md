@@ -51,10 +51,13 @@ Operational limits (learned the hard way):
 - Background subagents are killed after ~600 s with no streamed output, so run
   any command expected to exceed ~5 min in the background and poll it in
   short, separate steps rather than one long blocking call.
-- When orchestrating several boards in parallel, poll liveness ~every 5 min
-  (`ls results_<set>/*.json` + `pgrep -fl route.py`) — completion notifications
-  can be dropped or arrive stale, so treat the poll as the source of truth and
-  relaunch any board with neither a result nor a live process.
+- When orchestrating several boards in parallel, poll ~every 5 min and read the
+  signals correctly: DONE = results JSON exists (`ls results_<set>/*.json`);
+  ALIVE = recent file mtimes in `runs_<set>/<board>/`. `pgrep route.py` is a
+  noisy hint only (it catches shell wrappers/`sleep`/itself — ~30 one instant, 0
+  the next), so `pgrep=0` does NOT mean dead. Relaunch a board only if it has no
+  result AND no new run-dir files for ~15+ min. Notifications can drop, so the
+  poll (not the notification stream) is the source of truth.
 
 ## Routing-constraint validation (what params to route with)
 
