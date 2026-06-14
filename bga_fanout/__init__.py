@@ -50,6 +50,7 @@ from bga_fanout.escape import (
     assign_pair_escapes,
 )
 from bga_fanout.reroute import find_existing_fanouts, resolve_collisions
+from bga_fanout.collision import check_segment_collision
 from bga_fanout.diff_pair import find_differential_pairs
 from bga_fanout.tracks import (
     detect_collisions,
@@ -179,6 +180,35 @@ def print_route_statistics(routes: List[FanoutRoute]) -> None:
 
 
 POSITION_TOLERANCE = 0.01  # mm tolerance for position comparisons
+
+
+def count_diff_pair_shorts(tracks: List[Dict], min_spacing: float) -> Tuple[int, Set[str]]:
+    """Count diff-pair-vs-diff-pair (Z-Z) shorts among fanout tracks.
+
+    A Z-Z short is an overlap between segments of two DIFFERENT diff-pair
+    pair_ids (both non-None) on the SAME layer, within min_spacing.
+
+    Returns (count_of_unordered_pair_id_combinations, set_of_involved_pair_ids).
+    """
+    short_combos: Set[Tuple[str, str]] = set()
+    involved: Set[str] = set()
+    for i, t1 in enumerate(tracks):
+        pid1 = t1.get('pair_id')
+        if not pid1:
+            continue
+        for t2 in tracks[i + 1:]:
+            pid2 = t2.get('pair_id')
+            if not pid2 or pid1 == pid2:
+                continue
+            if t1['layer'] != t2['layer']:
+                continue
+            if check_segment_collision(t1['start'], t1['end'],
+                                       t2['start'], t2['end'],
+                                       min_spacing):
+                short_combos.add(tuple(sorted((pid1, pid2))))
+                involved.add(pid1)
+                involved.add(pid2)
+    return len(short_combos), involved
 
 
 def reassign_on_channel_pads(
@@ -769,749 +799,833 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"  Using adjacent-channel routing for vertical escape (half_pair_spacing {half_pair_spacing:.3f}mm > max_offset_v {max_offset_v:.3f}mm)")
 
     # Build routes - process differential pairs together
-    routes: List[FanoutRoute] = []
-    processed_pairs: Set[str] = set()
+    def _run_pass(force_secondary_pairs):
+        """Run one full route-build + collision-resolution pass.
 
-    for pad in footprint.pads:
-        if not pad.net_name or pad.net_id == 0:
-            continue
+        Builds routes, assigns layers, generates tracks, and resolves
+        collisions. Returns (tracks, vias_to_add, vias_to_remove,
+        failed_nets, routes). Reruns are isolated: fresh routes/processed_pairs
+        and a private copy of pair_escape_assignments (the caller's copy is
+        never mutated).
 
-        # Skip unconnected nets (KiCad pins not connected in schematic)
-        if pad.net_name.lower().startswith('unconnected-'):
-            continue
+        force_secondary_pairs: set of pair_ids to force to their orthogonal
+        (secondary) escape direction.
+        """
+        # Private copy so retries don't accumulate / mutate caller state.
+        pass_escape_assignments = dict(pair_escape_assignments)
 
-        if net_filter and not matches_net_filter(pad.net_name, net_filter):
-            continue
+        # Force requested pairs onto their orthogonal (secondary) orientation.
+        for fp in force_secondary_pairs:
+            if fp not in diff_pairs:
+                continue
+            cur = pass_escape_assignments.get(fp)
+            if not cur:
+                continue
+            _, cur_dir = cur
+            # Skip edge / half-edge pairs (fixed escapes, no orthogonal retry).
+            if cur_dir is None or cur_dir.startswith('half_edge_'):
+                continue
+            cur_orientation = 'horizontal' if cur_dir in ('left', 'right') else 'vertical'
+            secondary_orientation = 'vertical' if cur_orientation == 'horizontal' else 'horizontal'
+            fpair = diff_pairs[fp]
+            new_ch, new_dir = find_diff_pair_escape(
+                fpair.p_pad.global_x, fpair.p_pad.global_y,
+                fpair.n_pad.global_x, fpair.n_pad.global_y,
+                grid, channels, secondary_orientation
+            )
+            # Only overwrite if we actually got a usable orthogonal direction.
+            new_orientation = None
+            if new_dir in ('left', 'right'):
+                new_orientation = 'horizontal'
+            elif new_dir in ('up', 'down'):
+                new_orientation = 'vertical'
+            if new_orientation == secondary_orientation:
+                pass_escape_assignments[fp] = (new_ch, new_dir)
 
-        # Skip if this pad already has a fanout (check_for_previous mode)
-        if check_for_previous and pad.net_id in fanned_out_nets:
-            continue
+        routes: List[FanoutRoute] = []
+        processed_pairs: Set[str] = set()
 
-        # Check if this pad is part of a differential pair
-        pair_id = None
-        is_p = True
-        if pad.net_name in net_to_pair:
-            pair_id, is_p = net_to_pair[pad.net_name]
+        for pad in footprint.pads:
+            if not pad.net_name or pad.net_id == 0:
+                continue
 
-        # Skip if we already processed this pair
-        if pair_id and pair_id in processed_pairs:
-            continue
+            # Skip unconnected nets (KiCad pins not connected in schematic)
+            if pad.net_name.lower().startswith('unconnected-'):
+                continue
 
-        if pair_id:
-            # Process differential pair together
-            processed_pairs.add(pair_id)
-            pair = diff_pairs[pair_id]
-            p_pad = pair.p_pad
-            n_pad = pair.n_pad
+            if net_filter and not matches_net_filter(pad.net_name, net_filter):
+                continue
 
-            # Use pre-assigned escape direction if available, otherwise compute
-            if pair_id in pair_escape_assignments:
-                channel, escape_dir = pair_escape_assignments[pair_id]
-            else:
-                channel, escape_dir = find_diff_pair_escape(
-                    p_pad.global_x, p_pad.global_y,
-                    n_pad.global_x, n_pad.global_y,
-                    grid, channels
-                )
-            is_edge = channel is None
+            # Skip if this pad already has a fanout (check_for_previous mode)
+            if check_for_previous and pad.net_id in fanned_out_nets:
+                continue
 
-            # Determine if pads are horizontally or vertically adjacent
-            pads_horizontal = abs(p_pad.global_x - n_pad.global_x) > abs(p_pad.global_y - n_pad.global_y)
+            # Check if this pad is part of a differential pair
+            pair_id = None
+            is_p = True
+            if pad.net_name in net_to_pair:
+                pair_id, is_p = net_to_pair[pad.net_name]
 
-            # Check if escape direction is "cross" to pad orientation
-            # Cross case: horizontal pads escaping vertically, or vertical pads escaping horizontally
-            # In cross case, pads converge with 45° stubs (like edge pairs)
-            is_cross_escape = False
-            if channel:
-                if pads_horizontal and escape_dir in ['up', 'down']:
-                    is_cross_escape = True
-                elif not pads_horizontal and escape_dir in ['left', 'right']:
-                    is_cross_escape = True
+            # Skip if we already processed this pair
+            if pair_id and pair_id in processed_pairs:
+                continue
 
-            # For adjacent-channel mode: find two channels, one on each side of the pads
-            # Check per-direction whether adjacent channels are needed
-            p_channel = channel
-            n_channel = channel
-            needs_adjacent = ((escape_dir in ['left', 'right'] and use_adjacent_channels_h) or
-                              (escape_dir in ['up', 'down'] and use_adjacent_channels_v))
-            if needs_adjacent and channel and not is_cross_escape and not is_edge:
-                # Find two adjacent channels for the diff pair - one above, one below the pads
-                if channel.orientation == 'horizontal':
-                    # Horizontal pads escaping left/right - use channels on OPPOSITE sides of pads
-                    # One track goes UP to channel above, other goes DOWN to channel below
-                    h_channels = [c for c in channels if c.orientation == 'horizontal']
-                    h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
-                    pad_y = (p_pad.global_y + n_pad.global_y) / 2
+            if pair_id:
+                # Process differential pair together
+                processed_pairs.add(pair_id)
+                pair = diff_pairs[pair_id]
+                p_pad = pair.p_pad
+                n_pad = pair.n_pad
 
-                    # Find channels above and below the pads
-                    channels_above = [c for c in h_channels_sorted if c.position < pad_y]
-                    channels_below = [c for c in h_channels_sorted if c.position > pad_y]
-
-                    if channels_above and channels_below:
-                        # Use closest channel above for one pad, closest below for the other
-                        ch_above = channels_above[-1]  # closest above
-                        ch_below = channels_below[0]   # closest below
-                        # P/t goes to channel below, N/c goes to channel above
-                        p_channel = ch_below
-                        n_channel = ch_above
-                    elif channels_above:
-                        # Only channels above - use two adjacent ones
-                        ch_above = channels_above[-1]
-                        idx = h_channels_sorted.index(ch_above)
-                        if idx > 0:
-                            p_channel = h_channels_sorted[idx - 1]
-                            n_channel = ch_above
-                        else:
-                            p_channel = channel
-                            n_channel = channel
-                    elif channels_below:
-                        # Only channels below - use two adjacent ones
-                        ch_below = channels_below[0]
-                        idx = h_channels_sorted.index(ch_below)
-                        if idx < len(h_channels_sorted) - 1:
-                            p_channel = ch_below
-                            n_channel = h_channels_sorted[idx + 1]
-                        else:
-                            p_channel = channel
-                            n_channel = channel
-                    else:
-                        p_channel = channel
-                        n_channel = channel
+                # Use pre-assigned escape direction if available, otherwise compute
+                if pair_id in pass_escape_assignments:
+                    channel, escape_dir = pass_escape_assignments[pair_id]
                 else:
-                    # Vertical pads escaping up/down - use channels on OPPOSITE sides of pads
-                    v_channels = [c for c in channels if c.orientation == 'vertical']
-                    v_channels_sorted = sorted(v_channels, key=lambda c: c.position)
-                    pad_x = (p_pad.global_x + n_pad.global_x) / 2
+                    channel, escape_dir = find_diff_pair_escape(
+                        p_pad.global_x, p_pad.global_y,
+                        n_pad.global_x, n_pad.global_y,
+                        grid, channels
+                    )
+                is_edge = channel is None
 
-                    # Find channels left and right of the pads
-                    channels_left = [c for c in v_channels_sorted if c.position < pad_x]
-                    channels_right = [c for c in v_channels_sorted if c.position > pad_x]
+                # Determine if pads are horizontally or vertically adjacent
+                pads_horizontal = abs(p_pad.global_x - n_pad.global_x) > abs(p_pad.global_y - n_pad.global_y)
 
-                    if channels_left and channels_right:
-                        ch_left = channels_left[-1]   # closest left
-                        ch_right = channels_right[0]  # closest right
-                        # P/t goes right, N/c goes left (consistent with horizontal)
-                        p_channel = ch_right
-                        n_channel = ch_left
-                    elif channels_left:
-                        ch_left = channels_left[-1]
-                        idx = v_channels_sorted.index(ch_left)
-                        if idx > 0:
-                            p_channel = v_channels_sorted[idx - 1]
-                            n_channel = ch_left
-                        else:
-                            p_channel = channel
-                            n_channel = channel
-                    elif channels_right:
-                        ch_right = channels_right[0]
-                        idx = v_channels_sorted.index(ch_right)
-                        if idx < len(v_channels_sorted) - 1:
-                            p_channel = ch_right
-                            n_channel = v_channels_sorted[idx + 1]
-                        else:
-                            p_channel = channel
-                            n_channel = channel
-                    else:
-                        p_channel = channel
-                        n_channel = channel
+                # Check if escape direction is "cross" to pad orientation
+                # Cross case: horizontal pads escaping vertically, or vertical pads escaping horizontally
+                # In cross case, pads converge with 45° stubs (like edge pairs)
+                is_cross_escape = False
+                if channel:
+                    if pads_horizontal and escape_dir in ['up', 'down']:
+                        is_cross_escape = True
+                    elif not pads_horizontal and escape_dir in ['left', 'right']:
+                        is_cross_escape = True
 
-            # Determine which pad is "positive" offset and which is "negative"
-            # For horizontal channel (left/right escape): offset is in Y direction
-            # For vertical channel (up/down escape): offset is in X direction
-            #
-            # Key insight: To avoid crossing, the pad that is FURTHER from the channel
-            # should get the offset that brings it CLOSER to the channel center,
-            # while the pad CLOSER to the channel gets offset AWAY from channel center.
-            #
-            # When using adjacent channels (p_channel != n_channel), each track is centered
-            # in its own channel, so offsets are 0.
-            if p_channel != n_channel:
-                # Adjacent channel mode - each track centered in its own channel
-                p_offset = 0
-                n_offset = 0
-            elif channel and channel.orientation == 'horizontal' and not is_cross_escape:
-                # Horizontal channel - pads are horizontally adjacent, escaping left/right
-                # Traces will be offset in Y (one above, one below channel center)
-                # Rule: pad closer to escape edge goes to inner side (closer to pads),
-                #       pad further from edge goes to outer side (away from pads)
-                channel_above = channel.position < p_pad.global_y
-                p_is_left = p_pad.global_x < n_pad.global_x
-
-                if escape_dir == 'left':
-                    # Escaping left - pad on left (smaller X) is closer to edge
-                    pad_closer_to_edge_is_p = p_is_left
-                else:  # right
-                    # Escaping right - pad on right (larger X) is closer to edge
-                    pad_closer_to_edge_is_p = not p_is_left
-
-                if channel_above:
-                    # Channel is above pads - inner side is below (positive offset)
-                    if pad_closer_to_edge_is_p:
-                        p_offset = half_pair_spacing   # P closer to edge -> inner (below)
-                        n_offset = -half_pair_spacing  # N further -> outer (above)
-                    else:
-                        p_offset = -half_pair_spacing  # P further -> outer (above)
-                        n_offset = half_pair_spacing   # N closer to edge -> inner (below)
-                else:
-                    # Channel is below pads - inner side is above (negative offset)
-                    if pad_closer_to_edge_is_p:
-                        p_offset = -half_pair_spacing  # P closer to edge -> inner (above)
-                        n_offset = half_pair_spacing   # N further -> outer (below)
-                    else:
-                        p_offset = half_pair_spacing   # P further -> outer (below)
-                        n_offset = -half_pair_spacing  # N closer to edge -> inner (above)
-            elif channel and channel.orientation == 'vertical' and not is_cross_escape:
-                # Vertical channel - pads are vertically adjacent, escaping up/down
-                # Traces will be offset in X (one left, one right of channel center)
-                # Rule: pad closer to escape edge goes to inner side (closer to pads),
-                #       pad further from edge goes to outer side (away from pads)
-                channel_right = channel.position > p_pad.global_x
-                p_is_above = p_pad.global_y < n_pad.global_y
-
-                if escape_dir == 'up':
-                    # Escaping up - pad above (smaller Y) is closer to edge
-                    pad_closer_to_edge_is_p = p_is_above
-                else:  # down
-                    # Escaping down - pad below (larger Y) is closer to edge
-                    pad_closer_to_edge_is_p = not p_is_above
-
-                if channel_right:
-                    # Channel is right of pads - inner side is left (negative offset)
-                    if pad_closer_to_edge_is_p:
-                        p_offset = -half_pair_spacing  # P closer to edge -> inner (left)
-                        n_offset = half_pair_spacing   # N further -> outer (right)
-                    else:
-                        p_offset = half_pair_spacing   # P further -> outer (right)
-                        n_offset = -half_pair_spacing  # N closer to edge -> inner (left)
-                else:
-                    # Channel is left of pads - inner side is right (positive offset)
-                    if pad_closer_to_edge_is_p:
-                        p_offset = half_pair_spacing   # P closer to edge -> inner (right)
-                        n_offset = -half_pair_spacing  # N further -> outer (left)
-                    else:
-                        p_offset = -half_pair_spacing  # P further -> outer (left)
-                        n_offset = half_pair_spacing   # N closer to edge -> inner (right)
-            else:
-                # Edge pads or cross-escape - no offset needed, they converge with 45° stubs
-                p_offset = 0
-                n_offset = 0
-
-            # Check for half-edge case
-            is_half_edge = escape_dir.startswith('half_edge_')
-            if is_half_edge:
-                actual_escape_dir = escape_dir.replace('half_edge_', '')
-            else:
-                actual_escape_dir = escape_dir
-
-            # Create routes for both P and N
-            # In adjacent-channel mode, p_channel and n_channel are different
-            for pad_info, offset, is_p_route, route_ch in [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]:
-                if is_half_edge:
-                    # Half-edge pair: one pad on edge, one inner
-                    # Edge pad: goes straight out to BGA edge
-                    # Inner pad: 45° up to channel center, then 45° back down to converge
-                    #            with edge pad at pair spacing
-                    #
-                    # The inner pad makes a "tent" shape to go around the via pad
-
-                    is_edge_p_check, _ = is_edge_pad(p_pad.global_x, p_pad.global_y, grid)
-                    is_edge_n_check, _ = is_edge_pad(n_pad.global_x, n_pad.global_y, grid)
-
-                    # Identify which pad is edge and which is inner
-                    if is_edge_p_check:
-                        edge_pad_info = p_pad
-                        inner_pad_info = n_pad
-                        edge_is_p = True
-                    else:
-                        edge_pad_info = n_pad
-                        inner_pad_info = p_pad
-                        edge_is_p = False
-
-                    this_pad_is_edge = (is_p_route and edge_is_p) or (not is_p_route and not edge_is_p)
-                    pair_spacing_full = 2 * half_pair_spacing
-
-                    if actual_escape_dir in ['left', 'right']:
-                        # Find channel between inner pad and edge pad (horizontally adjacent)
+                # For adjacent-channel mode: find two channels, one on each side of the pads
+                # Check per-direction whether adjacent channels are needed
+                p_channel = channel
+                n_channel = channel
+                needs_adjacent = ((escape_dir in ['left', 'right'] and use_adjacent_channels_h) or
+                                  (escape_dir in ['up', 'down'] and use_adjacent_channels_v))
+                if needs_adjacent and channel and not is_cross_escape and not is_edge:
+                    # Find two adjacent channels for the diff pair - one above, one below the pads
+                    if channel.orientation == 'horizontal':
+                        # Horizontal pads escaping left/right - use channels on OPPOSITE sides of pads
+                        # One track goes UP to channel above, other goes DOWN to channel below
                         h_channels = [c for c in channels if c.orientation == 'horizontal']
-                        inner_y = inner_pad_info.global_y
-                        edge_y = edge_pad_info.global_y
+                        h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
+                        pad_y = (p_pad.global_y + n_pad.global_y) / 2
 
-                        # Channel should be between the two pads OR closest to inner going away from edge
-                        # Since they're on same row, find channel above or below
-                        channels_above = [c for c in h_channels if c.position < inner_y]
-                        channels_below = [c for c in h_channels if c.position > inner_y]
+                        # Find channels above and below the pads
+                        channels_above = [c for c in h_channels_sorted if c.position < pad_y]
+                        channels_below = [c for c in h_channels_sorted if c.position > pad_y]
 
-                        # Choose channel direction based on distance to BGA edge
-                        dist_to_top = inner_y - grid.min_y
-                        dist_to_bottom = grid.max_y - inner_y
-
-                        if dist_to_top <= dist_to_bottom and channels_above:
-                            inner_channel = max(channels_above, key=lambda c: c.position)
-                            channel_above = True
+                        if channels_above and channels_below:
+                            # Use closest channel above for one pad, closest below for the other
+                            ch_above = channels_above[-1]  # closest above
+                            ch_below = channels_below[0]   # closest below
+                            # P/t goes to channel below, N/c goes to channel above
+                            p_channel = ch_below
+                            n_channel = ch_above
+                        elif channels_above:
+                            # Only channels above - use two adjacent ones
+                            ch_above = channels_above[-1]
+                            idx = h_channels_sorted.index(ch_above)
+                            if idx > 0:
+                                p_channel = h_channels_sorted[idx - 1]
+                                n_channel = ch_above
+                            else:
+                                p_channel = channel
+                                n_channel = channel
                         elif channels_below:
-                            inner_channel = min(channels_below, key=lambda c: c.position)
-                            channel_above = False
-                        else:
-                            inner_channel = max(channels_above, key=lambda c: c.position)
-                            channel_above = True
-
-                        if this_pad_is_edge:
-                            # Edge pad: straight out horizontally
-                            # stub_end = pad position (no stub needed)
-                            stub_end = (edge_pad_info.global_x, edge_pad_info.global_y)
-                            if actual_escape_dir == 'right':
-                                exit_pos = (grid.max_x + exit_margin, edge_pad_info.global_y)
+                            # Only channels below - use two adjacent ones
+                            ch_below = channels_below[0]
+                            idx = h_channels_sorted.index(ch_below)
+                            if idx < len(h_channels_sorted) - 1:
+                                p_channel = ch_below
+                                n_channel = h_channels_sorted[idx + 1]
                             else:
-                                exit_pos = (grid.min_x - exit_margin, edge_pad_info.global_y)
-                            route_channel = None
-                            channel_pt = None
-                            channel_pt2 = None
+                                p_channel = channel
+                                n_channel = channel
                         else:
-                            # Inner pad: 45° up to channel, horizontal in channel (1 pitch),
-                            # then 45° back down to converge with edge pad
-                            channel_y = inner_channel.position
-                            dy_to_channel = channel_y - inner_pad_info.global_y
-
-                            if actual_escape_dir == 'right':
-                                # First 45°: pad -> channel entry point
-                                channel_pt_x = inner_pad_info.global_x + abs(dy_to_channel)
-                                channel_pt = (channel_pt_x, channel_y)
-
-                                # Horizontal segment in channel: 1 pitch toward edge
-                                channel_pt2_x = channel_pt_x + grid.pitch_x
-                                channel_pt2 = (channel_pt2_x, channel_y)
-
-                                # Target Y at exit = edge pad Y + offset for pair spacing
-                                if channel_above:
-                                    target_exit_y = edge_pad_info.global_y - pair_spacing_full
-                                else:
-                                    target_exit_y = edge_pad_info.global_y + pair_spacing_full
-
-                                # Second 45°: from channel_pt2 back toward target_exit_y
-                                dy_return = target_exit_y - channel_y
-                                stub_end_x = channel_pt2_x + abs(dy_return)
-                                stub_end = (stub_end_x, target_exit_y)
-
-                                exit_pos = (grid.max_x + exit_margin, target_exit_y)
-
-                            else:  # left
-                                channel_pt_x = inner_pad_info.global_x - abs(dy_to_channel)
-                                channel_pt = (channel_pt_x, channel_y)
-
-                                channel_pt2_x = channel_pt_x - grid.pitch_x
-                                channel_pt2 = (channel_pt2_x, channel_y)
-
-                                if channel_above:
-                                    target_exit_y = edge_pad_info.global_y - pair_spacing_full
-                                else:
-                                    target_exit_y = edge_pad_info.global_y + pair_spacing_full
-
-                                dy_return = target_exit_y - channel_y
-                                stub_end_x = channel_pt2_x - abs(dy_return)
-                                stub_end = (stub_end_x, target_exit_y)
-
-                                exit_pos = (grid.min_x - exit_margin, target_exit_y)
-
-                            route_channel = inner_channel
-
+                            p_channel = channel
+                            n_channel = channel
                     else:
-                        # Vertical escape - similar logic but X/Y swapped
+                        # Vertical pads escaping up/down - use channels on OPPOSITE sides of pads
                         v_channels = [c for c in channels if c.orientation == 'vertical']
-                        inner_x = inner_pad_info.global_x
-                        edge_x = edge_pad_info.global_x
+                        v_channels_sorted = sorted(v_channels, key=lambda c: c.position)
+                        pad_x = (p_pad.global_x + n_pad.global_x) / 2
 
-                        channels_left = [c for c in v_channels if c.position < inner_x]
-                        channels_right = [c for c in v_channels if c.position > inner_x]
+                        # Find channels left and right of the pads
+                        channels_left = [c for c in v_channels_sorted if c.position < pad_x]
+                        channels_right = [c for c in v_channels_sorted if c.position > pad_x]
 
-                        dist_to_left = inner_x - grid.min_x
-                        dist_to_right = grid.max_x - inner_x
-
-                        if dist_to_left <= dist_to_right and channels_left:
-                            inner_channel = max(channels_left, key=lambda c: c.position)
-                            channel_left = True
-                        elif channels_right:
-                            inner_channel = min(channels_right, key=lambda c: c.position)
-                            channel_left = False
-                        else:
-                            inner_channel = max(channels_left, key=lambda c: c.position)
-                            channel_left = True
-
-                        if this_pad_is_edge:
-                            stub_end = (edge_pad_info.global_x, edge_pad_info.global_y)
-                            if actual_escape_dir == 'down':
-                                exit_pos = (edge_pad_info.global_x, grid.max_y + exit_margin)
+                        if channels_left and channels_right:
+                            ch_left = channels_left[-1]   # closest left
+                            ch_right = channels_right[0]  # closest right
+                            # P/t goes right, N/c goes left (consistent with horizontal)
+                            p_channel = ch_right
+                            n_channel = ch_left
+                        elif channels_left:
+                            ch_left = channels_left[-1]
+                            idx = v_channels_sorted.index(ch_left)
+                            if idx > 0:
+                                p_channel = v_channels_sorted[idx - 1]
+                                n_channel = ch_left
                             else:
-                                exit_pos = (edge_pad_info.global_x, grid.min_y - exit_margin)
-                            route_channel = None
-                            channel_pt = None
-                            channel_pt2 = None
+                                p_channel = channel
+                                n_channel = channel
+                        elif channels_right:
+                            ch_right = channels_right[0]
+                            idx = v_channels_sorted.index(ch_right)
+                            if idx < len(v_channels_sorted) - 1:
+                                p_channel = ch_right
+                                n_channel = v_channels_sorted[idx + 1]
+                            else:
+                                p_channel = channel
+                                n_channel = channel
                         else:
-                            channel_x = inner_channel.position
-                            dx_to_channel = channel_x - inner_pad_info.global_x
+                            p_channel = channel
+                            n_channel = channel
 
-                            if actual_escape_dir == 'down':
-                                # First 45°: pad -> channel entry point
-                                channel_pt_y = inner_pad_info.global_y + abs(dx_to_channel)
-                                channel_pt = (channel_x, channel_pt_y)
+                # Determine which pad is "positive" offset and which is "negative"
+                # For horizontal channel (left/right escape): offset is in Y direction
+                # For vertical channel (up/down escape): offset is in X direction
+                #
+                # Key insight: To avoid crossing, the pad that is FURTHER from the channel
+                # should get the offset that brings it CLOSER to the channel center,
+                # while the pad CLOSER to the channel gets offset AWAY from channel center.
+                #
+                # When using adjacent channels (p_channel != n_channel), each track is centered
+                # in its own channel, so offsets are 0.
+                if p_channel != n_channel:
+                    # Adjacent channel mode - each track centered in its own channel
+                    p_offset = 0
+                    n_offset = 0
+                elif channel and channel.orientation == 'horizontal' and not is_cross_escape:
+                    # Horizontal channel - pads are horizontally adjacent, escaping left/right
+                    # Traces will be offset in Y (one above, one below channel center)
+                    # Rule: pad closer to escape edge goes to inner side (closer to pads),
+                    #       pad further from edge goes to outer side (away from pads)
+                    channel_above = channel.position < p_pad.global_y
+                    p_is_left = p_pad.global_x < n_pad.global_x
 
-                                # Vertical segment in channel: 1 pitch toward edge
-                                channel_pt2_y = channel_pt_y + grid.pitch_y
-                                channel_pt2 = (channel_x, channel_pt2_y)
+                    if escape_dir == 'left':
+                        # Escaping left - pad on left (smaller X) is closer to edge
+                        pad_closer_to_edge_is_p = p_is_left
+                    else:  # right
+                        # Escaping right - pad on right (larger X) is closer to edge
+                        pad_closer_to_edge_is_p = not p_is_left
 
-                                # Target X at exit = edge pad X + offset for pair spacing
-                                if channel_left:
-                                    target_exit_x = edge_pad_info.global_x - pair_spacing_full
+                    if channel_above:
+                        # Channel is above pads - inner side is below (positive offset)
+                        if pad_closer_to_edge_is_p:
+                            p_offset = half_pair_spacing   # P closer to edge -> inner (below)
+                            n_offset = -half_pair_spacing  # N further -> outer (above)
+                        else:
+                            p_offset = -half_pair_spacing  # P further -> outer (above)
+                            n_offset = half_pair_spacing   # N closer to edge -> inner (below)
+                    else:
+                        # Channel is below pads - inner side is above (negative offset)
+                        if pad_closer_to_edge_is_p:
+                            p_offset = -half_pair_spacing  # P closer to edge -> inner (above)
+                            n_offset = half_pair_spacing   # N further -> outer (below)
+                        else:
+                            p_offset = half_pair_spacing   # P further -> outer (below)
+                            n_offset = -half_pair_spacing  # N closer to edge -> inner (above)
+                elif channel and channel.orientation == 'vertical' and not is_cross_escape:
+                    # Vertical channel - pads are vertically adjacent, escaping up/down
+                    # Traces will be offset in X (one left, one right of channel center)
+                    # Rule: pad closer to escape edge goes to inner side (closer to pads),
+                    #       pad further from edge goes to outer side (away from pads)
+                    channel_right = channel.position > p_pad.global_x
+                    p_is_above = p_pad.global_y < n_pad.global_y
+
+                    if escape_dir == 'up':
+                        # Escaping up - pad above (smaller Y) is closer to edge
+                        pad_closer_to_edge_is_p = p_is_above
+                    else:  # down
+                        # Escaping down - pad below (larger Y) is closer to edge
+                        pad_closer_to_edge_is_p = not p_is_above
+
+                    if channel_right:
+                        # Channel is right of pads - inner side is left (negative offset)
+                        if pad_closer_to_edge_is_p:
+                            p_offset = -half_pair_spacing  # P closer to edge -> inner (left)
+                            n_offset = half_pair_spacing   # N further -> outer (right)
+                        else:
+                            p_offset = half_pair_spacing   # P further -> outer (right)
+                            n_offset = -half_pair_spacing  # N closer to edge -> inner (left)
+                    else:
+                        # Channel is left of pads - inner side is right (positive offset)
+                        if pad_closer_to_edge_is_p:
+                            p_offset = half_pair_spacing   # P closer to edge -> inner (right)
+                            n_offset = -half_pair_spacing  # N further -> outer (left)
+                        else:
+                            p_offset = -half_pair_spacing  # P further -> outer (left)
+                            n_offset = half_pair_spacing   # N closer to edge -> inner (right)
+                else:
+                    # Edge pads or cross-escape - no offset needed, they converge with 45° stubs
+                    p_offset = 0
+                    n_offset = 0
+
+                # Check for half-edge case
+                is_half_edge = escape_dir.startswith('half_edge_')
+                if is_half_edge:
+                    actual_escape_dir = escape_dir.replace('half_edge_', '')
+                else:
+                    actual_escape_dir = escape_dir
+
+                # Create routes for both P and N
+                # In adjacent-channel mode, p_channel and n_channel are different
+                for pad_info, offset, is_p_route, route_ch in [(p_pad, p_offset, True, p_channel), (n_pad, n_offset, False, n_channel)]:
+                    if is_half_edge:
+                        # Half-edge pair: one pad on edge, one inner
+                        # Edge pad: goes straight out to BGA edge
+                        # Inner pad: 45° up to channel center, then 45° back down to converge
+                        #            with edge pad at pair spacing
+                        #
+                        # The inner pad makes a "tent" shape to go around the via pad
+
+                        is_edge_p_check, _ = is_edge_pad(p_pad.global_x, p_pad.global_y, grid)
+                        is_edge_n_check, _ = is_edge_pad(n_pad.global_x, n_pad.global_y, grid)
+
+                        # Identify which pad is edge and which is inner
+                        if is_edge_p_check:
+                            edge_pad_info = p_pad
+                            inner_pad_info = n_pad
+                            edge_is_p = True
+                        else:
+                            edge_pad_info = n_pad
+                            inner_pad_info = p_pad
+                            edge_is_p = False
+
+                        this_pad_is_edge = (is_p_route and edge_is_p) or (not is_p_route and not edge_is_p)
+                        pair_spacing_full = 2 * half_pair_spacing
+
+                        if actual_escape_dir in ['left', 'right']:
+                            # Find channel between inner pad and edge pad (horizontally adjacent)
+                            h_channels = [c for c in channels if c.orientation == 'horizontal']
+                            inner_y = inner_pad_info.global_y
+                            edge_y = edge_pad_info.global_y
+
+                            # Channel should be between the two pads OR closest to inner going away from edge
+                            # Since they're on same row, find channel above or below
+                            channels_above = [c for c in h_channels if c.position < inner_y]
+                            channels_below = [c for c in h_channels if c.position > inner_y]
+
+                            # Choose channel direction based on distance to BGA edge
+                            dist_to_top = inner_y - grid.min_y
+                            dist_to_bottom = grid.max_y - inner_y
+
+                            if dist_to_top <= dist_to_bottom and channels_above:
+                                inner_channel = max(channels_above, key=lambda c: c.position)
+                                channel_above = True
+                            elif channels_below:
+                                inner_channel = min(channels_below, key=lambda c: c.position)
+                                channel_above = False
+                            else:
+                                inner_channel = max(channels_above, key=lambda c: c.position)
+                                channel_above = True
+
+                            if this_pad_is_edge:
+                                # Edge pad: straight out horizontally
+                                # stub_end = pad position (no stub needed)
+                                stub_end = (edge_pad_info.global_x, edge_pad_info.global_y)
+                                if actual_escape_dir == 'right':
+                                    exit_pos = (grid.max_x + exit_margin, edge_pad_info.global_y)
                                 else:
-                                    target_exit_x = edge_pad_info.global_x + pair_spacing_full
+                                    exit_pos = (grid.min_x - exit_margin, edge_pad_info.global_y)
+                                route_channel = None
+                                channel_pt = None
+                                channel_pt2 = None
+                            else:
+                                # Inner pad: 45° up to channel, horizontal in channel (1 pitch),
+                                # then 45° back down to converge with edge pad
+                                channel_y = inner_channel.position
+                                dy_to_channel = channel_y - inner_pad_info.global_y
 
-                                # Second 45°: from channel_pt2 back toward target_exit_x
-                                dx_return = target_exit_x - channel_x
-                                stub_end_y = channel_pt2_y + abs(dx_return)
-                                stub_end = (target_exit_x, stub_end_y)
+                                if actual_escape_dir == 'right':
+                                    # First 45°: pad -> channel entry point
+                                    channel_pt_x = inner_pad_info.global_x + abs(dy_to_channel)
+                                    channel_pt = (channel_pt_x, channel_y)
 
-                                exit_pos = (target_exit_x, grid.max_y + exit_margin)
+                                    # Horizontal segment in channel: 1 pitch toward edge
+                                    channel_pt2_x = channel_pt_x + grid.pitch_x
+                                    channel_pt2 = (channel_pt2_x, channel_y)
 
-                            else:  # up
-                                # First 45°: pad -> channel entry point
-                                channel_pt_y = inner_pad_info.global_y - abs(dx_to_channel)
-                                channel_pt = (channel_x, channel_pt_y)
+                                    # Target Y at exit = edge pad Y + offset for pair spacing
+                                    if channel_above:
+                                        target_exit_y = edge_pad_info.global_y - pair_spacing_full
+                                    else:
+                                        target_exit_y = edge_pad_info.global_y + pair_spacing_full
 
-                                # Vertical segment in channel: 1 pitch toward edge
-                                channel_pt2_y = channel_pt_y - grid.pitch_y
-                                channel_pt2 = (channel_x, channel_pt2_y)
+                                    # Second 45°: from channel_pt2 back toward target_exit_y
+                                    dy_return = target_exit_y - channel_y
+                                    stub_end_x = channel_pt2_x + abs(dy_return)
+                                    stub_end = (stub_end_x, target_exit_y)
 
-                                # Target X at exit = edge pad X + offset for pair spacing
-                                if channel_left:
-                                    target_exit_x = edge_pad_info.global_x - pair_spacing_full
+                                    exit_pos = (grid.max_x + exit_margin, target_exit_y)
+
+                                else:  # left
+                                    channel_pt_x = inner_pad_info.global_x - abs(dy_to_channel)
+                                    channel_pt = (channel_pt_x, channel_y)
+
+                                    channel_pt2_x = channel_pt_x - grid.pitch_x
+                                    channel_pt2 = (channel_pt2_x, channel_y)
+
+                                    if channel_above:
+                                        target_exit_y = edge_pad_info.global_y - pair_spacing_full
+                                    else:
+                                        target_exit_y = edge_pad_info.global_y + pair_spacing_full
+
+                                    dy_return = target_exit_y - channel_y
+                                    stub_end_x = channel_pt2_x - abs(dy_return)
+                                    stub_end = (stub_end_x, target_exit_y)
+
+                                    exit_pos = (grid.min_x - exit_margin, target_exit_y)
+
+                                route_channel = inner_channel
+
+                        else:
+                            # Vertical escape - similar logic but X/Y swapped
+                            v_channels = [c for c in channels if c.orientation == 'vertical']
+                            inner_x = inner_pad_info.global_x
+                            edge_x = edge_pad_info.global_x
+
+                            channels_left = [c for c in v_channels if c.position < inner_x]
+                            channels_right = [c for c in v_channels if c.position > inner_x]
+
+                            dist_to_left = inner_x - grid.min_x
+                            dist_to_right = grid.max_x - inner_x
+
+                            if dist_to_left <= dist_to_right and channels_left:
+                                inner_channel = max(channels_left, key=lambda c: c.position)
+                                channel_left = True
+                            elif channels_right:
+                                inner_channel = min(channels_right, key=lambda c: c.position)
+                                channel_left = False
+                            else:
+                                inner_channel = max(channels_left, key=lambda c: c.position)
+                                channel_left = True
+
+                            if this_pad_is_edge:
+                                stub_end = (edge_pad_info.global_x, edge_pad_info.global_y)
+                                if actual_escape_dir == 'down':
+                                    exit_pos = (edge_pad_info.global_x, grid.max_y + exit_margin)
                                 else:
-                                    target_exit_x = edge_pad_info.global_x + pair_spacing_full
+                                    exit_pos = (edge_pad_info.global_x, grid.min_y - exit_margin)
+                                route_channel = None
+                                channel_pt = None
+                                channel_pt2 = None
+                            else:
+                                channel_x = inner_channel.position
+                                dx_to_channel = channel_x - inner_pad_info.global_x
 
-                                # Second 45°: from channel_pt2 back toward target_exit_x
-                                dx_return = target_exit_x - channel_x
-                                stub_end_y = channel_pt2_y - abs(dx_return)
-                                stub_end = (target_exit_x, stub_end_y)
+                                if actual_escape_dir == 'down':
+                                    # First 45°: pad -> channel entry point
+                                    channel_pt_y = inner_pad_info.global_y + abs(dx_to_channel)
+                                    channel_pt = (channel_x, channel_pt_y)
 
-                                exit_pos = (target_exit_x, grid.min_y - exit_margin)
+                                    # Vertical segment in channel: 1 pitch toward edge
+                                    channel_pt2_y = channel_pt_y + grid.pitch_y
+                                    channel_pt2 = (channel_x, channel_pt2_y)
 
-                            route_channel = inner_channel
+                                    # Target X at exit = edge pad X + offset for pair spacing
+                                    if channel_left:
+                                        target_exit_x = edge_pad_info.global_x - pair_spacing_full
+                                    else:
+                                        target_exit_x = edge_pad_info.global_x + pair_spacing_full
+
+                                    # Second 45°: from channel_pt2 back toward target_exit_x
+                                    dx_return = target_exit_x - channel_x
+                                    stub_end_y = channel_pt2_y + abs(dx_return)
+                                    stub_end = (target_exit_x, stub_end_y)
+
+                                    exit_pos = (target_exit_x, grid.max_y + exit_margin)
+
+                                else:  # up
+                                    # First 45°: pad -> channel entry point
+                                    channel_pt_y = inner_pad_info.global_y - abs(dx_to_channel)
+                                    channel_pt = (channel_x, channel_pt_y)
+
+                                    # Vertical segment in channel: 1 pitch toward edge
+                                    channel_pt2_y = channel_pt_y - grid.pitch_y
+                                    channel_pt2 = (channel_x, channel_pt2_y)
+
+                                    # Target X at exit = edge pad X + offset for pair spacing
+                                    if channel_left:
+                                        target_exit_x = edge_pad_info.global_x - pair_spacing_full
+                                    else:
+                                        target_exit_x = edge_pad_info.global_x + pair_spacing_full
+
+                                    # Second 45°: from channel_pt2 back toward target_exit_x
+                                    dx_return = target_exit_x - channel_x
+                                    stub_end_y = channel_pt2_y - abs(dx_return)
+                                    stub_end = (target_exit_x, stub_end_y)
+
+                                    exit_pos = (target_exit_x, grid.min_y - exit_margin)
+
+                                route_channel = inner_channel
+
+                        route = FanoutRoute(
+                            pad=pad_info,
+                            pad_pos=(pad_info.global_x, pad_info.global_y),
+                            stub_end=stub_end,
+                            exit_pos=exit_pos,
+                            channel_point=channel_pt if not this_pad_is_edge else None,
+                            channel_point2=channel_pt2 if not this_pad_is_edge else None,
+                            channel=route_channel,
+                            escape_dir=actual_escape_dir,
+                            is_edge=this_pad_is_edge,
+                            layer=layers[0],
+                            pair_id=pair_id,
+                            is_p=is_p_route
+                        )
+                        routes.append(route)
+                        continue  # Skip the normal edge/inner handling below
+
+                    if is_edge or is_cross_escape:
+                        # Edge pads or cross-escape: converge with 45° stubs to meet at pair spacing
+                        # Cross-escape: horizontal pads escaping vertically, or vertical pads escaping horizontally
+                        # Calculate the center point between P and N pads
+                        center_x = (p_pad.global_x + n_pad.global_x) / 2
+                        center_y = (p_pad.global_y + n_pad.global_y) / 2
+
+                        if pads_horizontal:
+                            # Pads are side by side horizontally (like T9 and T10 in screenshot)
+                            # They need to converge to pair spacing using 45° stubs
+                            # Final X positions: center_x +/- half_pair_spacing
+
+                            # Determine which pad is on the left vs right
+                            p_is_left = p_pad.global_x < n_pad.global_x
+
+                            # Target X for converged pair - left pad goes to left target, right pad to right target
+                            if (is_p_route and p_is_left) or (not is_p_route and not p_is_left):
+                                # This pad is on the left, target is left of center
+                                target_x = center_x - half_pair_spacing
+                            else:
+                                # This pad is on the right, target is right of center
+                                target_x = center_x + half_pair_spacing
+
+                            # Distance each trace needs to move in X (towards center)
+                            dx_needed = target_x - pad_info.global_x
+
+                            # At 45°, dy = dx (in absolute terms, direction depends on escape)
+                            if escape_dir == 'down':
+                                # Going down: Y increases, stub goes at 45° down
+                                stub_end_y = pad_info.global_y + abs(dx_needed)
+                                stub_end_x = target_x
+                            elif escape_dir == 'up':
+                                # Going up: Y decreases, stub goes at 45° up
+                                stub_end_y = pad_info.global_y - abs(dx_needed)
+                                stub_end_x = target_x
+                            else:
+                                # For left/right edge with horizontal pads, shouldn't happen normally
+                                stub_end_x = target_x
+                                stub_end_y = pad_info.global_y
+
+                            stub_end = (stub_end_x, stub_end_y)
+
+                            # Exit position continues in escape direction
+                            if escape_dir == 'down':
+                                exit_pos = (stub_end[0], grid.max_y + exit_margin)
+                            elif escape_dir == 'up':
+                                exit_pos = (stub_end[0], grid.min_y - exit_margin)
+                            elif escape_dir == 'right':
+                                exit_pos = (grid.max_x + exit_margin, stub_end[1])
+                            else:  # left
+                                exit_pos = (grid.min_x - exit_margin, stub_end[1])
+                        else:
+                            # Pads are vertically adjacent, escaping horizontally (cross-escape)
+                            # Determine which pad is on the top vs bottom (smaller Y = top in KiCad)
+                            p_is_top = p_pad.global_y < n_pad.global_y
+
+                            if use_adjacent_channels_h and escape_dir in ['left', 'right']:
+                                # Adjacent-channel mode for cross-escape: use two ADJACENT channels
+                                # Find the channel between the two pads, then use it and the next one
+                                # on the escape side (both tracks go same direction, different adjacent channels)
+                                h_channels = [c for c in channels if c.orientation == 'horizontal']
+                                h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
+
+                                # Find the channel between the two pads (between their Y positions)
+                                top_pad_y = min(p_pad.global_y, n_pad.global_y)
+                                bot_pad_y = max(p_pad.global_y, n_pad.global_y)
+                                channels_between = [c for c in h_channels_sorted
+                                                   if top_pad_y < c.position < bot_pad_y]
+
+                                if channels_between:
+                                    # Use the channel between pads and one adjacent to it
+                                    between_ch = channels_between[0]
+                                    between_idx = h_channels_sorted.index(between_ch)
+
+                                    # Determine which pad is closer to the escape edge
+                                    if escape_dir == 'left':
+                                        p_closer_to_edge = p_pad.global_x < n_pad.global_x
+                                    else:  # right
+                                        p_closer_to_edge = p_pad.global_x > n_pad.global_x
+
+                                    # Pad closer to edge uses between_ch (normal routing)
+                                    # Pad farther from edge jogs to adjacent_ch
+                                    # Choose adjacent_ch on the side of the farther pad
+                                    if p_closer_to_edge:
+                                        # P uses between, N jogs to adjacent
+                                        # N is farther, so pick adjacent on N's side (above if N is top, below if N is bottom)
+                                        n_is_top = n_pad.global_y < p_pad.global_y
+                                        if n_is_top and between_idx > 0:
+                                            adjacent_ch = h_channels_sorted[between_idx - 1]
+                                        elif not n_is_top and between_idx < len(h_channels_sorted) - 1:
+                                            adjacent_ch = h_channels_sorted[between_idx + 1]
+                                        elif between_idx > 0:
+                                            adjacent_ch = h_channels_sorted[between_idx - 1]
+                                        elif between_idx < len(h_channels_sorted) - 1:
+                                            adjacent_ch = h_channels_sorted[between_idx + 1]
+                                        else:
+                                            adjacent_ch = between_ch
+                                        p_target_ch = between_ch
+                                        n_target_ch = adjacent_ch
+                                    else:
+                                        # N uses between, P jogs to adjacent
+                                        # P is farther, so pick adjacent on P's side
+                                        p_is_top_here = p_pad.global_y < n_pad.global_y
+                                        if p_is_top_here and between_idx > 0:
+                                            adjacent_ch = h_channels_sorted[between_idx - 1]
+                                        elif not p_is_top_here and between_idx < len(h_channels_sorted) - 1:
+                                            adjacent_ch = h_channels_sorted[between_idx + 1]
+                                        elif between_idx > 0:
+                                            adjacent_ch = h_channels_sorted[between_idx - 1]
+                                        elif between_idx < len(h_channels_sorted) - 1:
+                                            adjacent_ch = h_channels_sorted[between_idx + 1]
+                                        else:
+                                            adjacent_ch = between_ch
+                                        p_target_ch = adjacent_ch
+                                        n_target_ch = between_ch
+                                else:
+                                    # No channel between pads - use channels above and below
+                                    channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
+                                    channels_below = [c for c in h_channels_sorted if c.position > bot_pad_y]
+                                    p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
+                                    n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
+
+                                # Initialize route_ch with default before conditional assignment
+                                route_ch = channel
+                                if is_p_route and p_target_ch:
+                                    target_y = p_target_ch.position
+                                    route_ch = p_target_ch
+                                elif not is_p_route and n_target_ch:
+                                    target_y = n_target_ch.position
+                                    route_ch = n_target_ch
+                                else:
+                                    # Fallback to convergence if no separate channel available
+                                    target_y = center_y - half_pair_spacing if (is_p_route and p_is_top) or (not is_p_route and not p_is_top) else center_y + half_pair_spacing
+                                    # route_ch already initialized to channel above
+
+                                # Route to target channel via 45° stub
+                                dy_needed = target_y - pad_info.global_y
+                                if escape_dir == 'right':
+                                    stub_end_x = pad_info.global_x + abs(dy_needed)
+                                else:  # left
+                                    stub_end_x = pad_info.global_x - abs(dy_needed)
+                                stub_end_y = target_y
+                                stub_end = (stub_end_x, stub_end_y)
+
+                                # Exit continues horizontally to BGA edge
+                                if escape_dir == 'right':
+                                    exit_pos = (grid.max_x + exit_margin, stub_end[1])
+                                else:  # left
+                                    exit_pos = (grid.min_x - exit_margin, stub_end[1])
+                            else:
+                                # Original convergence logic
+                                # Target Y for converged pair - top pad goes to top target, bottom to bottom
+                                if (is_p_route and p_is_top) or (not is_p_route and not p_is_top):
+                                    # This pad is on top, target is above center
+                                    target_y = center_y - half_pair_spacing
+                                else:
+                                    # This pad is on bottom, target is below center
+                                    target_y = center_y + half_pair_spacing
+
+                                # Distance each trace needs to move in Y (towards center)
+                                dy_needed = target_y - pad_info.global_y
+
+                                # At 45°, dx = dy (in absolute terms)
+                                if escape_dir == 'right':
+                                    stub_end_x = pad_info.global_x + abs(dy_needed)
+                                    stub_end_y = target_y
+                                elif escape_dir == 'left':
+                                    stub_end_x = pad_info.global_x - abs(dy_needed)
+                                    stub_end_y = target_y
+                                else:
+                                    stub_end_x = pad_info.global_x
+                                    stub_end_y = target_y
+
+                                stub_end = (stub_end_x, stub_end_y)
+
+                                if escape_dir == 'right':
+                                    exit_pos = (grid.max_x + exit_margin, stub_end[1])
+                                elif escape_dir == 'left':
+                                    exit_pos = (grid.min_x - exit_margin, stub_end[1])
+                                elif escape_dir == 'down':
+                                    exit_pos = (stub_end[0], grid.max_y + exit_margin)
+                                else:  # up
+                                    exit_pos = (stub_end[0], grid.min_y - exit_margin)
+                    else:
+                        # Inner pads with aligned escape: 45° stub to channel with offset, then channel to exit
+                        # In adjacent-channel mode, route_ch is the pad-specific channel
+                        stub_end = create_45_stub(pad_info.global_x, pad_info.global_y,
+                                                 route_ch, escape_dir, offset)
+                        exit_pos = calculate_exit_point(stub_end, route_ch, escape_dir,
+                                                       grid, exit_margin, offset)
+
+                    # Use pre-assigned layer if available, otherwise default to layers[0]
+                    assigned_layer = pair_layer_assignments.get(pair_id, layers[0]) if pair_layer_assignments else layers[0]
 
                     route = FanoutRoute(
                         pad=pad_info,
                         pad_pos=(pad_info.global_x, pad_info.global_y),
                         stub_end=stub_end,
                         exit_pos=exit_pos,
-                        channel_point=channel_pt if not this_pad_is_edge else None,
-                        channel_point2=channel_pt2 if not this_pad_is_edge else None,
-                        channel=route_channel,
-                        escape_dir=actual_escape_dir,
-                        is_edge=this_pad_is_edge,
-                        layer=layers[0],
+                        channel=route_ch,
+                        escape_dir=escape_dir,
+                        is_edge=is_edge,
+                        layer=assigned_layer,
                         pair_id=pair_id,
                         is_p=is_p_route
                     )
                     routes.append(route)
-                    continue  # Skip the normal edge/inner handling below
-
-                if is_edge or is_cross_escape:
-                    # Edge pads or cross-escape: converge with 45° stubs to meet at pair spacing
-                    # Cross-escape: horizontal pads escaping vertically, or vertical pads escaping horizontally
-                    # Calculate the center point between P and N pads
-                    center_x = (p_pad.global_x + n_pad.global_x) / 2
-                    center_y = (p_pad.global_y + n_pad.global_y) / 2
-
-                    if pads_horizontal:
-                        # Pads are side by side horizontally (like T9 and T10 in screenshot)
-                        # They need to converge to pair spacing using 45° stubs
-                        # Final X positions: center_x +/- half_pair_spacing
-
-                        # Determine which pad is on the left vs right
-                        p_is_left = p_pad.global_x < n_pad.global_x
-
-                        # Target X for converged pair - left pad goes to left target, right pad to right target
-                        if (is_p_route and p_is_left) or (not is_p_route and not p_is_left):
-                            # This pad is on the left, target is left of center
-                            target_x = center_x - half_pair_spacing
-                        else:
-                            # This pad is on the right, target is right of center
-                            target_x = center_x + half_pair_spacing
-
-                        # Distance each trace needs to move in X (towards center)
-                        dx_needed = target_x - pad_info.global_x
-
-                        # At 45°, dy = dx (in absolute terms, direction depends on escape)
-                        if escape_dir == 'down':
-                            # Going down: Y increases, stub goes at 45° down
-                            stub_end_y = pad_info.global_y + abs(dx_needed)
-                            stub_end_x = target_x
-                        elif escape_dir == 'up':
-                            # Going up: Y decreases, stub goes at 45° up
-                            stub_end_y = pad_info.global_y - abs(dx_needed)
-                            stub_end_x = target_x
-                        else:
-                            # For left/right edge with horizontal pads, shouldn't happen normally
-                            stub_end_x = target_x
-                            stub_end_y = pad_info.global_y
-
-                        stub_end = (stub_end_x, stub_end_y)
-
-                        # Exit position continues in escape direction
-                        if escape_dir == 'down':
-                            exit_pos = (stub_end[0], grid.max_y + exit_margin)
-                        elif escape_dir == 'up':
-                            exit_pos = (stub_end[0], grid.min_y - exit_margin)
-                        elif escape_dir == 'right':
-                            exit_pos = (grid.max_x + exit_margin, stub_end[1])
-                        else:  # left
-                            exit_pos = (grid.min_x - exit_margin, stub_end[1])
-                    else:
-                        # Pads are vertically adjacent, escaping horizontally (cross-escape)
-                        # Determine which pad is on the top vs bottom (smaller Y = top in KiCad)
-                        p_is_top = p_pad.global_y < n_pad.global_y
-
-                        if use_adjacent_channels_h and escape_dir in ['left', 'right']:
-                            # Adjacent-channel mode for cross-escape: use two ADJACENT channels
-                            # Find the channel between the two pads, then use it and the next one
-                            # on the escape side (both tracks go same direction, different adjacent channels)
-                            h_channels = [c for c in channels if c.orientation == 'horizontal']
-                            h_channels_sorted = sorted(h_channels, key=lambda c: c.position)
-
-                            # Find the channel between the two pads (between their Y positions)
-                            top_pad_y = min(p_pad.global_y, n_pad.global_y)
-                            bot_pad_y = max(p_pad.global_y, n_pad.global_y)
-                            channels_between = [c for c in h_channels_sorted
-                                               if top_pad_y < c.position < bot_pad_y]
-
-                            if channels_between:
-                                # Use the channel between pads and one adjacent to it
-                                between_ch = channels_between[0]
-                                between_idx = h_channels_sorted.index(between_ch)
-
-                                # Determine which pad is closer to the escape edge
-                                if escape_dir == 'left':
-                                    p_closer_to_edge = p_pad.global_x < n_pad.global_x
-                                else:  # right
-                                    p_closer_to_edge = p_pad.global_x > n_pad.global_x
-
-                                # Pad closer to edge uses between_ch (normal routing)
-                                # Pad farther from edge jogs to adjacent_ch
-                                # Choose adjacent_ch on the side of the farther pad
-                                if p_closer_to_edge:
-                                    # P uses between, N jogs to adjacent
-                                    # N is farther, so pick adjacent on N's side (above if N is top, below if N is bottom)
-                                    n_is_top = n_pad.global_y < p_pad.global_y
-                                    if n_is_top and between_idx > 0:
-                                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                                    elif not n_is_top and between_idx < len(h_channels_sorted) - 1:
-                                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                                    elif between_idx > 0:
-                                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                                    elif between_idx < len(h_channels_sorted) - 1:
-                                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                                    else:
-                                        adjacent_ch = between_ch
-                                    p_target_ch = between_ch
-                                    n_target_ch = adjacent_ch
-                                else:
-                                    # N uses between, P jogs to adjacent
-                                    # P is farther, so pick adjacent on P's side
-                                    p_is_top_here = p_pad.global_y < n_pad.global_y
-                                    if p_is_top_here and between_idx > 0:
-                                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                                    elif not p_is_top_here and between_idx < len(h_channels_sorted) - 1:
-                                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                                    elif between_idx > 0:
-                                        adjacent_ch = h_channels_sorted[between_idx - 1]
-                                    elif between_idx < len(h_channels_sorted) - 1:
-                                        adjacent_ch = h_channels_sorted[between_idx + 1]
-                                    else:
-                                        adjacent_ch = between_ch
-                                    p_target_ch = adjacent_ch
-                                    n_target_ch = between_ch
-                            else:
-                                # No channel between pads - use channels above and below
-                                channels_above = [c for c in h_channels_sorted if c.position < top_pad_y]
-                                channels_below = [c for c in h_channels_sorted if c.position > bot_pad_y]
-                                p_target_ch = channels_above[-1] if channels_above and p_is_top else (channels_below[0] if channels_below else None)
-                                n_target_ch = channels_below[0] if channels_below and not p_is_top else (channels_above[-1] if channels_above else None)
-
-                            # Initialize route_ch with default before conditional assignment
-                            route_ch = channel
-                            if is_p_route and p_target_ch:
-                                target_y = p_target_ch.position
-                                route_ch = p_target_ch
-                            elif not is_p_route and n_target_ch:
-                                target_y = n_target_ch.position
-                                route_ch = n_target_ch
-                            else:
-                                # Fallback to convergence if no separate channel available
-                                target_y = center_y - half_pair_spacing if (is_p_route and p_is_top) or (not is_p_route and not p_is_top) else center_y + half_pair_spacing
-                                # route_ch already initialized to channel above
-
-                            # Route to target channel via 45° stub
-                            dy_needed = target_y - pad_info.global_y
-                            if escape_dir == 'right':
-                                stub_end_x = pad_info.global_x + abs(dy_needed)
-                            else:  # left
-                                stub_end_x = pad_info.global_x - abs(dy_needed)
-                            stub_end_y = target_y
-                            stub_end = (stub_end_x, stub_end_y)
-
-                            # Exit continues horizontally to BGA edge
-                            if escape_dir == 'right':
-                                exit_pos = (grid.max_x + exit_margin, stub_end[1])
-                            else:  # left
-                                exit_pos = (grid.min_x - exit_margin, stub_end[1])
-                        else:
-                            # Original convergence logic
-                            # Target Y for converged pair - top pad goes to top target, bottom to bottom
-                            if (is_p_route and p_is_top) or (not is_p_route and not p_is_top):
-                                # This pad is on top, target is above center
-                                target_y = center_y - half_pair_spacing
-                            else:
-                                # This pad is on bottom, target is below center
-                                target_y = center_y + half_pair_spacing
-
-                            # Distance each trace needs to move in Y (towards center)
-                            dy_needed = target_y - pad_info.global_y
-
-                            # At 45°, dx = dy (in absolute terms)
-                            if escape_dir == 'right':
-                                stub_end_x = pad_info.global_x + abs(dy_needed)
-                                stub_end_y = target_y
-                            elif escape_dir == 'left':
-                                stub_end_x = pad_info.global_x - abs(dy_needed)
-                                stub_end_y = target_y
-                            else:
-                                stub_end_x = pad_info.global_x
-                                stub_end_y = target_y
-
-                            stub_end = (stub_end_x, stub_end_y)
-
-                            if escape_dir == 'right':
-                                exit_pos = (grid.max_x + exit_margin, stub_end[1])
-                            elif escape_dir == 'left':
-                                exit_pos = (grid.min_x - exit_margin, stub_end[1])
-                            elif escape_dir == 'down':
-                                exit_pos = (stub_end[0], grid.max_y + exit_margin)
-                            else:  # up
-                                exit_pos = (stub_end[0], grid.min_y - exit_margin)
-                else:
-                    # Inner pads with aligned escape: 45° stub to channel with offset, then channel to exit
-                    # In adjacent-channel mode, route_ch is the pad-specific channel
-                    stub_end = create_45_stub(pad_info.global_x, pad_info.global_y,
-                                             route_ch, escape_dir, offset)
-                    exit_pos = calculate_exit_point(stub_end, route_ch, escape_dir,
-                                                   grid, exit_margin, offset)
-
-                # Use pre-assigned layer if available, otherwise default to layers[0]
-                assigned_layer = pair_layer_assignments.get(pair_id, layers[0]) if pair_layer_assignments else layers[0]
-
-                route = FanoutRoute(
-                    pad=pad_info,
-                    pad_pos=(pad_info.global_x, pad_info.global_y),
-                    stub_end=stub_end,
-                    exit_pos=exit_pos,
-                    channel=route_ch,
-                    escape_dir=escape_dir,
-                    is_edge=is_edge,
-                    layer=assigned_layer,
-                    pair_id=pair_id,
-                    is_p=is_p_route
+            else:
+                # Single-ended signal (not part of a pair)
+                force_orient = primary_escape if force_escape_direction else None
+                route = create_single_ended_route(
+                    pad, grid, channels, layers, exit_margin, force_orient
                 )
                 routes.append(route)
+
+        print_route_statistics(routes)
+
+        if not routes:
+            return [], [], [], []
+
+        # Connect adjacent same-net pads directly (before layer assignment)
+        neighbor_connections = connect_adjacent_same_net_pads(routes, grid, track_width, clearance)
+        if neighbor_connections > 0:
+            print(f"  Connected {neighbor_connections} adjacent same-net pads directly")
+
+        # Convert existing PCB segments to track format for collision checking
+        existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+
+        # Reassign on-channel pads to adjacent channels when too many share the same channel
+        reassigned_count = reassign_on_channel_pads(routes, channels, grid, len(layers), exit_margin, footprint)
+        if reassigned_count > 0:
+            print(f"  Reassigned {reassigned_count} on-channel pads to adjacent channels")
+
+        # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
+        assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)
+
+        # Calculate jog length = distance from BGA edge to first pad row/col
+        # This is half the pitch (since edge is pitch/2 from first pad)
+        jog_length = min(grid.pitch_x, grid.pitch_y) / 2
+        print(f"  Jog length: {jog_length:.2f} mm")
+
+        # Calculate jog_end for each route based on layer
+        calculate_jog_ends_for_routes(routes, layers, jog_length, track_width, diff_pair_gap)
+
+        # Generate tracks
+        tracks, edge_count, inner_count = generate_tracks_from_routes(routes, track_width, layers[0])
+
+        # Validate no collisions
+        min_spacing = track_width + clearance
+        collision_count, collision_pairs = detect_collisions(tracks, existing_tracks, min_spacing)
+        failed_nets: List = []  # populated by resolve_collisions if there are collisions
+
+        if collision_count > 0:
+            print(f"  INFO: {collision_count} potential collisions detected (will attempt to resolve)")
+            for t1, t2 in collision_pairs:
+                existing_marker = " (existing)" if t2.get('is_existing') else ""
+                print(f"    {t1['layer']} net{t1['net_id']}: {t1['start']}->{t1['end']}")
+                print(f"    {t2['layer']} net{t2['net_id']}: {t2['start']}->{t2['end']}{existing_marker}")
+
+            # Try to resolve collisions by reassigning layers or using alternate channels
+            print(f"  Attempting to resolve collisions...")
+            # Build net_id -> net_name mapping for error reporting
+            net_id_to_name = {r.net_id: r.pad.net_name for r in routes if r.pad.net_name}
+            reassigned, failed_nets = resolve_collisions(routes, tracks, layers, track_width, clearance, diff_pair_gap,
+                                            existing_tracks, grid, channels, exit_margin, net_id_to_name, no_inner_top_layer)
+
+            if failed_nets:
+                print(f"\n  ERROR: Failed to route {len(failed_nets)} net(s):")
+                for net_name in failed_nets:
+                    print(f"    - {net_name}")
+                print(f"  These nets have been removed from the output.\n")
+
+            if reassigned > 0:
+                # Recount collisions after resolution
+                new_collision_count, _ = detect_collisions(tracks, existing_tracks, min_spacing, max_pairs=0)
+                print(f"  After resolution: {new_collision_count} collisions remaining")
+                collisions_remaining = new_collision_count
         else:
-            # Single-ended signal (not part of a pair)
-            force_orient = primary_escape if force_escape_direction else None
-            route = create_single_ended_route(
-                pad, grid, channels, layers, exit_margin, force_orient
-            )
-            routes.append(route)
+            print(f"  Validated: No collisions")
+            collisions_remaining = 0
 
-    print_route_statistics(routes)
+        # Post-resolution layer rebalancing for even distribution
+        if collisions_remaining == 0 and len(layers) > 1:
+            rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, layers, min_spacing)
+            if rebalanced_count > 0:
+                print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
 
-    if not routes:
-        return [], [], [], []
+        # Stats by layer
+        layer_counts = defaultdict(int)
+        for route in routes:
+            layer_counts[route.layer] += 1
+        for layer, count in sorted(layer_counts.items()):
+            print(f"    {layer}: {count} routes")
 
-    # Connect adjacent same-net pads directly (before layer assignment)
-    neighbor_connections = connect_adjacent_same_net_pads(routes, grid, track_width, clearance)
-    if neighbor_connections > 0:
-        print(f"  Connected {neighbor_connections} adjacent same-net pads directly")
+        # Via management: add vias where needed, remove unnecessary ones
+        vias_to_add, vias_to_remove = manage_vias(
+            routes, pcb_data, layers[0], via_size, via_drill, clearance
+        )
 
-    # Convert existing PCB segments to track format for collision checking
-    existing_tracks = convert_segments_to_tracks(pcb_data) if check_for_previous else []
+        return tracks, vias_to_add, vias_to_remove, list(failed_nets), routes
 
-    # Reassign on-channel pads to adjacent channels when too many share the same channel
-    reassigned_count = reassign_on_channel_pads(routes, channels, grid, len(layers), exit_margin, footprint)
-    if reassigned_count > 0:
-        print(f"  Reassigned {reassigned_count} on-channel pads to adjacent channels")
+    # Outer orthogonal re-escape retry loop.
+    # Run the pass; if diff-pair-vs-diff-pair (Z-Z) shorts remain, re-run with
+    # the offending pairs forced to their orthogonal escape direction. Keep the
+    # result with the fewest Z-Z shorts (ties -> earliest pass).
+    # A Z-Z "short" means copper actually overlaps: two tracks whose centerlines
+    # come within a track width (each contributes half a width). Using
+    # track_width here (rather than track_width + clearance) detects genuine
+    # shorts instead of mere clearance violations, which keeps the retry from
+    # chasing legally-spaced neighbors.
+    zz_min_spacing = track_width
+    forced_pairs: Set[str] = set()
+    best_result = None
+    best_zz = None
+    prev_zz = None
+    for attempt in range(3):  # 1 initial pass + up to 2 retries
+        result = _run_pass(set(forced_pairs))
+        pass_tracks = result[0]
+        zz_count, zz_involved = count_diff_pair_shorts(pass_tracks, zz_min_spacing)
 
-    # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
-    assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)
+        if attempt > 0:
+            orientation_desc = 'vertical' if primary_escape == 'horizontal' else 'horizontal'
+            print(f"  Orthogonal re-escape: forced {len(forced_pairs)} pair(s) to "
+                  f"{orientation_desc}, Z-Z shorts {prev_zz} -> {zz_count}")
 
-    # Calculate jog length = distance from BGA edge to first pad row/col
-    # This is half the pitch (since edge is pitch/2 from first pad)
-    jog_length = min(grid.pitch_x, grid.pitch_y) / 2
-    print(f"  Jog length: {jog_length:.2f} mm")
+        if best_result is None or zz_count < best_zz:
+            best_result = result
+            best_zz = zz_count
 
-    # Calculate jog_end for each route based on layer
-    calculate_jog_ends_for_routes(routes, layers, jog_length, track_width, diff_pair_gap)
+        prev_zz = zz_count
+        if zz_count == 0:
+            break
 
-    # Generate tracks
-    tracks, edge_count, inner_count = generate_tracks_from_routes(routes, track_width, layers[0])
+        # Accumulate offenders and retry with them forced to secondary.
+        new_offenders = zz_involved - forced_pairs
+        if not new_offenders:
+            break  # nothing new to flip; further retries won't help
+        forced_pairs |= zz_involved
 
-    # Validate no collisions
-    min_spacing = track_width + clearance
-    collision_count, collision_pairs = detect_collisions(tracks, existing_tracks, min_spacing)
-    failed_nets: List = []  # populated by resolve_collisions if there are collisions
-
-    if collision_count > 0:
-        print(f"  INFO: {collision_count} potential collisions detected (will attempt to resolve)")
-        for t1, t2 in collision_pairs:
-            existing_marker = " (existing)" if t2.get('is_existing') else ""
-            print(f"    {t1['layer']} net{t1['net_id']}: {t1['start']}->{t1['end']}")
-            print(f"    {t2['layer']} net{t2['net_id']}: {t2['start']}->{t2['end']}{existing_marker}")
-
-        # Try to resolve collisions by reassigning layers or using alternate channels
-        print(f"  Attempting to resolve collisions...")
-        # Build net_id -> net_name mapping for error reporting
-        net_id_to_name = {r.net_id: r.pad.net_name for r in routes if r.pad.net_name}
-        reassigned, failed_nets = resolve_collisions(routes, tracks, layers, track_width, clearance, diff_pair_gap,
-                                        existing_tracks, grid, channels, exit_margin, net_id_to_name, no_inner_top_layer)
-
-        if failed_nets:
-            print(f"\n  ERROR: Failed to route {len(failed_nets)} net(s):")
-            for net_name in failed_nets:
-                print(f"    - {net_name}")
-            print(f"  These nets have been removed from the output.\n")
-
-        if reassigned > 0:
-            # Recount collisions after resolution
-            new_collision_count, _ = detect_collisions(tracks, existing_tracks, min_spacing, max_pairs=0)
-            print(f"  After resolution: {new_collision_count} collisions remaining")
-            collisions_remaining = new_collision_count
-    else:
-        print(f"  Validated: No collisions")
-        collisions_remaining = 0
-
-    # Post-resolution layer rebalancing for even distribution
-    if collisions_remaining == 0 and len(layers) > 1:
-        rebalanced_count = rebalance_layers(routes, tracks, existing_tracks, layers, min_spacing)
-        if rebalanced_count > 0:
-            print(f"  Rebalanced {rebalanced_count} routes for even layer distribution")
-
-    # Stats by layer
-    layer_counts = defaultdict(int)
-    for route in routes:
-        layer_counts[route.layer] += 1
-    for layer, count in sorted(layer_counts.items()):
-        print(f"    {layer}: {count} routes")
-
-    # Via management: add vias where needed, remove unnecessary ones
-    vias_to_add, vias_to_remove = manage_vias(
-        routes, pcb_data, layers[0], via_size, via_drill, clearance
-    )
-
-    return tracks, vias_to_add, vias_to_remove, list(failed_nets)
+    tracks, vias_to_add, vias_to_remove, failed_nets, _routes = best_result
+    return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
 def main():
