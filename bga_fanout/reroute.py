@@ -610,8 +610,22 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                                                 and r.net_id != to_jog.net_id), None)
                                 if partner is None:
                                     continue
-                                partner_ch = get_farther_channel(partner, channels, grid)
-                                if partner_ch is None:
+                                # Keep the pair ADJACENT: shift the partner by the
+                                # SAME delta to_jog just moved, so both halves stay
+                                # one channel apart. Jogging the partner to its own
+                                # "farther channel" instead splays a vertical pair to
+                                # opposite sides (P right, N left), over-separating it
+                                # (e.g. 84.1/83.3 -> 84.9/82.5) so it can no longer
+                                # route as a tight pair.
+                                if to_jog.channel is None or partner.channel is None:
+                                    continue
+                                delta = farther_ch.position - to_jog.channel.position
+                                target_pos = partner.channel.position + delta
+                                same_orient = [c for c in channels
+                                               if c.orientation == partner.channel.orientation]
+                                partner_ch = min(same_orient,
+                                                 key=lambda c: abs(c.position - target_pos)) if same_orient else None
+                                if partner_ch is None or abs(partner_ch.position - target_pos) > 0.05:
                                     continue
                                 partner_result = try_jogged_route(
                                     partner, partner_ch, grid, exit_margin,
