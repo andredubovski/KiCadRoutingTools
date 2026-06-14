@@ -142,4 +142,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import os
+    try:
+        main()
+    except Exception:
+        import traceback
+        # write a clean traceback sidecar (swig noise floods stderr otherwise)
+        with open(sys.argv[3] + ".preperr", "w") as f:
+            traceback.print_exc(file=f)
+        raise
+    # pcbnew's GC segfaults during Python interpreter teardown (harmless, the
+    # board files are already saved) and pops a macOS crash report. Skip the
+    # buggy finalization entirely by exiting hard once our work is done.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

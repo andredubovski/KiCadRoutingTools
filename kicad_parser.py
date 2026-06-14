@@ -248,8 +248,11 @@ def extract_layers(content: str) -> BoardInfo:
     layers = {}
     copper_layers = []
 
-    # Find the layers section
-    layers_match = re.search(r'\(layers\s*((?:\([^)]+\)\s*)+)\)', content, re.DOTALL)
+    # Find the layers section. Capture lazily up to the block's closing paren on
+    # its own line, rather than requiring a run of paren-free (...) entries: layer
+    # user-names can contain parentheses (e.g. "In1(GND).Cu", "plate (unused)"),
+    # which truncated the old regex and made such boards parse as 0 copper layers.
+    layers_match = re.search(r'\(layers\b(.*?)\n[ \t]*\)', content, re.DOTALL)
     if layers_match:
         layers_text = layers_match.group(1)
         # Parse individual layer entries: (0 "F.Cu" signal)
