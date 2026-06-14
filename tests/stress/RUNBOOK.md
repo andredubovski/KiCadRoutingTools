@@ -41,6 +41,18 @@ non-interactively and record everything.
    rule, which boxes pads in and fails nets with "no rippable blockers". Route
    any non-Default-class nets separately with that class's values. A
    fine-pitch component's fanout NOTE still overrides locally for its nets.
+   CLEARANCE SOURCE (validated against the routed originals): use the Default
+   NETCLASS clearance, NOT the project `min_clearance` in the .kicad_pro — on
+   the downloaded boards the real routing is DRC-clean at the netclass clearance
+   (~0.2) and floods with violations at the larger min_clearance (~0.5), so
+   min_clearance is an edit-floor, not the copper-to-copper DRC rule. Use the
+   netclass clearance for BOTH routing and `check_drc --clearance`.
+   TRACK WIDTH (validated): the netclass `track_width` is a MINIMUM; real boards
+   route signals at/above it and widen power/high-current nets to many distinct
+   widths (e.g. 2-4mm power buses). Use the netclass track_width as the signal
+   baseline but widen power nets explicitly via `--power-nets`.
+   NOTE: qfn_fanout.py accepts only `--width`/`--extension` (NOT
+   `--clearance`/`--track-width`); pass the width there, clearance to route.py.
 3. Skip GND return vias / impedance / length matching unless the board
    obviously needs them (DDR memory). Keep `--add-gnd-vias` OFF to keep runs
    comparable. Skip schematic sync. Skip teardrops.
@@ -79,6 +91,13 @@ non-interactively and record everything.
 7. BASELINE: before routing, run check_drc.py on the unrouted input and record
    the violation count — real boards have pre-existing pad-to-pad proximity
    that is not the router's fault. Report post-route DRC as total AND delta.
+   GROUND-TRUTH BASELINE (do this too): also run `check_drc.py
+   ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb --clearance <netclass
+   Default clearance>` on the ORIGINAL human-routed board and record that count
+   as `drc.original_routed_violations`. That — not 0 — is the achievable floor
+   under our DRC model (the originals carry a few clearance-independent
+   hole-to-hole/pad violations: e.g. megadesk 1, piantor 6). Judge our routing's
+   DRC against the ORIGINAL's count at the same clearance, not against 0.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
    now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
@@ -103,6 +122,17 @@ non-interactively and record everything.
     - `check_drc.py <final> 2>&1 | tee drc.log` (default clearance; note flags)
     - `check_connected.py <final> 2>&1 | tee connectivity.log`
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
+11b. COMPARE-TO-ORIGINAL (always, final step): run
+    `python3 ~/Documents/kicad_stress_test/scripts/compare_to_original.py
+     --ours <final> --orig ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb
+     --json 2>&1 | tee compare.log`
+    It contrasts OUR routing with the human-routed original (vias, total copper
+    length, track-width strategy, layer balance, nets-with-copper) and prints
+    SUGGESTIONS for what to change in our routing/approach. Fold its
+    `JSON_COMPARISON` blob into the results JSON `comparison` field and copy its
+    suggestion lines verbatim into the `suggestions` field. The original is the
+    ground truth for a manufacturable board; treat large via/length/width/
+    layer-balance gaps as router-improvement findings, not just board facts.
 12. Budget: ~45 min wall-clock for the whole board, and a HARD 20-minute cap
     per command: if a single tool invocation passes 20 min — even with its log
     still growing — kill it, record the elapsed time + command as a runtime
@@ -140,9 +170,11 @@ non-interactively and record everything.
   },
   "diff_pair_routing": {"pairs_attempted": 0, "pairs_routed": 0, "polarity_swaps": 0},
   "planes": {"nets": [], "unconnected_pads": 0, "isolated_regions": 0, "repair_outcome": ""},
-  "drc": {"baseline_violations": 0, "final_violations": 0, "delta": 0, "by_type": {}},
+  "drc": {"baseline_violations": 0, "original_routed_violations": 0, "design_clearance": 0.0, "final_violations": 0, "delta": 0, "by_type": {}},
   "connectivity": {"fully_connected": false, "detail": ""},
   "orphan_stubs": 0,
+  "comparison": {"design_clearance": 0.0, "ours": {}, "original": {}},
+  "suggestions": [],
   "wall_clock_total_s": 0,
   "issues": ["crash/hang/bogus-output/parser findings, each with 1-3 sentence detail"]
 }
@@ -150,5 +182,7 @@ non-interactively and record everything.
 
 ## Final report (your last message)
 
-Return a compact summary: completion %, DRC delta, connectivity verdict,
-plus the `issues` list verbatim. No file dumps.
+Return a compact summary: completion %, DRC delta (vs the ORIGINAL routed
+board's count at the design clearance), connectivity verdict, the
+compare-to-original highlights (vias/length/width/layer-balance vs original),
+plus the `issues` and `suggestions` lists verbatim. No file dumps.

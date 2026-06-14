@@ -43,8 +43,70 @@ the runbook).
 
 Operational limits (learned the hard way):
 
-- Wrap every tool invocation in `run_limited.sh` (kills the job at ~1 GB RSS).
-- Run at most 2 boards concurrently.
+- Wrap every tool invocation in `run_limited.sh` (kills the job at ~4 GB RSS,
+  overridable with `LIMIT_KB`).
+- Run at most 2 boards concurrently (on an 8 GB machine, often only 1 heavy
+  4-layer board + 1 small 2-layer board).
+- Background subagents are killed after ~600 s with no streamed output, so run
+  any command expected to exceed ~5 min in the background and poll it in
+  short, separate steps rather than one long blocking call.
+
+## Routing-constraint validation (what params to route with)
+
+`measure_routing.py <routed.kicad_pcb>...` reports the geometry actually used
+in a board's real (downloaded) routing — track widths, via sizes, per-class
+usage — next to its net-class definitions. Validated findings:
+
+- **Clearance** comes from the Default **net class** (`list_nets --design-rules`),
+  NOT the project `.kicad_pro` `min_clearance`. The downloaded boards are
+  DRC-clean at the netclass clearance (~0.2 mm) and flood with violations at the
+  larger `min_clearance` (~0.5 mm) — the latter is an editor floor, not the
+  copper-to-copper DRC rule. Use the netclass clearance for routing AND
+  `check_drc --clearance`.
+- **Track width**: the netclass `track_width` is a *minimum*. Real boards route
+  signals at/above it and widen power/high-current nets to several distinct
+  widths (2–4 mm power buses are common). One uniform `--track-width` under-builds
+  power nets; widen them explicitly via `--power-nets`.
+- **Net classes**: `list_nets --design-rules` reads all classes (from the
+  `.kicad_pro` for KiCad 8+, or `(net_class)` blocks in the `.kicad_pcb` for
+  KiCad 6/7) plus per-net assignments. On the test corpus, most boards have only
+  Default (extra classes often have zero nets assigned). NOTE: `--design-rules`
+  needs the sibling `.kicad_pro` next to the `.kicad_pcb`, or it silently reports
+  "no net classes" and the wrong generic default gets used.
+- **DRC baseline** for judging our routing is the **original routed board's**
+  violation count at the design clearance (a few clearance-independent
+  hole/pad violations remain, e.g. megadesk 1, piantor 6), not 0.
+
+## Compare-to-original (final step of every board)
+
+`compare_to_original.py --ours <our_final.kicad_pcb> --orig <boards/<board>.kicad_pcb>
+--json` contrasts our routing with the human-routed original (via count, total
+copper length, distinct track widths, layer balance, nets-with-copper) and emits
+SUGGESTIONS for what to change in our routing or approach. The original is ground
+truth for a manufacturable board; large gaps are router-improvement findings.
+Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
+`suggestions` fields.
+
+## Set 2 corpus
+
+A second corpus of 15 newer KiCad boards (+ a 6-layer replacement for the
+dropped `spirit_cm5`) lives under `$STRESS_DIR/sources/github_set2/` with a
+`manifest.json`. It adds FPGA/BGA boards (ulx3s, butterstick, cynthion, schoko,
+CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards (usb-sniffer,
+free-dap), QFN/QFP carriers (tinytapeout, caravel, system76, nitrokey), and
+simple keyboards (crkbd, sofle, lily58). Prepare it with:
+
+```bash
+$KIPY ... # via the driver, which loads each board once:
+bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
+                     #    boards_unrouted_set2/ (stripped, to route)
+                     #    lpddr4_testbed replacement -> boards/ + boards_unrouted/
+```
+
+`prep_set2.py <src> <routed_dst> <stripped_dst>` (KiCad Python) normalizes the
+routed reference and strips routing in a single load. Set-2 results are kept
+separate in `$STRESS_DIR/results_set2/`. ulx3s has no net classes anywhere, so
+derive its params by `measure_routing.py` on its routed reference.
 
 ## Parser workarounds baked into strip_routing.py
 
