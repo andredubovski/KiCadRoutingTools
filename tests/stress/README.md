@@ -51,13 +51,15 @@ Operational limits (learned the hard way):
 - Background subagents are killed after ~600 s with no streamed output, so run
   any command expected to exceed ~5 min in the background and poll it in
   short, separate steps rather than one long blocking call.
-- When orchestrating several boards in parallel, poll ~every 5 min and read the
-  signals correctly: DONE = results JSON exists (`ls results_<set>/*.json`);
-  ALIVE = recent file mtimes in `runs_<set>/<board>/`. `pgrep route.py` is a
-  noisy hint only (it catches shell wrappers/`sleep`/itself — ~30 one instant, 0
-  the next), so `pgrep=0` does NOT mean dead. Relaunch a board only if it has no
-  result AND no new run-dir files for ~15+ min. Notifications can drop, so the
-  poll (not the notification stream) is the source of truth.
+- When orchestrating several boards in parallel, poll ~every 5 min. DONE =
+  results JSON exists (`ls results_<set>/*.json`). ALIVE = `pgrep -f
+  "runs_<set>/<board>"` (a process working in that board's run dir). Avoid the
+  two naive checks that mislead: pgrep on tool names is noisy AND case-sensitive
+  (KiCad's interpreter is `Python`, wrapped by run_limited.sh — `python3.*route.py`
+  matches 0 while routing), and run-dir mtimes go quiet during a long route. So
+  `pgrep route.py = 0` does NOT mean dead. Relaunch only if no result AND
+  `pgrep -f runs_<set>/<board>` empty AND run dir idle ~15+ min. Notifications
+  can drop, so the poll is the source of truth.
 
 ## Routing-constraint validation (what params to route with)
 

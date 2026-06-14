@@ -8,25 +8,26 @@ non-interactively and record everything.
 
 If you are the PARENT running multiple board agents in parallel, do NOT rely
 solely on completion notifications — they can be dropped or arrive
-stale/duplicated. Poll about every 5 minutes, and read the signals correctly:
+stale/duplicated. Poll about every 5 minutes. BOTH naive liveness signals have
+blind spots, so use the run-dir-path check below:
 
-- DONE (authoritative): the board's results JSON exists —
-  `ls results_<set>/*.json`. Drive refills and "is the set complete?" off this
-  set, NOT the notification stream.
-- ALIVE / PROGRESSING (authoritative): the board's run dir has RECENT file
-  activity — `ls -lt runs_<set>/<board>/ | head` (look at mtimes). An agent
-  spends most of its wall-clock thinking or in quick steps (list_nets, compare,
-  JSON write), so at any instant NO route process may be running even though the
-  agent is perfectly healthy.
-- `pgrep -fl "route.py|bga_fanout|route_planes|route_diff|qfn_fanout"` is only a
-  NOISY hint, never a board count: a single snapshot sweeps up each agent's shell
-  wrappers, `sleep` poll-loops, and pgrep itself, so it can read ~30 one moment
-  and 0 the next. NEVER treat `pgrep=0` as "agent dead" or its number as "N
-  boards running."
+- pgrep on TOOL NAMES (`route.py|bga_fanout|...`) is noisy AND can MISS: a
+  snapshot sweeps up shell wrappers, `sleep` poll-loops, and pgrep itself (reads
+  ~30 one moment, 0 the next), and it is case-sensitive — KiCad's bundled
+  interpreter is `Python` (capital P), and run_limited.sh wraps the job, so a
+  literal `python3.*route.py` match returns 0 even while routing is active.
+- run-dir FILE MTIMES go quiet DURING a single long route command (route.py
+  writes its log only on completion), so "no new files for a few min" alone does
+  NOT mean stalled.
 
-A board is LOST (relaunch it) only if it has no results JSON AND its run dir has
-had no new files for ~15+ min (well past the 20-min/command cap) AND no live
-process. Otherwise it is still working — leave it alone.
+Robust signals:
+- DONE (authoritative): results JSON exists — `ls results_<set>/*.json`. Drive
+  refills and "is the set complete?" off this set, NOT the notification stream.
+- ALIVE (authoritative): a process is working in the board's run dir —
+  `pgrep -f "runs_<set>/<board>"` (matches route.py / run_limited.sh / the poll
+  loop regardless of interpreter name or which step it's on).
+- LOST (relaunch): no results JSON AND `pgrep -f "runs_<set>/<board>"` empty AND
+  run dir idle ~15+ min (well past the 20-min/command cap).
 
 ## Paths
 
