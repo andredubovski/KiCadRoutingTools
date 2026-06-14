@@ -1005,6 +1005,99 @@ def _generate_multinet_layer_zones(
         if best_result[0] > 0:
             print(f"  Best result: {best_result[0]} failed edge(s)")
 
+    # #107: connect each net's through-hole pads to its plane region. A TH pad ties
+    # into the plane on every layer, but the Voronoi seeds are only vias + routed-MST
+    # samples, and a Voronoi cell is owned by whichever net has the nearest seed. A TH
+    # pad with no nearby same-net seed therefore lands inside ANOTHER net's cell: the
+    # local plane copper is the wrong net and the pad is silently disconnected as an
+    # island. For each such ORPHANED pad we route a corridor on the plane layer to the
+    # nearest same-net seed (avoiding other nets, exactly like the MST routing) and add
+    # the corridor's samples as seeds, so the pad's region becomes contiguous with the
+    # net's main region. (We deliberately do NOT add TH pads to the via MST: that
+    # reorganizes the via-to-via topology and badly regresses large nets like GND.)
+    if augmented_vias_by_net is not None:
+        # Snapshot all seeds for orphan detection (Voronoi owner == nearest seed). Also
+        # snapshot each net's own anchor points (its main region) as corridor targets.
+        all_seed_pts = []  # (x, y, net_id)
+        net_anchor_pts: Dict[int, List[Tuple[float, float]]] = {}
+        for snid, slist in augmented_vias_by_net.items():
+            net_anchor_pts[snid] = list(slist)
+            for sx, sy in slist:
+                all_seed_pts.append((sx, sy, snid))
+
+        def _nearest_seed_net(px: float, py: float) -> Optional[int]:
+            best_net, best_d = None, None
+            for sx, sy, snid in all_seed_pts:
+                d = (sx - px) ** 2 + (sy - py) ** 2
+                if best_d is None or d < best_d:
+                    best_d, best_net = d, snid
+            return best_net
+
+        corridor_router = GridRouter(
+            via_cost=config.via_cost_units(),
+            h_weight=config.heuristic_weight,
+            turn_cost=config.turn_cost,
+            via_proximity_cost=0,
+            layer_costs=config.get_layer_costs(),
+            proximity_heuristic_cost=config.get_proximity_heuristic_cost()
+        )
+
+        th_connected = 0
+        th_fallback = 0
+        fallback_pad_refs: List[str] = []
+        for nm_on_layer in nets_on_layer:
+            nid = net_name_to_id.get(nm_on_layer)
+            if nid is None:
+                continue
+            seeds = augmented_vias_by_net.setdefault(nid, [])
+            seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
+            anchors = net_anchor_pts.get(nid, [])
+            for pad in pcb_data.pads_by_net.get(nid, []):
+                if not (pad.drill and pad.drill > 0):
+                    continue
+                px, py = pad.global_x, pad.global_y
+                # Already inside its own net's cell? Then the plane already covers it.
+                if _nearest_seed_net(px, py) == nid:
+                    continue
+                # Orphaned: route a corridor to the nearest same-net anchor (main region).
+                route_path = None
+                if anchors:
+                    tx, ty = min(anchors, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
+                    other_nets_vias = {
+                        onid: ov for onid, ov in augmented_vias_by_net.items() if onid != nid
+                    }
+                    route_path = route_plane_connection(
+                        via_a=(px, py), via_b=(tx, ty), plane_layer=layer, net_id=nid,
+                        other_nets_vias=other_nets_vias, config=config, pcb_data=pcb_data,
+                        proximity_radius=plane_proximity_radius, proximity_cost=plane_proximity_cost,
+                        track_via_clearance=plane_track_via_clearance,
+                        max_iterations=plane_max_iterations, verbose=verbose,
+                        previous_routes=None, base_obstacles=None, router=corridor_router
+                    )
+                if route_path:
+                    connection_routes.append((nid, layer, route_path))
+                    for sx, sy in sample_route_for_voronoi(route_path, sample_interval=voronoi_seed_interval):
+                        k = (round(sx, 3), round(sy, 3))
+                        if k not in seen:
+                            seeds.append((sx, sy))
+                            seen.add(k)
+                    th_connected += 1
+                else:
+                    # Corridor routing failed: at least point-seed the pad so its own
+                    # immediate cell is its net (better than landing in another net).
+                    k = (round(px, 3), round(py, 3))
+                    if k not in seen:
+                        seeds.append((px, py))
+                        seen.add(k)
+                    th_fallback += 1
+                    fallback_pad_refs.append(f"{pad.component_ref}.{pad.pad_number}")
+        if th_connected or th_fallback:
+            msg = f"  #107: routed corridors for {th_connected} orphaned TH pad(s)"
+            if th_fallback:
+                msg += (f"; {th_fallback} could not be reached on the plane layer "
+                        f"and fell back to point-seed ({', '.join(fallback_pad_refs)})")
+            print(msg)
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
     print(f"  Computing final Voronoi zones with {total_seeds} seed points")
