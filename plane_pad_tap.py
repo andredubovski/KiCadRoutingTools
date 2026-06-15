@@ -38,6 +38,13 @@ FINE_TAP_CLEARANCE = 0.15         # mm
 FINE_TAP_TRACK_WIDTH = 0.15       # mm (capped by pad min dimension)
 FINE_TAP_SEARCH_RADIUS = 3.0      # mm - via search radius for the fine retry
 
+# Smaller (JLC "advanced", small extra-cost) working via for the fine-pitch
+# escalation. The 0.45mm-diameter standard via can't sit inside a sub-0.45mm
+# BGA ball / fine-pitch plane pad with clearance, so via-in-pad fails (issue
+# #99). Only used in the last-resort fine escalation, never the default tap.
+FINE_TAP_VIA_DIAMETER = 0.30      # mm (outer copper)
+FINE_TAP_VIA_DRILL = 0.15         # mm (drill)
+
 # Window half-size margin beyond the via search radius
 _WINDOW_MARGIN = 3.0              # mm
 _ITEM_MARGIN = 2.0                # mm - include items slightly outside the window
@@ -68,8 +75,11 @@ def pad_is_fine_pitch(pad: Pad, pcb_data: PCBData) -> bool:
 def make_fine_tap_config(config: GridRouteConfig, pad: Pad) -> GridRouteConfig:
     """Build the scoped fine-parameter config for one pad's tap retry.
 
-    grid 0.05 / clearance 0.15 / track = min(pad min dimension, 0.15);
-    never coarser/wider than what the caller already uses.
+    grid 0.05 / clearance 0.15 / track = min(pad min dimension, 0.15) /
+    via = the smaller advanced via (0.30/0.15); never coarser/wider/larger than
+    what the caller already uses. The smaller via lets via-in-pad land inside
+    fine-pitch plane pads the 0.45mm standard via can't fit (issue #99); it also
+    shrinks the obstacle footprint so the spiral finds a spot.
     """
     fine_track = min(min(pad.size_x, pad.size_y),
                      FINE_TAP_TRACK_WIDTH, config.track_width)
@@ -78,6 +88,8 @@ def make_fine_tap_config(config: GridRouteConfig, pad: Pad) -> GridRouteConfig:
         grid_step=min(config.grid_step, FINE_TAP_GRID_STEP),
         clearance=min(config.clearance, FINE_TAP_CLEARANCE),
         track_width=fine_track,
+        via_size=min(config.via_size, FINE_TAP_VIA_DIAMETER),
+        via_drill=min(config.via_drill, FINE_TAP_VIA_DRILL),
     )
 
 
@@ -277,9 +289,12 @@ def try_tap_pad(
         return TapResult(success=False)
 
     segments: List[Dict] = []
-    at_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                 abs(via_pos[1] - pad.global_y) < 0.001)
-    if pad_layer and not at_center:
+    # A via landing inside the pad's own copper connects it directly (via-in-pad)
+    # -- no trace needed. find_via_position may return an off-centre but still
+    # in-pad position when the exact centre is blocked (issue #99).
+    in_pad = (abs(via_pos[0] - pad.global_x) <= pad.size_x / 2 + 1e-6 and
+              abs(via_pos[1] - pad.global_y) <= pad.size_y / 2 + 1e-6)
+    if pad_layer and not in_pad:
         segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
                                     routing_obs, config, verbose=False)
         if segments is None:
@@ -333,7 +348,7 @@ def tap_pad_with_escalation(
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, fine_config,
             min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
-            via_size, via_drill, same_net_pad_clearance,
+            fine_config.via_size, fine_config.via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
             routing_clearance_cushion=True)
         if result.success:

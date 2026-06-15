@@ -196,6 +196,25 @@ def find_via_position(
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
         return (pad.global_x, pad.global_y)
 
+    # Then try other positions WITHIN the pad's own copper (still via-in-pad, no
+    # trace needed): the exact centre can be blocked by nearby other-net copper
+    # while another spot inside the pad is clear. Recovers boxed-in plane pads
+    # (BGA balls, decoupling caps) with no room to tap externally, especially
+    # with the smaller fine-pitch via (issue #99). Self-gating: when via-in-pad
+    # is disabled the whole pad area is blocked in the obstacle map.
+    pad_half_w_grid = max(1, coord.to_grid_dist(pad.size_x / 2))
+    pad_half_h_grid = max(1, coord.to_grid_dist(pad.size_y / 2))
+    for r in range(1, max(pad_half_w_grid, pad_half_h_grid) + 1):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if abs(dx) != r and abs(dy) != r:
+                    continue  # ring edge only
+                if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
+                    continue  # outside pad boundary
+                gx, gy = pad_gx + dx, pad_gy + dy
+                if not obstacles.is_via_blocked(gx, gy):
+                    return coord.to_float(gx, gy)
+
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
 
