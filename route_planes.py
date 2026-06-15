@@ -1405,38 +1405,59 @@ def _write_output_and_reroute(
                 )
                 print(f"\nRe-routing complete: {routed} routed, {failed} failed in {route_time:.2f}s")
 
-                # Issue #88.2: never silently drop a ripped net. After the
-                # reroute, geometrically verify each ripped net in the written
-                # output and WARN by name about any that are still broken, so
-                # the caller knows exactly which nets need attention.
-                if failed:
-                    try:
-                        from check_connected import check_net_connectivity
-                        out_pcb = parse_kicad_pcb(output_file)
-                        rsegs: Dict[int, List] = {}
-                        for s in out_pcb.segments:
-                            rsegs.setdefault(s.net_id, []).append(s)
-                        rvias: Dict[int, List] = {}
-                        for v in out_pcb.vias:
-                            rvias.setdefault(v.net_id, []).append(v)
-                        rzones: Dict[int, List] = {}
-                        for z in out_pcb.zones:
-                            rzones.setdefault(z.net_id, []).append(z)
-                        still_broken = []
-                        for rid in all_ripped_net_ids:
-                            res = check_net_connectivity(
-                                rid, rsegs.get(rid, []), rvias.get(rid, []),
-                                out_pcb.pads_by_net.get(rid, []), rzones.get(rid, []))
-                            if not res.get('connected', False):
-                                net = pcb_data.nets.get(rid)
-                                still_broken.append(net.name if net else f"net_{rid}")
-                        if still_broken:
-                            print(f"WARNING: {len(still_broken)} ripped net(s) failed to "
-                                  f"re-route and remain disconnected (NOT silently dropped):")
-                            print(f"  {', '.join(still_broken)}")
-                    except Exception:
-                        # Fall back to the generic failed-count message above.
-                        pass
+                # Issue #88: a ripped net that fails to re-route must NEVER be
+                # left disconnected -- that is strictly worse than the input
+                # board. Geometrically verify each ripped net in the written
+                # output; for any that is still broken, RESTORE its original
+                # trace (and drop the plane via(s) that would short against it)
+                # so the net returns to exactly its pre-rip connected state.
+                try:
+                    from check_connected import check_net_connectivity
+                    from plane_io import restore_failed_reroute_nets
+                    out_pcb = parse_kicad_pcb(output_file)
+                    rsegs: Dict[int, List] = {}
+                    for s in out_pcb.segments:
+                        rsegs.setdefault(s.net_id, []).append(s)
+                    rvias: Dict[int, List] = {}
+                    for v in out_pcb.vias:
+                        rvias.setdefault(v.net_id, []).append(v)
+                    rzones: Dict[int, List] = {}
+                    for z in out_pcb.zones:
+                        rzones.setdefault(z.net_id, []).append(z)
+                    still_broken: List[int] = []
+                    for rid in all_ripped_net_ids:
+                        res = check_net_connectivity(
+                            rid, rsegs.get(rid, []), rvias.get(rid, []),
+                            out_pcb.pads_by_net.get(rid, []), rzones.get(rid, []))
+                        if not res.get('connected', False):
+                            still_broken.append(rid)
+                    if still_broken:
+                        restored_ids, vias_removed = restore_failed_reroute_nets(
+                            input_file=input_file,
+                            output_file=output_file,
+                            broken_net_ids=still_broken,
+                            plane_vias=all_new_vias,
+                            net_id_to_name=kicad_v10_names,
+                            via_size=via_size,
+                            clearance=clearance,
+                        )
+                        if restored_ids:
+                            names = [pcb_data.nets[r].name if r in pcb_data.nets
+                                     else f"net_{r}" for r in restored_ids]
+                            print(f"Issue #88: {len(restored_ids)} ripped net(s) failed to "
+                                  f"re-route; RESTORED their original trace (removed "
+                                  f"{vias_removed} colliding plane via(s)) rather than leave "
+                                  f"them disconnected:")
+                            print(f"  {', '.join(names)}")
+                        unrestorable = [r for r in still_broken if r not in restored_ids]
+                        if unrestorable:
+                            names = [pcb_data.nets[r].name if r in pcb_data.nets
+                                     else f"net_{r}" for r in unrestorable]
+                            print(f"WARNING: {len(unrestorable)} ripped net(s) remain "
+                                  f"disconnected (no original trace to restore): "
+                                  f"{', '.join(names)}")
+                except Exception as e:
+                    print(f"  (post-reroute restore step skipped: {e})")
             finally:
                 sys.setrecursionlimit(old_recursion_limit)
         else:
