@@ -90,7 +90,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    from your working dir. Tee every command's output to a log file in your run dir.
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
-   `bash ~/Documents/kicad_stress_test/scripts/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
+   `bash /Users/andy/Documents/KiCadRoutingTools/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
    Up to 4 boards run concurrently — in practice most jobs sit well under the
    4 GB cap most of the time, so 4-in-flight is fine on an 8 GB machine; the
@@ -137,7 +137,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    FIX VERIFICATION (issues #79/#80, fixed): fanout tools now write name-style
    net refs on KiCad 10 boards and the parser merges mixed styles. After each
    fanout step, still run
-   `python3 ~/Documents/kicad_stress_test/scripts/fix_mixed_net_refs.py <fanout_output.kicad_pcb>`
+   `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/fix_mixed_net_refs.py <fanout_output.kicad_pcb>`
    — it should report "rewrote 0 numeric net refs". If it reports >0, that is
    a REGRESSION: record it prominently in issues with the count.
    Heed the fanout tool's fine-pitch NOTE (issue #97 warning): use the
@@ -203,7 +203,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
     - `check_connected.py <final> 2>&1 | tee connectivity.log`
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run
-    `python3 ~/Documents/kicad_stress_test/scripts/compare_to_original.py
+    `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/compare_to_original.py
      --ours <final> --orig ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb
      --json 2>&1 | tee compare.log`
     It contrasts OUR routing with the human-routed original (vias, total copper

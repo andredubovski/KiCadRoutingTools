@@ -32,7 +32,7 @@ Paths for THIS board:
 - Results JSON you MUST write (RUNBOOK schema): $RESULT
 
 Rules that matter most:
-- Prefix EVERY routing/fanout/plane/check command with: bash $ROOT/scripts/run_limited.sh
+- Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
 - Run tools as: python3 -X utf8 $REPO/<tool>.py ...
 - Use the flags that 'list_nets.py <board> --design-rules' prints (working via,
   manufacturing-floor clearance, DRC floor). Grade DRC at that floor.
