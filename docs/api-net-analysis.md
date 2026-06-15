@@ -91,6 +91,12 @@ Nets only pair **within the same suffix style**: `CLK+` will never pair with
 an unrelated `CLK_N`. Only complete pairs (both sides found) are returned;
 each value is a [`DiffPairNet`](api-routing-config.md#diffpairnet).
 
+A pair is selected when **either** half matches the patterns, and the pattern
+is matched against the full net name, its leaf (last `/`-separated segment),
+the pair base name, and the base name's leaf. So a one-sided glob like `*_P`,
+or an explicit base name like `/DVI_CK`, selects the **whole** pair — even for
+hierarchical (slash-separated) net names such as `/FPGA-DDR3L/CK0_P`.
+
 ```python
 from kicad_parser import parse_kicad_pcb
 from net_queries import find_differential_pairs

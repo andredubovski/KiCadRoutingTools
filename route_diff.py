@@ -86,7 +86,7 @@ from reroute_loop import run_reroute_loop
 from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
-    setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
+    setup_bga_exclusion_zones, filter_already_routed,
     run_length_matching, sync_pcb_data_segments, get_common_config_kwargs
 )
 import re
@@ -301,8 +301,18 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     print(f"Found {len(diff_pairs)} differential pair(s)")
 
-    # Find net IDs and filter already-routed nets
-    net_ids = resolve_net_ids(pcb_data, net_names)
+    # Build the net-id list from the diff pairs we found (both halves), so an
+    # explicit base name ('/DVI_CK') or a one-sided glob ('*_P') still routes
+    # both halves -- resolve_net_ids only matches exact full net names and would
+    # drop the unmatched sibling (or a base name that names no net). (issue #120)
+    net_ids = []
+    seen_net_ids = set()
+    for pair in diff_pairs.values():
+        for nid, nname in ((pair.p_net_id, pair.p_net_name),
+                           (pair.n_net_id, pair.n_net_name)):
+            if nid is not None and nid not in seen_net_ids:
+                net_ids.append((nname, nid))
+                seen_net_ids.add(nid)
     if not net_ids:
         print("No valid nets to route!")
         if return_results:

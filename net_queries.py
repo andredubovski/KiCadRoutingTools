@@ -354,9 +354,30 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     return None
 
 
+def matches_diff_pair_patterns(net_name: str, base_name: str, patterns: List[str]) -> bool:
+    """
+    Return True if any glob pattern selects this diff-pair half.
+
+    Matches the pattern against the full net name, its leaf (the last
+    '/'-separated segment), the diff-pair base name, and the base name's leaf.
+    This lets a glob that only catches one half (e.g. '*_P') or an explicit
+    base name (e.g. '/DVI_CK') select the whole pair, even for hierarchical
+    (slash-separated) net names where '*_P' would otherwise miss the '_N'
+    sibling and a leaf/base name would never equal the full path. (issue #120)
+    """
+    candidates = (net_name, net_name.rsplit('/', 1)[-1],
+                  base_name, base_name.rsplit('/', 1)[-1])
+    return any(fnmatch.fnmatch(candidate, pattern)
+               for pattern in patterns for candidate in candidates)
+
+
 def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str, DiffPairNet]:
     """
     Find all differential pairs in the PCB matching the given glob patterns.
+
+    A pair is selected when *either* half matches the patterns (see
+    matches_diff_pair_patterns), so '*_P', '*_N', or an explicit base name all
+    pull in the complete pair.
 
     Args:
         pcb_data: PCB data with net information
@@ -368,16 +389,13 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
     # Key by (base_name, suffix style) so nets only pair within the same naming
     # convention (e.g. /CLK+ pairs with /CLK-, never with an unrelated /CLK_N)
     pairs: Dict[Tuple[str, str], DiffPairNet] = {}
+    matched_keys: Set[Tuple[str, str]] = set()
 
-    # Collect all net names from pcb_data
+    # Collect all diff-pair halves, regardless of pattern, so a pattern that
+    # only catches one half can still pull in its sibling below.
     for net_id, net in pcb_data.nets.items():
         net_name = net.name
         if not net_name or net_id == 0:
-            continue
-
-        # Check if this net matches any diff pair pattern
-        matched = any(fnmatch.fnmatch(net_name, pattern) for pattern in patterns)
-        if not matched:
             continue
 
         # Try to extract diff pair info
@@ -398,12 +416,19 @@ def find_differential_pairs(pcb_data: PCBData, patterns: List[str]) -> Dict[str,
             pairs[key].n_net_id = net_id
             pairs[key].n_net_name = net_name
 
-    # Filter to only complete pairs, keyed by base name (disambiguate with the
-    # suffix style in the unlikely case two conventions share a base name)
+        if matches_diff_pair_patterns(net_name, base_name, patterns):
+            matched_keys.add(key)
+
+    # Filter to only complete pairs whose key was matched, keyed by base name
+    # (disambiguate with the suffix style in the unlikely case two conventions
+    # share a base name)
     complete_pairs: Dict[str, DiffPairNet] = {}
-    for (base_name, style), pair in pairs.items():
+    for key, pair in pairs.items():
+        if key not in matched_keys:
+            continue
         if not pair.is_complete:
             continue
+        base_name, style = key
         name = base_name if base_name not in complete_pairs else f"{base_name}({style})"
         complete_pairs[name] = pair
 
