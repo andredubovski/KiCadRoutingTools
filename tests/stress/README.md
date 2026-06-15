@@ -67,25 +67,36 @@ Operational limits (learned the hard way):
 in a board's real (downloaded) routing — track widths, via sizes, per-class
 usage — next to its net-class definitions. Validated findings:
 
-- **Clearance** comes from the Default **net class** (`list_nets --design-rules`),
-  NOT the project `.kicad_pro` `min_clearance`. The downloaded boards are
-  DRC-clean at the netclass clearance (~0.2 mm) and flood with violations at the
-  larger `min_clearance` (~0.5 mm) — the latter is an editor floor, not the
-  copper-to-copper DRC rule. Use the netclass clearance for routing AND
-  `check_drc --clearance`.
+- **Two tiers of rules** (`list_nets --design-rules`, issues #111/#115): KiCad
+  net-class `track_width`/`via_diameter` are *drawing defaults*, NOT DRC minima —
+  only the Board Constraints (`design_settings.rules`) are DRC-enforced. The tool
+  reads both and combines them with the JLCPCB fab minimum (layer-aware) into a
+  **manufacturing floor**.
+- **Via**: emit the small **working** via the floor prints
+  (`--via-size`/`--via-drill` = `max(min_via_diameter, fab min)`), NOT the
+  net-class `via_diameter` — that nominal is a max-like default, too big for
+  fine-pitch escape (butterstick 0.8 vs the original's 0.45; lily58/crkbd QFN
+  escapes need ~0.45–0.6, unroutable at 0.8).
+- **Clearance**: route at the net-class clearance; a fine-pitch escape may drop
+  toward the manufacturing floor (never below). Route non-Default-class nets
+  separately with their own clearance.
 - **Track width**: the netclass `track_width` is a *minimum*. Real boards route
   signals at/above it and widen power/high-current nets to several distinct
   widths (2–4 mm power buses are common). One uniform `--track-width` under-builds
   power nets; widen them explicitly via `--power-nets`.
-- **Net classes**: `list_nets --design-rules` reads all classes (from the
-  `.kicad_pro` for KiCad 8+, or `(net_class)` blocks in the `.kicad_pcb` for
-  KiCad 6/7) plus per-net assignments. On the test corpus, most boards have only
-  Default (extra classes often have zero nets assigned). NOTE: `--design-rules`
-  needs the sibling `.kicad_pro` next to the `.kicad_pcb`, or it silently reports
-  "no net classes" and the wrong generic default gets used.
+- **Net classes**: `list_nets --design-rules` reads all classes plus the Board
+  Constraints (from the `.kicad_pro` for KiCad 8+, or `(net_class)` blocks for
+  KiCad 6/7), and falls back to the JLC fab floor for the board's layer count when
+  neither is present. On the test corpus most boards have only Default.
+- **DRC at the manufacturing floor**, NOT the net-class clearance and NOT a
+  hardcoded 0.25: `check_drc --clearance <floor> --hole-to-hole-clearance <floor>`.
+  Escapes are routed down to the floor, so checking there stops them reading as
+  violations (the dominant set-1/set-2 DRC source) while still flagging anything
+  genuinely sub-manufacturable. `min_clearance` is deliberately not used as the
+  floor — it is an unreliable edit-floor (often 0, sometimes a stale large value).
 - **DRC baseline** for judging our routing is the **original routed board's**
-  violation count at the design clearance (a few clearance-independent
-  hole/pad violations remain, e.g. megadesk 1, piantor 6), not 0.
+  violation count *at the same floor* (a few clearance-independent hole/pad
+  violations remain, e.g. megadesk 1, piantor 6), not 0.
 
 ## Compare-to-original (final step of every board)
 

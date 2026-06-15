@@ -57,9 +57,21 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
 # Keep diff pairs out of a keepout polygon drawn on a User layer (issue #27)
 python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --keepout --keepout-layer User.2
+
+# 4+ layer board: pass EVERY copper layer (issue #116)
+python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+    --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
 Nets with _P/_N, P/N, or +/- suffixes will be paired automatically.
+
+**Escape layers (4+ layer boards):** `--layers` defaults to `F.Cu B.Cu` only.
+When a pair was escaped onto an INNER layer by `bga_fanout.py`, `route_diff.py`
+can only launch from those escaped stubs if that inner layer is in `--layers` —
+omitting it strands the inner-layer stubs and silently drops those pairs
+(butterstick: 8/40 pairs without, 22/40 with the full layer list). Pass the same
+copper-layer list you gave `bga_fanout.py`; drop `--layers` only for true 2-layer
+boards (issue #116).
 
 Differential pairs respect user-drawn keepout polygons (`--keepout`, default layer
 `User.2`) and KiCad native keep-out rule areas (`(zone … (keepout …))`, honoured
