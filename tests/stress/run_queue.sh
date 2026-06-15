@@ -45,7 +45,11 @@ while true; do
   done
   log "DONE=$done_n/$total RUNNING=$run_n [$run_l ] TODO=$(echo $todo | wc -w | tr -d ' ')"
 
-  if [ "$done_n" -ge "$total" ]; then log "ALL $total BOARDS DONE"; break; fi
+  if [ "$done_n" -ge "$total" ]; then
+    log "ALL $total BOARDS DONE"
+    rm -f "$STATUS"   # transient heartbeat; results JSONs + FINDINGS.md are the record
+    break
+  fi
 
   free=$(( CONC - run_n ))
   for item in $todo; do
