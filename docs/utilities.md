@@ -287,14 +287,27 @@ explicitly:
 python list_nets.py board.kicad_pcb --design-rules
 ```
 
-It reads net classes from the sibling `.kicad_pro` (KiCad 8+, `net_settings.classes`)
-or from `(net_class …)` blocks in the `.kicad_pcb` (KiCad 6/7), and prints each
-class's `clearance`, `track_width`, `via_diameter`, `via_drill`,
-`diff_pair_gap`, `diff_pair_width`, plus ready-to-paste flags from the Default
-class — e.g. `--clearance 0.2 --track-width 0.2 --via-size 0.6 --via-drill 0.3`
-for `route.py`/`qfn_fanout.py`/`bga_fanout.py`/`route_planes.py`, and
-`--track-width …  --gap …` for `route_diff.py`. Nets assigned to a non-Default
-class are reported so they can be routed separately with that class's values.
+It reads two tiers of rules and combines them with the JLCPCB fab floor:
+
+- **Net-class values** from the sibling `.kicad_pro` (KiCad 8+,
+  `net_settings.classes`) or `(net_class …)` blocks (KiCad 6/7): `clearance`,
+  `track_width`, `via_diameter`, `via_drill`, `diff_pair_gap`, `diff_pair_width`.
+  These are KiCad *drawing defaults*; only `clearance` is a DRC minimum.
+- **Board Constraints** from `board.design_settings.rules`: `min_clearance`,
+  `min_track_width`, `min_via_diameter`, `min_hole_to_hole`,
+  `min_through_hole_diameter`. **These are what DRC actually enforces** for the
+  geometric rules — so a board can use a via/track *smaller* than the net-class
+  nominal and still pass DRC (issues #111/#115).
+
+From these it prints a **manufacturing floor** (the Constraint or the JLC fab
+minimum for the board's layer count, whichever is larger) and ready-to-paste
+flags: routing uses the net-class `--clearance`/`--track-width` but the small
+**working** `--via-size`/`--via-drill` from the floor (not the net-class
+`via_diameter`), and `check_drc.py` is graded at the floor
+(`--clearance <floor> --hole-to-hole-clearance <floor>`), not the inflated
+net-class clearance. Nets assigned to a non-Default class are reported so they
+can be routed separately with that class's values. When neither net classes nor
+Constraints exist, it falls back to the JLC fab floor for the layer count.
 
 ### Examples
 

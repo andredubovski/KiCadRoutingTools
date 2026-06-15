@@ -153,7 +153,7 @@ python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 
 ### Read the board's design rules and pass them to the CLI
 
-The router does NOT read the board's net classes — it falls back to a generic
+The router does NOT read the board's design rules — it falls back to a generic
 `--clearance 0.25` / `--track-width` default, which is often WIDER than the
 board's own rule and can box pads in so nets fail with "no rippable blockers".
 Read the board's real rules and pass them explicitly:
@@ -162,15 +162,44 @@ Read the board's real rules and pass them explicitly:
 python3 list_nets.py path/to/file.kicad_pcb --design-rules
 ```
 
-It reads net classes from the sibling `.kicad_pro` (KiCad 8+) or `(net_class)`
-in the `.kicad_pcb` (KiCad 6/7) and prints ready-to-paste flags, e.g.
-`--clearance 0.2 --track-width 0.2 --via-size 0.6 --via-drill 0.3` and the
-diff-pair `--diff-pair-gap`. Use the **Default class** values as the baseline
-`--clearance/--track-width/--via-size/--via-drill` for every `route.py`,
-`qfn_fanout.py`, `bga_fanout.py`, and `route_planes.py` command, and the
-diff-pair `--track-width/--diff-pair-gap` for `route_diff.py`. Route any nets assigned to
-a non-Default class separately with that class's values. Only fall back to tool
-defaults when no net classes are found.
+**KiCad has TWO tiers of rules, and DRC only enforces one of them — this matters
+for fine-pitch boards (#111/#115):**
+
+- **Net-class values** (`clearance`, `track_width`, `via_diameter`, `via_drill`):
+  these are the size new objects are *drawn at*. Of these, only **clearance** is
+  a DRC-enforced minimum. `track_width` and `via_diameter`/`drill` are **not** DRC
+  floors — they are just defaults, so a board can (and the human originals do) use
+  a **smaller** via/track than the net-class nominal and still pass DRC.
+- **Board Constraints** (`min_clearance`, `min_track_width`, `min_via_diameter`,
+  `min_hole_to_hole`, `min_through_hole_diameter`): **these are the actual DRC
+  floors.** `--design-rules` reads them from `design_settings.rules` and combines
+  them with the JLCPCB fab minimum (backstop when a Constraint is 0/unset — e.g.
+  `min_clearance` is frequently 0) into a single **manufacturing floor**.
+
+Use the printed flags as-is:
+
+- **Routing** (`route.py`, `qfn_fanout.py`, `bga_fanout.py`, `route_planes.py`):
+  `--track-width` and `--clearance` from the **Default class** (track width is a
+  per-class minimum — keep it for current/impedance), but **`--via-size`/`--via-drill`
+  from the working floor**, NOT the net-class `via_diameter`. Emitting the net-class
+  via everywhere is #115 — it's a max-like default, far too big for fine-pitch
+  escape (e.g. a 0.4 mm QFN/BGA needs the small working via the original used).
+- **Fine-pitch escape:** when a 0.4–0.5 mm QFN/QFP/BGA won't escape at the net-class
+  clearance, drop `--clearance` toward the **manufacturing floor** (never below it).
+  Because the floor is the rule the human board already passes DRC against, tightening
+  to it board-wide is manufacturable; you do NOT need region/rule-area settings.
+- **Non-Default classes:** route those nets separately with that class's
+  `--clearance`/`--track-width` (clearance is the one per-class DRC value, so keep
+  each class's nets at their own clearance rather than forcing one global value).
+- **Diff pairs:** `--track-width`/`--diff-pair-gap` from the Default class for `route_diff.py`.
+
+**Verification (DRC/connectivity) grades at the manufacturing floor**, not the
+inflated net-class clearance — that is the same rule the human original passes, so
+it's the honest delta. Use the printed `check_drc.py` flags
+(`--clearance <floor> --hole-to-hole-clearance <floor>`); see Step 6.
+
+Only fall back to tool defaults when neither net classes nor Constraints are found
+(`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
 
 This will output:
 - Differential pairs detected (P/N naming conventions)
@@ -376,9 +405,12 @@ python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5.k
 ### Step 6: Verify Results
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
-diff pair checks). If that skill is unavailable, run the raw checks:
+diff pair checks). If that skill is unavailable, run the raw checks — DRC at the
+**manufacturing floor** from Step 4's `--design-rules` output (the
+`check_drc.py` flags it printed), NOT a hardcoded 0.25, so legitimately-tight
+fine-pitch escapes that are still fabbable don't read as violations (#111):
 
-python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance 0.25 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/step6_drc.txt
 python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
 python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
@@ -715,8 +747,12 @@ Always capture command output to `/tmp` files for later analysis:
 python3 -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
 python3 -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
 python3 -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
-python3 -X utf8 check_drc.py output.kicad_pcb 2>&1 | tee /tmp/drc.txt
+python3 -X utf8 check_drc.py output.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/drc.txt
 ```
+
+(`<floor>` = the manufacturing floor from `list_nets.py --design-rules`, not the
+0.2 default — grade DRC at the rule the board's own Constraints + fab capability
+define, per #111/#115.)
 
 ### Parse Logs for Failure Analysis
 

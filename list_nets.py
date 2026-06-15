@@ -37,6 +37,71 @@ _NETCLASS_FIELDS = [
     ('diff_pair_width', 'diff_pair_width', '--track-width (route_diff.py)'),
 ]
 
+# Board Constraints (KiCad: Board Setup -> Constraints) live in the .kicad_pro
+# under board.design_settings.rules. Unlike the net-class *defaults*, THESE are
+# what DRC actually enforces for the geometric rules: a net-class track_width /
+# via_diameter is only the size new objects are drawn at, never a DRC minimum --
+# only these min_* values are. So the router may emit a via/track SMALLER than
+# the net-class nominal (down to these) and the board still passes DRC. (#111/#115)
+_CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
+                      'min_via_annular_width', 'min_hole_to_hole',
+                      'min_through_hole_diameter')
+
+# JLCPCB standard (no-extra-charge) manufacturing floors, by copper-layer count.
+# Used as the BACKSTOP when a board leaves a Constraint at 0/unset (common --
+# e.g. min_clearance is frequently 0). The router never goes below these, and
+# DRC/connectivity are graded at them. Source: jlcpcb.com/capabilities (2026-06).
+_FAB_FLOORS = {
+    2: {'clearance': 0.127, 'track_width': 0.127, 'via_diameter': 0.45,
+        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13},
+    4: {'clearance': 0.10, 'track_width': 0.10, 'via_diameter': 0.45,
+        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13},
+}
+
+
+def fab_floors(copper_layer_count):
+    """JLCPCB manufacturing floors for the given copper-layer count (2 vs 4+)."""
+    return _FAB_FLOORS[2] if (copper_layer_count or 2) <= 2 else _FAB_FLOORS[4]
+
+
+def _count_copper_layers(content):
+    """Count copper layers from a .kicad_pcb's (layers ...) definitions.
+
+    Matches layer-def lines like `(0 "F.Cu" signal)` / `(4 "In1(GND).Cu" ...)`
+    but not pad `(layers "F.Cu" ...)` lists (those have no leading layer index).
+    """
+    return len(re.findall(r'\(\d+\s+"[^"]*\.Cu"', content)) or 0
+
+
+def effective_floors(constraints, copper_layers):
+    """Combine the board's own Constraints with the JLC fab floor.
+
+    Returns the values the tools should actually use:
+      - working_via_diameter / working_via_drill: the SMALL escape/working via to
+        emit for fanout & routing, instead of the (larger) net-class nominal (#115).
+        These are GEOMETRY constraints (the board's min via, reliably the size the
+        human's vias actually are), floored at the fab minimum.
+      - drc_clearance / drc_hole_to_hole: the manufacturability floor to grade DRC
+        and connectivity against, instead of the inflated net-class clearance (#111).
+        These are the fab SPACING floor directly: fine-pitch escapes are routed down
+        to it, so DRC must check at it to pass them; and the board's own
+        `min_clearance` is an unreliable edit-floor (often 0, sometimes a stale large
+        value that would re-flood the DRC), so it is deliberately NOT used here.
+    """
+    fab = fab_floors(copper_layers)
+
+    def floor(constraint_val, fab_val):
+        return max(constraint_val or 0.0, fab_val)
+
+    return {
+        'working_via_diameter': floor(constraints.get('min_via_diameter'), fab['via_diameter']),
+        'working_via_drill':    floor(constraints.get('min_through_hole_diameter'), fab['via_drill']),
+        'min_track_width':      floor(constraints.get('min_track_width'), fab['track_width']),
+        'drc_clearance':        fab['clearance'],
+        'drc_hole_to_hole':     fab['hole_to_hole'],
+        'fab': fab,
+    }
+
 
 def read_design_rules(pcb_path):
     """Read net-class design rules so a skill can pass them to the routing CLIs.
@@ -50,10 +115,14 @@ def read_design_rules(pcb_path):
 
     Returns {'classes': {name: {clearance, track_width, via_diameter,
     via_drill, diff_pair_gap, diff_pair_width}}, 'assignments': {net: class},
-    'source': str}. Missing values are omitted per class.
+    'constraints': {min_clearance, min_track_width, min_via_diameter, ...},
+    'copper_layers': int, 'effective': {...}, 'source': str}. Missing values
+    are omitted per class. 'constraints' are the DRC-enforced Board Setup minima;
+    'effective' combines them with the JLC fab floor (see effective_floors()).
     """
     classes = {}
     assignments = {}
+    constraints = {}
     source = None
 
     pro_path = os.path.splitext(pcb_path)[0] + '.kicad_pro'
@@ -72,7 +141,10 @@ def read_design_rules(pcb_path):
             na = ns.get('netclass_assignments') or {}
             if isinstance(na, dict):
                 assignments = dict(na)
-            if classes:
+            # DRC-enforced Board Constraints (what humans actually route against).
+            rules = ((pro.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
+            constraints = {k: rules[k] for k in _CONSTRAINT_FIELDS if k in rules}
+            if classes or constraints:
                 source = pro_path
         except (json.JSONDecodeError, OSError):
             pass
@@ -103,17 +175,34 @@ def read_design_rules(pcb_path):
                 assignments[am.group(1) or am.group(2)] = name
             source = pcb_path
 
-    return {'classes': classes, 'assignments': assignments, 'source': source}
+    # Copper-layer count (for the fab-floor backstop) from the .kicad_pcb.
+    copper_layers = 0
+    try:
+        with open(pcb_path, encoding='utf-8') as f:
+            copper_layers = _count_copper_layers(f.read())
+    except OSError:
+        pass
+
+    return {'classes': classes, 'assignments': assignments,
+            'constraints': constraints, 'copper_layers': copper_layers,
+            'effective': effective_floors(constraints, copper_layers),
+            'source': source}
 
 
 def print_design_rules(pcb_path):
     """Human + skill-friendly dump of the board's net-class design rules."""
     dr = read_design_rules(pcb_path)
-    if not dr['classes']:
-        print("No net classes found (no sibling .kicad_pro and no (net_class) "
-              "in the PCB). Use routing defaults or pass values explicitly.")
+    eff = dr['effective']
+    if not dr['classes'] and not dr['constraints']:
+        print("No net classes or Board Constraints found (no sibling .kicad_pro "
+              "and no (net_class) in the PCB).")
+        print(f"Falling back to JLCPCB fab floors for {dr['copper_layers'] or '?'}-"
+              "layer board — route/DRC at these:")
+        print(f"  working via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
+              f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}")
         return
-    print(f"\nNet-class design rules (from {os.path.basename(dr['source'])}):")
+    src = os.path.basename(dr['source']) if dr['source'] else '?'
+    print(f"\nNet-class design rules (from {src}):")
     for name, c in sorted(dr['classes'].items()):
         fields = "  ".join(f"{k}={c[k]}" for k in
                            ('clearance', 'track_width', 'via_diameter', 'via_drill',
@@ -123,21 +212,43 @@ def print_design_rules(pcb_path):
     if non_default:
         print(f"  ({len(non_default)} net(s) assigned to non-default classes — "
               f"route those separately with that class's flags)")
-    # Ready-to-paste CLI flags from the Default class (router consumes these).
-    d = dr['classes'].get('Default') or next(iter(dr['classes'].values()))
+
+    # The DRC-enforced Board Constraints. Net-class track_width/via_diameter are
+    # only drawing DEFAULTS; ONLY these min_* are DRC floors (#111/#115).
+    if dr['constraints']:
+        cons = "  ".join(f"{k}={v}" for k, v in dr['constraints'].items())
+        print(f"\nBoard Constraints (DRC-enforced minima, {dr['copper_layers']}-layer): {cons}")
+    print(f"Manufacturing floor (Constraint or JLC fab min, whichever is larger): "
+          f"via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
+          f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}  "
+          f"track {eff['min_track_width']}")
+
+    # Routing flags: track_width is a per-class MINIMUM (keep, for current/
+    # impedance); clearance is the per-class default. But the VIA uses the small
+    # working floor, NOT the net-class via_diameter (which is just a max-like
+    # default) -- emitting the nominal everywhere is #115.
+    d = dr['classes'].get('Default') or (next(iter(dr['classes'].values())) if dr['classes'] else {})
     flags = []
-    if 'clearance' in d:        flags.append(f"--clearance {d['clearance']}")
-    if 'track_width' in d:      flags.append(f"--track-width {d['track_width']}")
-    if 'via_diameter' in d:     flags.append(f"--via-size {d['via_diameter']}")
-    if 'via_drill' in d:        flags.append(f"--via-drill {d['via_drill']}")
-    if flags:
-        print("\nSUGGESTED route.py/qfn_fanout/bga_fanout/route_planes flags "
-              "(Default class):\n  " + " ".join(flags))
+    if 'clearance' in d:   flags.append(f"--clearance {d['clearance']}")
+    if 'track_width' in d: flags.append(f"--track-width {d['track_width']}")
+    flags.append(f"--via-size {eff['working_via_diameter']}")
+    flags.append(f"--via-drill {eff['working_via_drill']}")
+    print("\nSUGGESTED route.py/qfn_fanout/bga_fanout/route_planes flags "
+          "(Default class; small working via):\n  " + " ".join(flags))
+    print("  Fine-pitch escape may drop --clearance toward the manufacturing floor "
+          f"{eff['drc_clearance']} (never below); route non-Default-class nets separately.")
+
     if 'diff_pair_gap' in d or 'diff_pair_width' in d:
         dp = []
         if 'diff_pair_width' in d: dp.append(f"--track-width {d['diff_pair_width']}")
         if 'diff_pair_gap' in d:   dp.append(f"--diff-pair-gap {d['diff_pair_gap']}")
         print("SUGGESTED route_diff.py flags (Default class):\n  " + " ".join(dp))
+
+    # Verification: DRC/connectivity at the manufacturability floor -- the rule
+    # the human original passes -- NOT the inflated net-class clearance (#111).
+    print(f"\nSUGGESTED check_drc.py flags (grade at the manufacturing floor):\n  "
+          f"--clearance {eff['drc_clearance']} "
+          f"--hole-to-hole-clearance {eff['drc_hole_to_hole']}")
 
 
 def find_differential_pairs(pcb_data):

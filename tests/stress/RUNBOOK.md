@@ -60,24 +60,24 @@ Robust signals:
    plan generation) but DO NOT invoke other skills and DO NOT ask the user
    anything — use the skill's inline name-pattern heuristics and your judgment.
    DESIGN RULES: also run `list_nets.py <board> --design-rules` and use the
-   Default class's clearance/track/via as the BASELINE
-   `--clearance/--track-width/--via-size/--via-drill` on every route.py,
-   qfn_fanout.py, bga_fanout.py and route_planes.py command (and the diff-pair
-   `--track-width/--diff-pair-gap` on route_diff.py) — the router does NOT read net
-   classes and its generic 0.25mm default is often wider than the board's own
-   rule, which boxes pads in and fails nets with "no rippable blockers". Route
-   any non-Default-class nets separately with that class's values. A
-   fine-pitch component's fanout NOTE still overrides locally for its nets.
-   CLEARANCE SOURCE (validated against the routed originals): use the Default
-   NETCLASS clearance, NOT the project `min_clearance` in the .kicad_pro — on
-   the downloaded boards the real routing is DRC-clean at the netclass clearance
-   (~0.2) and floods with violations at the larger min_clearance (~0.5), so
-   min_clearance is an edit-floor, not the copper-to-copper DRC rule. Use the
-   netclass clearance for BOTH routing and `check_drc --clearance`.
-   TRACK WIDTH (validated): the netclass `track_width` is a MINIMUM; real boards
-   route signals at/above it and widen power/high-current nets to many distinct
-   widths (e.g. 2-4mm power buses). Use the netclass track_width as the signal
-   baseline but widen power nets explicitly via `--power-nets`.
+   flags it prints. It now reports TWO tiers (#111/#115): the net-class defaults
+   AND the DRC-enforced Board Constraints (`design_settings.rules`), combined
+   with the JLCPCB fab floor into a "manufacturing floor". The router does NOT
+   read any of this; its generic 0.25mm default is often wider than the board's
+   own rule, which boxes pads in and fails nets with "no rippable blockers".
+   - CLEARANCE: route at the Default NETCLASS clearance; a fine-pitch escape may
+     drop toward the manufacturing floor (never below). Route non-Default-class
+     nets separately with that class's clearance.
+   - VIA: use the printed WORKING via (`--via-size`/`--via-drill` from the
+     manufacturing floor = the board's `min_via_diameter`/`min_through_hole`,
+     floored at the JLC min), NOT the net-class `via_diameter`. The net-class via
+     is only a drawing default (a max), far too big for fine-pitch escape — using
+     it everywhere was #115 (butterstick 0.8 vs the original's 0.45; lily58/crkbd
+     QFN escapes need ~0.45-0.6, unroutable at 0.8).
+   - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
+     baseline); real boards widen power/high-current nets to many distinct widths
+     (2-4mm buses) — widen those explicitly via `--power-nets`.
+   A fine-pitch component's fanout NOTE still overrides locally for its nets.
    NOTE: qfn_fanout.py accepts only `--width`/`--extension` (NOT
    `--clearance`/`--track-width`); pass the width there, clearance to route.py.
 3. Skip GND return vias / impedance / length matching unless the board
@@ -115,16 +115,24 @@ Robust signals:
    Pairs NOT on an array package (e.g. between connectors) don't need fanout.
    If pair detection looks like a false positive (e.g. random net names that
    happen to end in P/N), note it as a finding and skip those.
-7. BASELINE: before routing, run check_drc.py on the unrouted input and record
-   the violation count — real boards have pre-existing pad-to-pad proximity
-   that is not the router's fault. Report post-route DRC as total AND delta.
-   GROUND-TRUTH BASELINE (do this too): also run `check_drc.py
-   ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb --clearance <netclass
-   Default clearance>` on the ORIGINAL human-routed board and record that count
-   as `drc.original_routed_violations`. That — not 0 — is the achievable floor
-   under our DRC model (the originals carry a few clearance-independent
-   hole-to-hole/pad violations: e.g. megadesk 1, piantor 6). Judge our routing's
-   DRC against the ORIGINAL's count at the same clearance, not against 0.
+7. DRC AT THE MANUFACTURING FLOOR (#111): grade DRC with the `check_drc.py`
+   flags `--design-rules` prints (`--clearance <floor> --hole-to-hole-clearance
+   <floor>`), NOT the net-class clearance and NOT a hardcoded 0.25. The floor is
+   the JLC fab spacing minimum (the board's `min_clearance` is an unreliable
+   edit-floor — sometimes 0, sometimes a stale large value — so it is not used).
+   Fine-pitch escapes are routed down to this floor, so checking at it stops them
+   reading as violations (the dominant set-1/set-2 DRC source) while still
+   flagging anything genuinely sub-manufacturable.
+   BASELINE: before routing, run check_drc.py on the unrouted input at the same
+   floor and record the count — real boards have pre-existing pad-to-pad
+   proximity that is not the router's fault. Report post-route DRC as total AND delta.
+   GROUND-TRUTH BASELINE (do this too): run `check_drc.py
+   ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb --clearance <floor>
+   --hole-to-hole-clearance <floor>` on the ORIGINAL human-routed board (SAME
+   floor flags) and record that count as `drc.original_routed_violations`. That —
+   not 0 — is the achievable floor under our DRC model (the originals carry a few
+   clearance-independent hole-to-hole/pad violations: e.g. megadesk 1, piantor 6).
+   Judge our routing's DRC against the ORIGINAL's count at the same floor, not against 0.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
    now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
@@ -146,7 +154,8 @@ Robust signals:
    per the skill's "Diagnose and Retry" table (use the same output->input
    chaining). Record both attempts.
 11. Verification (always, on the final board):
-    - `check_drc.py <final> 2>&1 | tee drc.log` (default clearance; note flags)
+    - `check_drc.py <final> --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee drc.log`
+      (manufacturing floor from `--design-rules`, per step 7; note the flags used)
     - `check_connected.py <final> 2>&1 | tee connectivity.log`
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run

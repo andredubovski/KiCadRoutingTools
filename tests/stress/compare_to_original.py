@@ -61,9 +61,11 @@ def profile(path):
 
 
 def design_clearance(orig_path):
+    # The manufacturing floor DRC is actually graded at (#111), not the inflated
+    # net-class clearance. Mirrors list_nets.effective_floors / the RUNBOOK.
     dr = read_design_rules(orig_path)
-    if dr and "Default" in dr.get("classes", {}):
-        return dr["classes"]["Default"].get("clearance")
+    if dr and dr.get("effective"):
+        return dr["effective"].get("drc_clearance")
     return None
 
 
@@ -72,7 +74,7 @@ def main():
     ap.add_argument("--ours", required=True)
     ap.add_argument("--orig", required=True)
     ap.add_argument("--clearance", type=float, default=None,
-                    help="design clearance to note (defaults to orig Default netclass clearance)")
+                    help="clearance to note (defaults to orig manufacturing floor / DRC grade clearance)")
     ap.add_argument("--json", action="store_true", help="also print a JSON blob")
     args = ap.parse_args()
 
@@ -135,7 +137,7 @@ def main():
             f"net(s) the human routed that we did not.")
 
     print(f"\n{'='*78}\nCOMPARE  ours={os.path.basename(args.ours)}  vs  orig={os.path.basename(args.orig)}")
-    print(f"  design clearance (orig Default netclass): {cl}")
+    print(f"  manufacturing floor (DRC grade clearance): {cl}")
     print(f"  {'metric':24s} {'OURS':>16s} {'ORIGINAL':>16s}")
     print(f"  {'layers':24s} {str(len(ours['layers'])):>16s} {str(len(orig['layers'])):>16s}")
     print(f"  {'segments':24s} {ours['n_segments']:>16d} {orig['n_segments']:>16d}")
