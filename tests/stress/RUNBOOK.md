@@ -4,60 +4,57 @@ You are stress-testing the KiCadRoutingTools autorouter on one real-world
 open-source board. Follow the plan-pcb-routing skill methodology
 non-interactively and record everything.
 
-## Orchestration (parent driving several boards at once)
+## Orchestration — drive the whole corpus with run_queue.sh
 
-If you are the PARENT running multiple board agents in parallel, do NOT rely
-solely on completion notifications — they can be dropped or arrive
-stale/duplicated. Poll about every 5 minutes. BOTH naive liveness signals have
-blind spots, so use the run-dir-path check below:
+The whole set-1 + set-2 corpus is driven by ONE queue manager:
 
-- pgrep on TOOL NAMES (`route.py|bga_fanout|...`) is noisy AND can MISS: a
-  snapshot sweeps up shell wrappers, `sleep` poll-loops, and pgrep itself (reads
-  ~30 one moment, 0 the next), and it is case-sensitive — KiCad's bundled
-  interpreter is `Python` (capital P), and run_limited.sh wraps the job, so a
-  literal `python3.*route.py` match returns 0 even while routing is active.
-- run-dir FILE MTIMES go quiet DURING a single long route command (route.py
-  writes its log only on completion), so "no new files for a few min" alone does
-  NOT mean stalled.
+```bash
+bash tests/stress/run_queue.sh [concurrency=4] [model=sonnet]
+```
 
-Robust signals:
-- DONE (authoritative): results JSON exists — `ls results_<set>/*.json`. Drive
-  refills and "is the set complete?" off this set, NOT the notification stream.
-- ALIVE (authoritative): a process is working in the board's run dir —
-  `pgrep -f "runs_<set>/<board>"` (matches route.py / run_limited.sh / the poll
-  loop regardless of interpreter name or which step it's on).
-- LOST (relaunch): no results JSON AND `pgrep -f "runs_<set>/<board>"` empty AND
-  run dir idle ~15+ min (well past the 20-min/command cap).
+It keeps N headless `claude -p` board workers in flight until every board has a
+results JSON, deriving ALL state from disk — so it's safe to Ctrl-C and restart
+(it skips finished boards and won't double-launch running ones). Each worker is
+`tests/stress/run_board.sh <board> <set> [model]`: a non-interactive agent that
+follows THIS runbook, writes the results JSON + `FINDINGS.md` into the run dir,
+and drops a `.worker_done` marker (`ok`/`NORESULT`). This replaces the older
+manual approach (a parent launching one background `Agent` per board and
+refilling on notifications) — the queue manager removes the drop-/stale-prone
+notification stream entirely.
 
-### Driving the run (concrete recipe that survives context resets)
+**Prereqs on a fresh machine:**
+- Build the corpus first (README → "Pipeline" and "Two 15-board sets").
+- Workers run `claude -p --dangerously-skip-permissions`, which the harness
+  blocks by default. Authorize it once: add a Bash allow-rule for
+  `bash tests/stress/run_board.sh:*` and `bash tests/stress/run_queue.sh:*`
+  to your local `.claude/settings.local.json` (gitignored, so it is NOT
+  inherited from a checkout — each user opts in themselves), or approve when
+  prompted.
 
-Mechanism that has worked well for the full 30-board corpus (15 set-1 +
-15 set-2):
+**Monitoring:** `bash tests/stress/stress_status.sh` — prints DONE/RUNNING/TODO
+across all 30 boards plus free slots. (For detail: `QUEUE_STATUS.txt` is the
+manager heartbeat; `runs[_set2]/<board>/worker.log` is a worker's log — note
+`claude -p` buffers its own stdout to the end, but the per-tool `*.log` files in
+the run dir update live.)
 
-- ONE background subagent per board (the harness `Agent` tool with
-  `run_in_background: true`). Each agent's prompt names the board, its SET,
-  and the four set-specific paths (input / run dir / original / results
-  JSON), and tells it to read this RUNBOOK first. Keep at most **4 in
-  flight** (the documented concurrency cap; see Rule 1).
-- DERIVE state from disk, never from tracked agent IDs — agent IDs are lost
-  when the parent's context is summarized, but disk is authoritative. A
-  board is DONE if its results JSON exists, RUNNING if
-  `pgrep -f "runs[_set2]/<board>"` matches (or the run dir was touched in the
-  last 15 min — covers the pgrep blind-spot while an agent is between commands),
-  else TODO. `tests/stress/stress_status.sh` classifies the whole corpus this
-  way and prints `free slots = 4 - running`, so any fresh parent instance can
-  pick the run back up cold — run `bash tests/stress/stress_status.sh` (board
-  lists are derived from `boards_unrouted*/`, so it never goes stale).
-- REFILL on each completion notification (and as a backstop, on the ~5-min
-  poll): recompute DONE/RUNNING/TODO from disk and launch enough new board
-  agents to bring RUNNING back up to 4, pulling from the TODO list.
-- ORDER the queue to keep ~2 heavy + 2 light boards in flight at once (heavy
-  = dense 4-layer / many pads / BGA fanout; light = small 2-layer). Four
-  heavy boards at once is the worst case for the 4 GB-per-job RAM cap.
-- The PARENT may end its turn between refills — background subagents are
-  harness-tracked and you are re-invoked on completion. This is the opposite
-  of the per-board rule (Rule 12): a *board agent* must never end its turn
-  while its own routing command runs.
+**State signals** (what the queue and `stress_status.sh` use):
+- DONE: results JSON exists.
+- RUNNING: a process matches the run-dir path, OR the run dir was touched <15 min
+  ago (covers the gap between a worker's commands). Naive checks mislead — pgrep
+  on tool names is noisy and case-sensitive (KiCad's interpreter is `Python`,
+  wrapped by run_limited.sh), and run-dir mtimes go quiet during a long route —
+  so don't rely on those alone.
+- LOST: no results JSON AND not running AND run dir idle ~15+ min → safe to relaunch.
+
+### Manual fallback (driving by hand, no queue script)
+
+If you must drive without `run_queue.sh` (e.g. orchestrating from a chat
+session), launch one background board worker/agent at a time and keep **4 in
+flight**, refilling off `stress_status.sh` — NOT the notification stream, which
+drops and duplicates. Order the queue ~2 heavy + 2 light to stay under the
+4 GB-per-job RAM cap (heavy = dense 4-layer / many pads / BGA fanout). Derive
+state from disk, never from tracked agent IDs (they are lost on context
+summarization).
 
 ### Clean restart (re-run the whole corpus from scratch)
 

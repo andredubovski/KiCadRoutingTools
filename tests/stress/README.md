@@ -35,31 +35,35 @@ python3 validate_boards.py
 
 ## Running the stress test
 
-Each board is routed by an agent following `RUNBOOK.md` (plan-pcb-routing
-skill methodology, non-interactive): analysis -> fanout -> diff pairs ->
-signal routing -> power planes -> plane repair -> DRC/connectivity/orphan
-verification. Results land in `$STRESS_DIR/results/<board>.json` (schema in
-the runbook).
+Drive the whole corpus with the queue manager:
 
-Operational limits (learned the hard way):
+```bash
+bash run_queue.sh [concurrency=4] [model=sonnet]   # from tests/stress/
+bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + free slots
+```
 
-- Wrap every tool invocation in `run_limited.sh` (kills the job at ~4 GB RSS,
-  overridable with `LIMIT_KB`).
-- Run up to 4 boards concurrently — most jobs stay well under the 4 GB cap most
-  of the time, so 4-in-flight works on an 8 GB machine and the per-job watchdog
-  backstops any spike. (Drop to fewer only if you see swapping.)
-- Background subagents are killed after ~600 s with no streamed output, so run
-  any command expected to exceed ~5 min in the background and poll it in
-  short, separate steps rather than one long blocking call.
-- When orchestrating several boards in parallel, poll ~every 5 min. DONE =
-  results JSON exists (`ls results_<set>/*.json`). ALIVE = `pgrep -f
-  "runs_<set>/<board>"` (a process working in that board's run dir). Avoid the
-  two naive checks that mislead: pgrep on tool names is noisy AND case-sensitive
-  (KiCad's interpreter is `Python`, wrapped by run_limited.sh — `python3.*route.py`
-  matches 0 while routing), and run-dir mtimes go quiet during a long route. So
-  `pgrep route.py = 0` does NOT mean dead. Relaunch only if no result AND
-  `pgrep -f runs_<set>/<board>` empty AND run dir idle ~15+ min. Notifications
-  can drop, so the poll is the source of truth.
+`run_queue.sh` keeps N headless `claude -p` workers in flight until every board
+has a results JSON, deriving all state from disk (safe to stop and restart — it
+skips finished boards and won't double-launch running ones). Each worker
+(`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`
+(analysis -> fanout -> diff pairs -> signal routing -> power planes -> plane
+repair -> DRC/connectivity/orphan verification -> compare-to-original), writing
+`$STRESS_DIR/results[_set2]/<board>.json` (schema in the runbook) plus a
+`FINDINGS.md`. The full mechanism, fresh-machine prereqs (including the one-time
+permission authorization the headless workers need), and a manual fallback are
+in `RUNBOOK.md` → "Orchestration".
+
+Operational limits (baked into the scripts / learned the hard way):
+
+- Every routing/fanout/plane/check command is wrapped in `run_limited.sh`
+  (kills the job at ~4 GB RSS, overridable with `LIMIT_KB`).
+- 4 boards run concurrently — most jobs stay well under the 4 GB cap, so
+  4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
+  spike. (Lower the concurrency arg if you see swapping.)
+- Each worker runs its routing commands in the foreground under a hard
+  20-min/command cap and ~45-min board budget (RUNBOOK rule 12). The queue
+  manager and `stress_status.sh` track liveness from disk (results JSON +
+  run-dir activity), so dropped/stale notifications can't mislead them.
 
 ## Routing-constraint validation (what params to route with)
 

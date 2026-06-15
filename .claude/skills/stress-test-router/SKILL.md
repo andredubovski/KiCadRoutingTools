@@ -37,34 +37,54 @@ To extend the corpus, add `(owner/repo, note)` entries to `REPOS` in
 Only KiCad 6+ sources survive; older ones are rescued by the pcbnew
 round-trip.
 
-## Step 2: Run boards (subagents, bounded)
+## Step 2: Run boards (queue manager)
 
-For each board in the corpus without a fresh `$STRESS_DIR/results/<board>.json`,
-spawn a general-purpose subagent with this prompt skeleton:
+Drive the whole corpus with the queue manager — it keeps headless `claude -p`
+board workers in flight until every board has a results JSON, deriving all state
+from disk (safe to stop and restart):
 
-> Read $STRESS_DIR/RUNBOOK.md (fall back to tests/stress/RUNBOOK.md) and
-> execute it for BOARD=<name> (<one-line complexity hint>). Follow the
-> runbook exactly: analyze per the plan-pcb-routing skill, route with the
-> repo's tools, verify, and write $STRESS_DIR/results/<name>.json. Never
-> modify anything under the tools repo.
+```bash
+bash tests/stress/run_queue.sh [concurrency=4] [model=sonnet]
+bash tests/stress/stress_status.sh        # monitor: DONE/RUNNING/TODO + free slots
+```
 
-Hard operational limits (violating these has crashed the machine before):
+Each worker (`run_board.sh <board> <set> [model]`) routes one board per
+`RUNBOOK.md` and writes `$STRESS_DIR/results[_set2]/<board>.json` plus a
+`FINDINGS.md`. The headless workers run `claude -p --dangerously-skip-permissions`,
+which the harness blocks by default — authorize it once with a Bash allow-rule
+for `bash tests/stress/run_board.sh:*` / `bash tests/stress/run_queue.sh:*` in
+`.claude/settings.local.json` (gitignored, so a checkout never inherits it), or
+approve when prompted.
 
-- **Max 2 boards in flight at once.** Launch two, wait for a completion
-  notification, backfill.
-- **Every tool command inside a run goes through
-  `tests/stress/run_limited.sh`** (~4 GB RSS watchdog). An OOM kill is a
-  finding, not noise.
-- Order boards simple -> complex (keyboards first, BGA/SoC boards last) so
-  harness problems surface cheaply.
+Hard operational limits (baked into the scripts; violating these has crashed the
+machine before):
+
+- Concurrency is **4** (the manager default) — most jobs stay well under the
+  4 GB per-job cap; lower the arg if you see swapping.
+- **Every tool command runs through `tests/stress/run_limited.sh`** (~4 GB RSS
+  watchdog). An OOM kill is a finding, not noise.
 - On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to
   `bga_fanout.py` (`--layers F.Cu In1.Cu In2.Cu B.Cu`); its default is the two
   outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
   `route_diff.py` has the same F.Cu/B.Cu default and the same trap: pass the
-  full copper-layer list so it can launch from inner-layer escaped diff stubs,
-  or pairs are silently stranded (issue #116, butterstick 8/40 -> 22/40).
-- Subagents must not end their turn while a routing process is still
-  running (the run gets orphaned — runbook rule 11).
+  full copper-layer list or pairs are silently stranded (issue #116,
+  butterstick 8/40 -> 22/40).
+- Track liveness from disk (results JSON + run-dir activity) via
+  `stress_status.sh` — NOT the notification stream, which drops and duplicates.
+
+### Manual fallback (no queue script)
+
+To drive by hand instead, spawn one general-purpose subagent per board without a
+fresh results JSON, keeping ~4 in flight and refilling off `stress_status.sh`:
+
+> Read $STRESS_DIR/RUNBOOK.md (fall back to tests/stress/RUNBOOK.md) and
+> execute it for BOARD=<name> (<one-line complexity hint>). Follow the runbook
+> exactly: analyze per the plan-pcb-routing skill, route with the repo's tools,
+> verify, and write $STRESS_DIR/results[_set2]/<name>.json. Never modify the
+> tools repo.
+
+A subagent must never end its turn while a routing process is still running (the
+run gets orphaned — RUNBOOK rule 12).
 
 ## Step 3: Aggregate
 
