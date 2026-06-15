@@ -122,8 +122,9 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
      balls the standard via can't dog-bone/via-in-pad, pass the smaller
      `fine-pitch escape via` that `--design-rules` prints (e.g. 0.30/0.15, JLC
      advanced) as `--via-size`/`--via-drill` to THAT part's bga_fanout/route_diff
-     only; keep the standard via for general route.py and route_planes (#99/#122).
-     (route_planes' pad repair auto-escalates to it for last-resort plane taps.)
+     AND to route_disconnected_planes (its per-pad repair connects the fine-pitch
+     plane balls). Keep the standard via for general route.py and the bulk
+     route_planes pour (#99/#122).
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
