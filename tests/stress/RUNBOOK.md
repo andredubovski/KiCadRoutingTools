@@ -42,10 +42,12 @@ Mechanism that has worked well for the full 30-board corpus (15 set-1 +
 - DERIVE state from disk, never from tracked agent IDs — agent IDs are lost
   when the parent's context is summarized, but disk is authoritative. A
   board is DONE if its results JSON exists, RUNNING if
-  `pgrep -f "runs[_set2]/<board>"` matches, else TODO. A tiny status script
-  that classifies all 30 this way (and prints `free slots = 4 - running`)
-  lets any fresh parent instance pick the run back up cold. Put it in the
-  job tmp dir, not the repo.
+  `pgrep -f "runs[_set2]/<board>"` matches (or the run dir was touched in the
+  last 15 min — covers the pgrep blind-spot while an agent is between commands),
+  else TODO. `tests/stress/stress_status.sh` classifies the whole corpus this
+  way and prints `free slots = 4 - running`, so any fresh parent instance can
+  pick the run back up cold — run `bash tests/stress/stress_status.sh` (board
+  lists are derived from `boards_unrouted*/`, so it never goes stale).
 - REFILL on each completion notification (and as a backstop, on the ~5-min
   poll): recompute DONE/RUNNING/TODO from disk and launch enough new board
   agents to bring RUNNING back up to 4, pulling from the TODO list.
