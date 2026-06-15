@@ -215,6 +215,41 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     return global_x, global_y
 
 
+def find_matching_paren(content: str, open_idx: int) -> int:
+    """Return the index just past the ``)`` matching the ``(`` at ``open_idx``.
+
+    Counts parentheses but SKIPS those inside quoted strings, honoring KiCad's
+    backslash escapes (``\\"`` and ``\\\\``). A naive depth counter breaks when a
+    property value contains a lone paren, e.g. an MPN like ``"TCR2EF115,LM(CT"``:
+    the unmatched ``(`` makes the scan run far past the block end and swallow
+    following footprints' pads (issue #113). Returns ``len(content)`` if no match
+    is found.
+    """
+    depth = 0
+    in_string = False
+    i = open_idx
+    n = len(content)
+    while i < n:
+        char = content[i]
+        if in_string:
+            if char == '\\':
+                i += 2  # skip escaped char
+                continue
+            if char == '"':
+                in_string = False
+        else:
+            if char == '"':
+                in_string = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return n
+
+
 def parse_s_expression(text: str) -> list:
     """
     Simple S-expression parser - returns nested lists.
@@ -946,17 +981,9 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
     footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
 
     for start in footprint_starts:
-        # Find the matching end parenthesis
-        depth = 0
-        end = start
-        for i, char in enumerate(content[start:], start):
-            if char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
+        # Find the matching end parenthesis (string-aware: a property value with
+        # a lone paren must not throw off the count — see find_matching_paren).
+        end = find_matching_paren(content, start)
 
         fp_text = content[start:end]
 
@@ -1010,17 +1037,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         # Note: pad number can be empty string (pad "") so use [^"]* not [^"]+
         for pad_match in re.finditer(r'\(pad\s+"([^"]*)"\s+(\w+)\s+(\w+)', fp_text):
             pad_start = pad_match.start()
-            # Find end of this pad block
-            depth = 0
-            pad_end = pad_start
-            for i, char in enumerate(fp_text[pad_start:], pad_start):
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                    if depth == 0:
-                        pad_end = i + 1
-                        break
+            # Find end of this pad block (string-aware paren matching).
+            pad_end = find_matching_paren(fp_text, pad_start)
 
             pad_text = fp_text[pad_start:pad_end]
 
@@ -1254,20 +1272,12 @@ def _iter_zone_blocks(content: str):
     """
     zone_start_pattern = r'\r?\n\t\(zone\s*\r?\n'
     for start_match in re.finditer(zone_start_pattern, content):
-        # Find the matching closing paren by counting balanced parens
-        paren_count = 1
-        pos = start_match.end()
-        zone_end = None
-        while pos < len(content) and paren_count > 0:
-            char = content[pos]
-            if char == '(':
-                paren_count += 1
-            elif char == ')':
-                paren_count -= 1
-                if paren_count == 0:
-                    zone_end = pos
-            pos += 1
-        if zone_end is None:
+        # Find the matching closing paren (string-aware, so a lone paren inside
+        # a quoted token cannot run the scan past the zone end — see issue #113).
+        # start_match begins at the newline before "(zone"; locate that "(".
+        open_idx = content.index('(', start_match.start())
+        zone_end = find_matching_paren(content, open_idx) - 1
+        if zone_end <= open_idx:
             continue
         yield content[start_match.end():zone_end]
 
