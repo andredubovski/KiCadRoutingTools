@@ -602,7 +602,8 @@ KiCadRoutingTools/
 │   ├── test_flat_hierarchy.py    # 2-layer board with GND plane test
 │   ├── test_interf_u.py          # 2-layer board with non-rectangular outline test
 │   ├── test_sonde_u.py           # Wide track routing test
-│   └── run_utils.py              # Shared test utilities
+│   ├── run_utils.py              # Shared test utilities
+│   └── stress/                   # Real-world-board stress-test harness (run_queue.sh) — see tests/README.md
 │
 ├── rust_router/              # Rust A* implementation
 ├── pygame_visualizer/        # Real-time visualization
