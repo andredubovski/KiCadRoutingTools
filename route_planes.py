@@ -828,24 +828,51 @@ def _generate_multinet_layer_zones(
                 vias_by_net[via.net_id].append(via_pos)
                 vias_by_net_set[via.net_id].add(via_pos)
 
-    # Check for nets with no vias
-    nets_with_vias = []
+    # Connection points from pads that physically tie into the plane on this
+    # layer: through-hole pads (every copper layer) and SMD pads whose layer is
+    # this one. A net can be fully connected to the plane through these alone,
+    # with zero stitching vias -- the zone must STILL be poured in that case
+    # (issue #114: an all-through-hole ground net got 0 seeds and its zone was
+    # silently skipped, leaving the net functionally unrouted).
+    pads_on_layer_by_net: Dict[int, List[Tuple[float, float]]] = {}
     for net_name in nets_on_layer:
         net_id = net_name_to_id.get(net_name)
-        if net_id:
-            via_count = len(vias_by_net.get(net_id, []))
-            if via_count == 0:
-                print(f"  Warning: Net '{net_name}' has no vias on layer {layer}, skipping zone")
-            else:
-                nets_with_vias.append(net_name)
-                print(f"  Net '{net_name}': {via_count} vias")
+        if net_id is None:
+            continue
+        pts = []
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            on_layer = (pad.drill and pad.drill > 0) or (layer in pad.layers)
+            if on_layer:
+                pts.append((pad.global_x, pad.global_y))
+        pads_on_layer_by_net[net_id] = pts
 
-    if len(nets_with_vias) < 2:
-        # Only one net has vias, use full board rectangle
-        if nets_with_vias:
-            net_name = nets_with_vias[0]
+    # A net earns a zone if it has ANY connection point on this layer -- a via
+    # or a pad. nets_with_vias still drives the via-to-via MST routing below;
+    # nets_with_seeds (vias OR pads) drives whether a zone is created at all.
+    nets_with_vias = []
+    nets_with_seeds = []
+    for net_name in nets_on_layer:
+        net_id = net_name_to_id.get(net_name)
+        if not net_id:
+            continue
+        via_count = len(vias_by_net.get(net_id, []))
+        pad_count = len(pads_on_layer_by_net.get(net_id, []))
+        if via_count == 0 and pad_count == 0:
+            print(f"  Warning: Net '{net_name}' has no vias or pads on layer {layer}, skipping zone")
+            continue
+        nets_with_seeds.append(net_name)
+        if via_count > 0:
+            nets_with_vias.append(net_name)
+            print(f"  Net '{net_name}': {via_count} vias")
+        else:
+            print(f"  Net '{net_name}': no vias, {pad_count} pad(s) on {layer} (pad-seeded zone)")
+
+    if len(nets_with_seeds) < 2:
+        # Only one net has connections on this layer: use full board rectangle.
+        if nets_with_seeds:
+            net_name = nets_with_seeds[0]
             net_id = net_name_to_id[net_name]
-            print(f"  Only '{net_name}' has vias, using full board rectangle")
+            print(f"  Only '{net_name}' has connections, using full board rectangle")
             zone_sexpr = generate_zone_sexpr(
                 net_id=net_id,
                 net_name=net_name,
@@ -1098,6 +1125,24 @@ def _generate_multinet_layer_zones(
                         f"and fell back to point-seed ({', '.join(fallback_pad_refs)})")
             print(msg)
 
+    # #114: a net with no stitching vias gets no MST and therefore no Voronoi
+    # seeds from the routing above. Seed it directly from its pads on this layer
+    # (through-hole + SMD-on-layer) so it still receives a Voronoi-partitioned
+    # zone. Via-bearing nets are left to the #107 corridor logic above so their
+    # via topology is not perturbed.
+    if augmented_vias_by_net is not None:
+        for net_name in nets_with_seeds:
+            net_id = net_name_to_id.get(net_name)
+            if net_id is None or vias_by_net.get(net_id):
+                continue
+            seeds = augmented_vias_by_net.setdefault(net_id, [])
+            seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
+            for px, py in pads_on_layer_by_net.get(net_id, []):
+                k = (round(px, 3), round(py, 3))
+                if k not in seen:
+                    seeds.append((px, py))
+                    seen.add(k)
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
     print(f"  Computing final Voronoi zones with {total_seeds} seed points")
@@ -1112,7 +1157,7 @@ def _generate_multinet_layer_zones(
     except ValueError as e:
         print(f"  Error computing zone boundaries: {e}")
         print(f"  Falling back to full board rectangle for first net")
-        net_name = nets_with_vias[0]
+        net_name = nets_with_seeds[0]
         net_id = net_name_to_id[net_name]
         zone_sexpr = generate_zone_sexpr(
             net_id=net_id,
