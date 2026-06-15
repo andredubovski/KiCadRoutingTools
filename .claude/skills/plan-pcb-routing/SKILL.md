@@ -188,6 +188,16 @@ Use the printed flags as-is:
   clearance, drop `--clearance` toward the **manufacturing floor** (never below it).
   Because the floor is the rule the human board already passes DRC against, tightening
   to it board-wide is manufacturable; you do NOT need region/rule-area settings.
+- **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
+  via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
+  smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch
+  escape via <d>/<drill>`, e.g. `0.30/0.15` — JLC "advanced", small extra cost)
+  as `--via-size`/`--via-drill` to that part's `bga_fanout.py` / `qfn_fanout.py`,
+  and to `route_diff.py` when it launches from that part's escaped stubs. Keep
+  the **standard** working via for general `route.py` routing and `route_planes.py`
+  — the advanced via is escape-only, not a board-wide default (issues #99/#122).
+  (`route_planes.py`'s per-pad plane repair already auto-escalates to it for the
+  last-resort fine-pitch taps, so you don't pass it there.)
 - **Non-Default classes:** route those nets separately with that class's
   `--clearance`/`--track-width` (clearance is the one per-class DRC value, so keep
   each class's nets at their own clearance rather than forcing one global value).

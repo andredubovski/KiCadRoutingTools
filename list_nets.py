@@ -51,11 +51,18 @@ _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
 # Used as the BACKSTOP when a board leaves a Constraint at 0/unset (common --
 # e.g. min_clearance is frequently 0). The router never goes below these, and
 # DRC/connectivity are graded at them. Source: jlcpcb.com/capabilities (2026-06).
+# 'fine_via_*' is the smaller JLC "advanced" (small extra-cost) via, available
+# on 4+ layer boards, for FINE-PITCH ESCAPE only (sub-~0.5mm BGA/QFN balls the
+# 0.45mm standard via can't via-in-pad / dog-bone between). Not the default --
+# general routing uses the standard via. On 2-layer it equals the standard via
+# (advanced small vias are a multilayer option).
 _FAB_FLOORS = {
     2: {'clearance': 0.127, 'track_width': 0.127, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13},
+        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
+        'fine_via_diameter': 0.45, 'fine_via_drill': 0.20},
     4: {'clearance': 0.10, 'track_width': 0.10, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13},
+        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
+        'fine_via_diameter': 0.30, 'fine_via_drill': 0.15},
 }
 
 
@@ -96,6 +103,10 @@ def effective_floors(constraints, copper_layers):
     return {
         'working_via_diameter': floor(constraints.get('min_via_diameter'), fab['via_diameter']),
         'working_via_drill':    floor(constraints.get('min_through_hole_diameter'), fab['via_drill']),
+        # Advanced small via for fine-pitch escape only (4+ layer). The fab's
+        # smallest, not floored by the board's nominal min via.
+        'fine_via_diameter':    fab['fine_via_diameter'],
+        'fine_via_drill':       fab['fine_via_drill'],
         'min_track_width':      floor(constraints.get('min_track_width'), fab['track_width']),
         'drc_clearance':        fab['clearance'],
         'drc_hole_to_hole':     fab['hole_to_hole'],
@@ -229,6 +240,13 @@ def print_design_rules(pcb_path):
     print(f"  - copper clearance {eff['drc_clearance']} = via/pad and via/via copper, "
           "between DIFFERENT nets. Same-net via-pad copper clearance is 0 "
           "(via-in-pad) where the fab allows it; hole-to-hole still applies.")
+    # Advanced small via for fine-pitch escape (4+ layer). Standard via can't
+    # dog-bone / via-in-pad sub-0.5mm BGA/QFN balls (issues #99/#122).
+    if eff['fine_via_diameter'] < eff['fab']['via_diameter']:
+        print(f"  - fine-pitch escape via {eff['fine_via_diameter']}/{eff['fine_via_drill']} "
+              "(JLC advanced, small extra cost): use ONLY for sub-~0.5mm-pitch "
+              "BGA/QFN escape (bga_fanout/qfn_fanout/route_diff for those parts); "
+              "keep the standard via for general routing.")
 
     # Routing flags: track_width is a per-class MINIMUM (keep, for current/
     # impedance); clearance is the per-class default. But the VIA uses the small

@@ -118,6 +118,12 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
      is only a drawing default (a max), far too big for fine-pitch escape — using
      it everywhere was #115 (butterstick 0.8 vs the original's 0.45; lily58/crkbd
      QFN escapes need ~0.45-0.6, unroutable at 0.8).
+   - FINE-PITCH ESCAPE VIA (4+ layer): for sub-~0.5mm-pitch BGA/QFN parts whose
+     balls the standard via can't dog-bone/via-in-pad, pass the smaller
+     `fine-pitch escape via` that `--design-rules` prints (e.g. 0.30/0.15, JLC
+     advanced) as `--via-size`/`--via-drill` to THAT part's bga_fanout/route_diff
+     only; keep the standard via for general route.py and route_planes (#99/#122).
+     (route_planes' pad repair auto-escalates to it for last-resort plane taps.)
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
