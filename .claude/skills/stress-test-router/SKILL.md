@@ -60,6 +60,9 @@ Hard operational limits (violating these has crashed the machine before):
 - On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to
   `bga_fanout.py` (`--layers F.Cu In1.Cu In2.Cu B.Cu`); its default is the two
   outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
+  `route_diff.py` has the same F.Cu/B.Cu default and the same trap: pass the
+  full copper-layer list so it can launch from inner-layer escaped diff stubs,
+  or pairs are silently stranded (issue #116, butterstick 8/40 -> 22/40).
 - Subagents must not end their turn while a routing process is still
   running (the run gets orphaned — runbook rule 11).
 

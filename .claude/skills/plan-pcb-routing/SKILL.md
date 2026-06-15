@@ -186,7 +186,10 @@ If differential pairs are found:
   so P and N escape the array together on one layer. Don't just exclude the
   pair from fanout and hand it to `route_diff.py`: it can't launch from the
   deep balls ("no valid position at any setback"). `route_diff.py` then
-  connects the escaped stubs. Pairs not on an array package don't need fanout.
+  connects the escaped stubs — **but on a 4+ layer board you must pass those
+  inner layers to `route_diff.py` via `--layers` too** (it defaults to F.Cu
+  B.Cu, so an inner-layer escaped stub is otherwise unreachable and the pair is
+  silently dropped — issue #116). Pairs not on an array package don't need fanout.
 
 > **Tip:** Name-based detection misses pairs with unconventional names. For boards with
 > high-speed ICs (PHYs, SerDes, USB, FPGA transceivers), or when detection finds suspiciously
@@ -472,8 +475,18 @@ Insert diff pair routing after fanout but before single-ended signals:
 python3 route_diff.py board.kicad_pcb \
     --nets "*LVDS*" "*USB*" \
     --diff-pair-gap 0.15 \
+    --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_diff.kicad_pcb
 ```
+
+**Escape layers (multi-layer boards):** like `bga_fanout.py`, `route_diff.py`
+defaults to `--layers F.Cu B.Cu` only. On a 4+ layer board you MUST pass every
+copper layer — when a pair was escaped by `bga_fanout.py` onto an INNER layer,
+`route_diff.py` can only launch from those escaped stubs if that inner layer is
+in `--layers`. Omitting it strands the inner-layer stubs and silently drops
+those pairs (you'll see a low routed-pair count, e.g. 8/40 instead of 22/40 —
+issue #116). Use the same copper-layer list you passed to `bga_fanout.py`; drop
+`--layers` only for true 2-layer boards.
 
 Key options:
 - `--diff-pair-gap 0.1` - Gap between P and N traces (mm)
