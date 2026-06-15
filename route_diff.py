@@ -620,6 +620,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     total_time += dp_time
     total_iterations += dp_iterations
 
+    # Report nets whose far-apart (uncoupled) terminal pads were peeled off the
+    # coupled chain (issue #121). Those pads are not a coupled differential
+    # connection (e.g. spread-out test points), so they are left for a separate
+    # single-ended pass (route.py); the plan-pcb-routing workflow sequences that
+    # after this step. Surfaced here and in JSON_SUMMARY so the follow-up knows
+    # which nets still need P->P / N->N routing.
+    single_ended_followup = sorted(state.diff_pair_single_ended_nets.values())
+    if single_ended_followup:
+        print("\n" + "=" * 60)
+        print(f"{len(single_ended_followup)} net(s) have far-apart terminal pads "
+              f"peeled from the coupled chain - route them single-ended next:")
+        for nm in single_ended_followup:
+            print(f"  {nm}")
+        print("  e.g.  route.py <this_output> <out2> --nets " +
+              " ".join(f"'{n}'" for n in single_ended_followup[:3]) +
+              (" ..." if len(single_ended_followup) > 3 else ""))
+        print("=" * 60)
+
     # Run reroute loop for nets that were ripped during diff pair routing
     rq_successful, rq_failed, rq_time, rq_iterations, route_index = run_reroute_loop(
         state, route_index_start=route_index,
@@ -702,6 +720,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
         'polarity_swapped_pairs': sorted(polarity_swapped_pairs),
+        'single_ended_followup_nets': sorted(state.diff_pair_single_ended_nets.values()),
         'target_swaps': [{'pair1': k, 'pair2': v} for k, v in target_swaps.items() if k < v],
         'layer_swaps': total_layer_swaps,
         'successful': successful,

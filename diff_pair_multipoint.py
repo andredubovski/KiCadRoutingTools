@@ -113,6 +113,27 @@ def _terminal_center(terminal: Tuple[Pad, Pad]) -> Tuple[float, float]:
     return ((pp.global_x + nn.global_x) / 2, (pp.global_y + nn.global_y) / 2)
 
 
+def terminal_separation(terminal: Tuple[Pad, Pad]) -> float:
+    """P-to-N pad distance (mm) of a terminal."""
+    pp, nn = terminal
+    return math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
+
+
+def classify_terminals(terminals: List[Tuple[Pad, Pad]], config: GridRouteConfig
+                       ) -> Tuple[List[Tuple[Pad, Pad]], List[Tuple[Pad, Pad]]]:
+    """Split terminals into (coupled, uncoupled).
+
+    A terminal is coupled when its P and N pads are close enough to launch a real
+    differential pair; uncoupled when they are too far apart to be a coupled
+    connection (e.g. test points on opposite sides of a part). Threshold =
+    diff_pair_uncouple_factor * (track_width + diff_pair_gap) (issue #121)."""
+    threshold = config.diff_pair_uncouple_factor * (config.track_width + config.diff_pair_gap)
+    coupled, uncoupled = [], []
+    for t in terminals:
+        (coupled if terminal_separation(t) <= threshold else uncoupled).append(t)
+    return coupled, uncoupled
+
+
 def candidate_terminal_chains(terminals: List[Tuple[Pad, Pad]],
                               max_candidates: int = 4) -> List[List[Tuple[Pad, Pad]]]:
     """Rank terminal orderings for an open chain (each terminal has only two
@@ -266,11 +287,38 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     Returns (leg_results, merged_result) on full success, ([], None) on
     failure (failed attempts' legs are ripped back out).
     """
-    pcb_data = state.pcb_data
     config = state.config
 
-    chains = candidate_terminal_chains(terminals)
     print(f"  Multi-point pair: {len(terminals)} terminals, {len(terminals) - 1} legs")
+    # Try the full coupled chain first - a pair that routes fine through a
+    # widely-spaced terminal (e.g. a test point reached as a chain end) must not
+    # be broken up needlessly (issue #121).
+    leg_results, merged = _route_terminal_set(state, pair, pair_name, terminals)
+    if merged is not None:
+        return leg_results, merged, []
+
+    # Full chain failed. If some terminals are too far apart to be a coupled
+    # differential connection, peel them off and route only the coupled
+    # terminals as a pair; the peeled pads are connected single-ended afterward.
+    coupled, uncoupled = classify_terminals(terminals, config)
+    if uncoupled and len(coupled) >= 2:
+        far = min(terminal_separation(t) for t in uncoupled)
+        print(f"  Coupled chain failed; peeling {len(uncoupled)} far-apart terminal(s) "
+              f"(P/N >= {far:.1f}mm apart) to route single-ended, retrying "
+              f"coupled {len(coupled)}-terminal chain...")
+        leg_results, merged = _route_terminal_set(state, pair, pair_name, coupled)
+        if merged is not None:
+            return leg_results, merged, uncoupled
+    return [], None, []
+
+
+def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
+                        terminals: List[Tuple[Pad, Pad]]):
+    """Route a fixed set of terminals as a coupled chain, trying alternative
+    chain orderings. Returns (leg_results, merged) or ([], None)."""
+    if len(terminals) < 2:
+        return [], None
+    chains = candidate_terminal_chains(terminals)
     for attempt, chain in enumerate(chains):
         if attempt > 0:
             print(f"  Trying alternative chain order ({attempt + 1}/{len(chains)})...")

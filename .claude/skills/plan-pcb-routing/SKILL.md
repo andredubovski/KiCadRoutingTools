@@ -239,6 +239,19 @@ Also note: `route_diff.py` resolves P/N polarity mismatches automatically, which
 target pad net assignments. Swaps are reported in the output — when they happen, the
 schematic sync step below applies (see "Schematic Synchronization After Swaps").
 
+**Far-apart terminal pads → single-ended follow-up (issue #121).** A "diff pair"
+sometimes has pads that aren't a coupled connection — e.g. a P and an N test point
+several mm apart, or a logical pair daisy-chained through spread-out parts. If the
+coupled chain can't be routed, `route_diff.py` peels those far-apart pads off the
+chain (routing the genuinely-coupled terminals as a pair) and lists the affected
+nets under `single_ended_followup_nets` in its `JSON_SUMMARY` (and a "route them
+single-ended next" block on stdout). Those pads are **not** dropped — the **Signal
+Routing** step (`route.py "*" "!GND" "!VCC"`) connects them P→P / N→N along with
+every other unrouted net, since they remain unrouted after the diff-pair step. So:
+**do not exclude the diff-pair nets from the signal-routing step's net selection** —
+that step is what finishes the peeled pads. If you scope the signal step to specific
+nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
+
 ### Check for DDR/High-Speed Memory Signals
 
 Look for DDR signal patterns in the net list that may need length matching:
@@ -298,11 +311,14 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
    nets that planes will handle (`"*" "!GND" "!VCC"`).
 2. **Differential Pairs** - The most constrained routes claim their channels before
-   anything else can block them (if present).
+   anything else can block them (if present). May peel far-apart "terminal" pads
+   (e.g. spread-out test points) off the coupled chain and leave them for the
+   signal-routing step (reported as `single_ended_followup_nets`, issue #121).
 3. **Signal Routing** - All remaining nets, **excluding the plane nets**
    (`--nets "*" "!GND" "!VCC"`). Routing them as tracks now would defeat the
    planes step - the exclusions are mandatory whenever a later step gives those
-   nets planes.
+   nets planes. This step also finishes any diff-pair pads peeled off in step 2,
+   so keep the diff-pair nets in its selection (the `"*"` covers them).
 4. **Power Planes** - Create GND and VCC planes together. Stitching vias adapt
    around the routed signals; the reverse is not true - a stitching via placed
    early can block the only clean channel for a diff pair (issue #56). If signal
