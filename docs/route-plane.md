@@ -204,6 +204,8 @@ By default the CLI keeps the legacy "via-in-pad" behavior — `--same-net-pad-cl
 
 In the GUI Planes tab, the **Same-net Pad Clearance** spin control defaults to the main `Clearance` value (so the GUI default is to avoid via-in-pad). Tick **Allow via-in-pad (override clearance)** to restore the legacy behavior — this disables the spin control and passes `-1` to the CLI; unticking re-enables the spin control and resumes using its value.
 
+**Hole-to-hole is separate from via-in-pad.** `--same-net-pad-clearance` governs only the *copper* clearance to same-net pads. The *drill-to-drill* (hole-to-hole) minimum is a physical fab constraint and is always enforced against every drilled hole regardless of net — so even with via-in-pad enabled (`-1`), stitching vias still keep `--hole-to-hole-clearance` away from same-net **through-hole** pad drills (and from other vias). This is why via-in-pad applies to same-net **SMD** pads (no drill), but a stitching via will never be placed within the hole-to-hole minimum of a same-net through-hole pad (issue #125).
+
 ### Via Obstacle Checking
 
 Since vias are through-hole (spanning all layers), the obstacle map checks for clearance on **all copper layers**, not just the plane layer. This prevents DRC violations from vias overlapping tracks on inner layers.

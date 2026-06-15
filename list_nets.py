@@ -222,6 +222,13 @@ def print_design_rules(pcb_path):
           f"via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
           f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}  "
           f"track {eff['min_track_width']}")
+    # The router must honour these as DISTINCT rules (issue #125):
+    print(f"  - hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
+          "net-INDEPENDENT: applies to via/via, via/pad-drill and pad-drill/pad-drill "
+          "on ALL nets, INCLUDING same-net.")
+    print(f"  - copper clearance {eff['drc_clearance']} = via/pad and via/via copper, "
+          "between DIFFERENT nets. Same-net via-pad copper clearance is 0 "
+          "(via-in-pad) where the fab allows it; hole-to-hole still applies.")
 
     # Routing flags: track_width is a per-class MINIMUM (keep, for current/
     # impedance); clearance is the per-class default. But the VIA uses the small

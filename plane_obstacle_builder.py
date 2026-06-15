@@ -663,9 +663,13 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     for via in pcb_data.vias:
         drill_holes.append((via.x, via.y, via.drill))
 
+    # Hole-to-hole is a physical drill-to-drill minimum, independent of net, so
+    # include the plane net's OWN through-hole pads too (exclude_net_id is NOT
+    # skipped here). Otherwise a stitching via can land within the fab
+    # hole-to-hole minimum of a same-net TH pad -- issue #125
+    # (PAD-DRILL-VIA-DRILL-SAME-NET). A same-net TH pad already reaches the
+    # plane through its own barrel, so blocking vias around it costs nothing.
     for net_id, pads in pcb_data.pads_by_net.items():
-        if net_id == exclude_net_id:
-            continue
         for pad in pads:
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))

@@ -300,7 +300,12 @@ It reads two tiers of rules and combines them with the JLCPCB fab floor:
   nominal and still pass DRC (issues #111/#115).
 
 From these it prints a **manufacturing floor** (the Constraint or the JLC fab
-minimum for the board's layer count, whichever is larger) and ready-to-paste
+minimum for the board's layer count, whichever is larger). The floor spells out
+two distinct rules the router honours: **hole-to-hole** (drill-to-drill) is
+net-INDEPENDENT and applies to via/via, via/pad-drill and pad-drill/pad-drill on
+*all* nets including same-net; **copper clearance** applies to via/pad and
+via/via copper between *different* nets, while same-net via-pad copper clearance
+may be 0 (via-in-pad) where the fab allows it. It then emits ready-to-paste
 flags: routing uses the net-class `--clearance`/`--track-width` but the small
 **working** `--via-size`/`--via-drill` from the floor (not the net-class
 `via_diameter`), and `check_drc.py` is graded at the floor
