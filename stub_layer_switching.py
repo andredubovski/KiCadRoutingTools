@@ -562,6 +562,46 @@ def swap_would_orphan_smd_pad(pcb_data: PCBData, stub: StubInfo,
     return False, ""  # no pad at the recorded position - other checks decide
 
 
+def via_barrel_clear_of_foreign_copper(pad_x: float, pad_y: float, net_id: int,
+                                       pcb_data: PCBData, config: GridRouteConfig,
+                                       exclude_net_ids: Set[int]) -> Tuple[bool, str]:
+    """Check a through-via dropped at (pad_x, pad_y) clears other-net copper.
+
+    A layer-switch pad via is a through-hole (F.Cu..B.Cu), so its barrel spans
+    every copper layer. Another net's track routed on an INNER layer under an
+    SMD pad is legal (SMD pads only block their own layer) but sits directly in
+    the barrel's path, so the via shorts it (issue #123: a diff-pair launch via
+    landed on GP26's In1.Cu fanout track running under a BGA pad). Own net and
+    the swap partner's nets are excluded - their copper is the connection or is
+    moving with the swap.
+
+    Returns (clear, reason).
+    """
+    exclude = set(exclude_net_ids) | {net_id}
+    via_r = config.via_size / 2
+    # Foreign tracks on ANY layer - the barrel passes through all of them.
+    for seg in pcb_data.segments:
+        if seg.net_id in exclude:
+            continue
+        dist = point_to_segment_distance_seg(pad_x, pad_y, seg)
+        if dist < via_r + config.clearance + seg.width / 2:
+            net = pcb_data.nets.get(seg.net_id)
+            nm = net.name if net else f"net {seg.net_id}"
+            return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would punch through "
+                           f"{nm} track on {seg.layer} (gap {dist - via_r - seg.width/2:.3f}mm)")
+    # Foreign vias - barrel-to-barrel clearance.
+    for v in pcb_data.vias:
+        if v.net_id in exclude:
+            continue
+        d = math.hypot(v.x - pad_x, v.y - pad_y)
+        if d < via_r + config.clearance + v.size / 2:
+            net = pcb_data.nets.get(v.net_id)
+            nm = net.name if net else f"net {v.net_id}"
+            return False, (f"pad via at ({pad_x:.2f},{pad_y:.2f}) would clash with "
+                           f"{nm} via (gap {d - via_r - v.size/2:.3f}mm)")
+    return True, ""
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
@@ -617,6 +657,17 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     )
     if not setback_valid:
         return False, setback_reason
+
+    # Check 4: a pad via dropped when switching from F.Cu is a through-hole whose
+    # barrel spans every layer - make sure it doesn't punch through another net's
+    # copper routed on an inner layer under the pad (issue #123).
+    via_exclude = set(swap_partner_net_ids or set()) | {stub_p.net_id, stub_n.net_id}
+    for stub in (stub_p, stub_n):
+        if needs_pad_via_for_switch(stub):
+            via_clear, via_reason = via_barrel_clear_of_foreign_copper(
+                stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config, via_exclude)
+            if not via_clear:
+                return False, via_reason
 
     return True, ""
 
@@ -884,6 +935,14 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     )
     if not setback_valid:
         return False, setback_reason
+
+    # Check 3: pad-via barrel must clear other-net under-pad copper (issue #123)
+    if needs_pad_via_for_switch(stub):
+        via_clear, via_reason = via_barrel_clear_of_foreign_copper(
+            stub.pad_x, stub.pad_y, stub.net_id, pcb_data, config,
+            set(swap_partner_net_ids or set()))
+        if not via_clear:
+            return False, via_reason
 
     return True, ""
 

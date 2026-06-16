@@ -643,6 +643,19 @@ def apply_diff_pair_layer_swaps(
                         if fan_layer != src_layer:
                             print(f"    Bare-pad target launch layer: {fan_layer} "
                                   f"(most open; src is {src_layer})")
+                # The fan-out drops a through-via on each pad; don't let either
+                # barrel punch through another net's under-pad copper (issue #123).
+                from stub_layer_switching import via_barrel_clear_of_foreign_copper
+                bp_exclude = {pair.p_net_id, pair.n_net_id}
+                p_clear, p_reason = via_barrel_clear_of_foreign_copper(
+                    p_tgt_x, p_tgt_y, pair.p_net_id, pcb_data, config, bp_exclude)
+                n_clear, n_reason = via_barrel_clear_of_foreign_copper(
+                    n_tgt_x, n_tgt_y, pair.n_net_id, pcb_data, config, bp_exclude)
+                if not p_clear or not n_clear:
+                    print(f"    Bare-pad target swap skipped for {pair_name}: "
+                          f"{p_reason if not p_clear else n_reason}")
+                    continue
+
                 via_p, stub_p = apply_bare_pad_target_via(
                     pcb_data, pair.p_net_id, p_tgt_x, p_tgt_y, fan_layer,
                     src_cx, src_cy, config)
