@@ -1466,7 +1466,8 @@ def generate_bga_fanout(footprint: Footprint,
                         via_size: float = 0.5,
                         via_drill: float = 0.3,
                         check_for_previous: bool = False,
-                        no_inner_top_layer: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        no_inner_top_layer: bool = False,
+                        escape_method: str = 'channel') -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1491,9 +1492,16 @@ def generate_bga_fanout(footprint: Footprint,
         via_drill: Drill size for vias (default 0.2mm)
         check_for_previous: If True, skip pads that already have fanout tracks
         no_inner_top_layer: If True, inner pads cannot use F.Cu (top layer)
+        escape_method: 'channel' (default) is the 45-stub + channel router (with
+            differential-pair support). 'underpad' is the dense-array grid escape
+            (issue #122): every signal ball drops a via in its pad and routes
+            straight UNDER the pad field on an inner layer, jogging into a
+            between-ball channel only to dodge a via. It escapes fully-populated
+            arrays the channel router can't (ulx3s 22x22), but routes diff pairs
+            as single-ended. Power/plane nets are skipped (they tap their plane).
 
     Returns:
-        Tuple of (tracks, vias_to_add, vias_to_remove)
+        Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
@@ -1508,6 +1516,20 @@ def generate_bga_fanout(footprint: Footprint,
     print(f"  Grid: {len(grid.rows)} rows x {len(grid.cols)} columns")
     print(f"  Center: ({grid.center_x:.2f}, {grid.center_y:.2f})")
     print(f"  Boundary: X[{grid.min_x:.2f}, {grid.max_x:.2f}], Y[{grid.min_y:.2f}, {grid.max_y:.2f}]")
+
+    # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
+    if escape_method == 'underpad':
+        from bga_fanout.underpad import generate_underpad_escape
+        net_filter_fn = None
+        if net_filter:
+            net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+        tracks, vias_to_add, failed_nets = generate_underpad_escape(
+            footprint, pcb_data, grid, layers,
+            track_width=track_width, clearance=clearance,
+            via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
+            net_filter_fn=net_filter_fn,
+        )
+        return tracks, vias_to_add, [], failed_nets
 
     channels = calculate_channels(grid)
     h_count = len([c for c in channels if c.orientation == 'horizontal'])
@@ -1957,6 +1979,13 @@ def main():
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
                              'Use when there is not enough clearance on top layer for inner routes.')
+    parser.add_argument('--escape-method', choices=['channel', 'underpad'], default='channel',
+                        help='Fanout engine (default: channel). "channel" = 45-stub + '
+                             'channel router with diff-pair support. "underpad" = dense-array '
+                             'grid escape (issue #122): each signal vias in its pad and routes '
+                             'under the pad field on inner layers, escaping fully-populated '
+                             'arrays (e.g. ulx3s 22x22) the channel router cannot. Use a small '
+                             'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm).')
 
     args = parser.parse_args()
 
@@ -2003,7 +2032,8 @@ def main():
         via_size=args.via_size,
         via_drill=args.via_drill,
         check_for_previous=args.check_for_previous,
-        no_inner_top_layer=args.no_inner_top_layer
+        no_inner_top_layer=args.no_inner_top_layer,
+        escape_method=args.escape_method
     )
 
     if tracks:

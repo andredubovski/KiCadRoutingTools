@@ -77,8 +77,15 @@ machine before):
   floor** (the design-rules step prints it, e.g. 0.1) — this is the common cause,
   not pitch: even an 0.8 mm-pitch BGA drops balls at `--clearance 0.2` (a 0.2 mm
   track won't fit the ~0.45 mm inter-ball gap) but escapes all of them at 0.1.
-  If still short, add the fine-pitch escape via / smaller `--track-width`. Don't
-  start signal routing with balls still dropped.
+  If still short, add the fine-pitch escape via / smaller `--track-width`. If a
+  **dense, fully-populated array** still drops balls at the floor (the channel
+  router over-subscribes the between-row channels — e.g. ulx3s 22×22 drops ~20),
+  re-run with **`--escape-method underpad`** and a small via/track (e.g.
+  `--via-size 0.35 --track-width 0.12 --clearance 0.1`): it routes each ball under
+  the pad field on inner layers and escapes what `channel` can't (→ 0). It routes
+  diff pairs single-ended and skips power/plane nets (plane them first), so reach
+  for it specifically when `channel` floors out on a dense array. Don't start
+  signal routing with balls still dropped.
 - Track liveness from disk (results JSON + run-dir activity) via
   `stress_status.sh` — NOT the notification stream, which drops and duplicates.
 

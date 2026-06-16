@@ -144,6 +144,18 @@ rippable blockers", so it must be caught here. If `failed > 0`, retry the fanout
 more layers and/or a smaller `--clearance` (see "Escape clearance" below) before
 moving on — do not start signal routing while balls are still dropped.
 
+**If balls still drop on a dense, fully-populated array, switch to the under-pad
+escape:** add `--escape-method underpad` with a small via/track for the pitch
+(e.g. `--via-size 0.35 --track-width 0.12 --clearance 0.1` at 0.8 mm pitch). The
+default `channel` engine confines every layer to the gaps *between* ball rows, so
+a few channels over-subscribe and the deepest balls can't escape; `underpad`
+routes each ball *under* the pad field on inner layers via a via-in-pad and
+escapes arrays `channel` can't (e.g. a 22×22 BGA that drops ~20 balls → 0).
+Caveats: it routes diff pairs as **single-ended**, and it **skips power/plane
+nets** (they tap their plane), so create the planes first (or exclude power with
+`--nets`). Rule of thumb: try `channel` first (keeps diff pairs); fall back to
+`underpad` when `channel` can't escape a dense array.
+
 Report to user:
 - List of components that may need fanout
 - Package type, pad count, and grid depth for each

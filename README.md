@@ -271,6 +271,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
+- Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](bga_fanout/README.md#escape-methods)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 

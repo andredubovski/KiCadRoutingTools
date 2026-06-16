@@ -162,6 +162,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_rebalance': dialog.fanout_tab.bga_options.rebalance_escape.GetValue(),
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
+        'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
 
         # Planes tab settings
@@ -498,6 +499,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.check_previous.SetValue(settings['fanout_bga_check_previous'])
     if 'fanout_bga_no_inner_top' in settings:
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
+    if 'fanout_bga_underpad' in settings:
+        dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
 

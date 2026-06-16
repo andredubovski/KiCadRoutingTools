@@ -163,7 +163,13 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    this is the common cause regardless of pitch: an 0.8 mm-pitch BGA drops balls
    at --clearance 0.2 (a 0.2 mm track won't fit the ~0.45 mm inter-ball gap) but
    escapes all of them at 0.1. If still short, add the fine-pitch escape via /
-   smaller --track-width. Do not start signal routing while balls are dropped.
+   smaller --track-width. If a DENSE, fully-populated array still drops balls at
+   the floor (channel router over-subscribes the between-row channels, e.g. ulx3s
+   22x22 drops ~20), re-run with `--escape-method underpad` + small via/track
+   (e.g. --via-size 0.35 --track-width 0.12 --clearance 0.1): it routes each ball
+   UNDER the pad field on inner layers and escapes what channel can't (-> 0). It
+   routes diff pairs single-ended and skips power/plane nets (plane them first).
+   Do not start signal routing while balls are dropped.
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use
    --no-gnd-vias). CRITICAL: a pair whose pads are on a BGA/PGA being fanned
