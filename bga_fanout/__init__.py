@@ -1437,6 +1437,20 @@ def build_diff_pair_routes(
     return routes
 
 
+def single_pad_net_ids(footprint: Footprint, pcb_data: PCBData) -> Set[int]:
+    """Net IDs on `footprint` that have only one pad board-wide, i.e. nothing to
+    connect to (spare/NC pins). Fanning these out is pointless and burns escape
+    channels that real signals need on a dense BGA (issue #122) - the human
+    ulx3s board leaves all 25 of its NC balls unrouted."""
+    nc = set()
+    for pad in footprint.pads:
+        if not pad.net_id or pad.net_id == 0:
+            continue
+        if len(pcb_data.pads_by_net.get(pad.net_id, [])) < 2:
+            nc.add(pad.net_id)
+    return nc
+
+
 def generate_bga_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -1596,11 +1610,19 @@ def generate_bga_fanout(footprint: Footprint,
     # track and via IS an obstacle. extra_clearance=track_width/2 keeps the
     # stub's edge (not just its centerline) off pads. Through-hole pads block
     # all layers; SMD pads block their layer.
+    # Single-pad / NC balls have nothing to connect to; fanning them just burns
+    # escape channels real signals need on a dense BGA (issue #122). Skip them.
+    nc_net_ids = single_pad_net_ids(footprint, pcb_data)
+    if nc_net_ids:
+        print(f"  Skipping {len(nc_net_ids)} single-pad/NC net(s) (nothing to connect to)")
+
     fanned_net_ids: Set[int] = set()
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
             continue
         if pad.net_name.lower().startswith('unconnected-'):
+            continue
+        if pad.net_id in nc_net_ids:
             continue
         if net_filter and not matches_net_filter(pad.net_name, net_filter):
             continue
@@ -1689,6 +1711,10 @@ def generate_bga_fanout(footprint: Footprint,
 
             # Skip unconnected nets (KiCad pins not connected in schematic)
             if pad.net_name.lower().startswith('unconnected-'):
+                continue
+
+            # Skip single-pad/NC balls - nothing to route to (issue #122)
+            if pad.net_id in nc_net_ids:
                 continue
 
             if net_filter and not matches_net_filter(pad.net_name, net_filter):
@@ -2014,6 +2040,7 @@ def main():
         'escaped': escaped,
         'failed': len(unescaped),
         'unescaped_nets': unescaped,
+        'skipped_nc': len(single_pad_net_ids(footprint, pcb_data)),
         'clearance': args.clearance,
         'track_width': args.track_width,
         'layers': list(args.layers) if args.layers else None,

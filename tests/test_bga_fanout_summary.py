@@ -41,8 +41,11 @@ def main():
     if m:
         s = json.loads(m.group(1))
         for key in ("component", "requested", "escaped", "failed",
-                    "unescaped_nets", "clearance", "track_width", "layers"):
+                    "unescaped_nets", "skipped_nc", "clearance",
+                    "track_width", "layers"):
             checks.append((f"summary has '{key}'", key in s))
+        checks.append(("skipped_nc is an int >= 0",
+                       isinstance(s.get("skipped_nc"), int) and s["skipped_nc"] >= 0))
         if all(k in s for k in ("requested", "escaped", "failed")):
             checks.append(("requested == escaped + failed",
                            s["requested"] == s["escaped"] + s["failed"]))
