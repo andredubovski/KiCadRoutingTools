@@ -85,9 +85,20 @@ def _oriented(terminal: Tuple[Pad, Pad], pair: DiffPairNet) -> Tuple[Pad, Pad]:
 
 def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
                             ) -> List[Tuple[Pad, Pad]]:
-    """Group the pair's pads into (p_pad, n_pad) terminals by greedy nearest
-    matching. Each terminal is a P pad and its physically adjacent N pad
-    (connector pins, IC input pair, termination resistor, ...)."""
+    """Group the pair's pads into (p_pad, n_pad) terminals by greedy matching,
+    preferring P/N pads on the SAME component before a globally-closer
+    cross-component pad. Each terminal is a P pad and its physically adjacent N
+    pad (connector pins, IC input pair, termination resistor, ...).
+
+    Same-component-first matters when a connector's two diff pins sit farther
+    apart than a neighbouring part's pad: e.g. a USB connector J11 with D+/D-
+    pins 3mm apart next to test points TP9/TP10. Plain greedy-nearest would
+    cross-couple J11.D+ <-> TP10 (1.7mm) and TP9 <-> J11.D- (1.8mm) instead of
+    the connector's real mates J11.D+ <-> J11.D- (3mm) and TP9 <-> TP10 (2.3mm).
+    Those bogus terminals then route a coupled leg straight across the partner
+    polarity's connector pad, shorting the pair (castor_pollux /MCU/CONN_D).
+    Pairing the connector's own pins keeps each leg clear of the partner pad
+    (and a too-wide own-pin terminal is later peeled to single-ended)."""
     p_pads = pcb_data.pads_by_net.get(p_net_id, [])
     n_pads = pcb_data.pads_by_net.get(n_net_id, [])
 
@@ -95,12 +106,15 @@ def get_diff_pair_terminals(pcb_data: PCBData, p_net_id: int, n_net_id: int
     for pp in p_pads:
         for nn in n_pads:
             dist = math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
-            candidates.append((dist, id(pp), id(nn), pp, nn))
-    candidates.sort(key=lambda c: c[0])
+            cross_comp = 0 if pp.component_ref == nn.component_ref else 1
+            candidates.append((cross_comp, dist, id(pp), id(nn), pp, nn))
+    # All same-component pairs first (closest within that class), then
+    # cross-component leftovers by distance.
+    candidates.sort(key=lambda c: (c[0], c[1]))
 
     terminals = []
     used_p, used_n = set(), set()
-    for dist, pid, nid, pp, nn in candidates:
+    for cross_comp, dist, pid, nid, pp, nn in candidates:
         if pid in used_p or nid in used_n:
             continue
         used_p.add(pid)
