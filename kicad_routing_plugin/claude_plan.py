@@ -21,7 +21,9 @@ PLAN_RESULT_SCHEMA = (
     'RESULT=<compact single-line JSON> with this exact schema: '
     '{"steps": [ '
     '{"action": "fanout", "component": "<ref e.g. U1>", "kind": "bga"|"qfn", '
-    '"nets": ["<glob>", ...]} | '
+    '"nets": ["<glob>", ...], '
+    '"params": {"escape_method": "underpad"|"channel", "exit_margin": <mm>, '
+    '"extension": <mm>}} | '
     '{"action": "route_diff", "pairs": ["<pair base name, the net name with its '
     'P/N suffix stripped, e.g. /lvds_rx0>", ...], '
     '"params": {"diff_pair_width": <mm>, "diff_pair_gap": <mm>}} | '
@@ -193,6 +195,24 @@ def apply_step_params(step, dialog):
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
         if "reroute_ripped_nets" in params:
             opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
+    elif action == "fanout":
+        kind = (step.get("kind") or "bga").lower()
+        if kind == "bga":
+            opts = dialog.fanout_tab.bga_options
+            if "escape_method" in params:
+                opts.underpad_escape.SetValue(str(params["escape_method"]).lower() == "underpad")
+            if "exit_margin" in params:
+                try:
+                    opts.exit_margin.SetValue(float(params["exit_margin"]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric exit_margin={params['exit_margin']!r}")
+        else:
+            opts = dialog.fanout_tab.qfn_options
+            if "extension" in params:
+                try:
+                    opts.extension.SetValue(float(params["extension"]))
+                except (TypeError, ValueError):
+                    notes.append(f"ignored non-numeric extension={params['extension']!r}")
     return notes
 
 
@@ -404,7 +424,14 @@ class PlanExecutor:
         self.on_status(index, "running")
         self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
         try:
-            notes = apply_step_selection(step, self.dialog)
+            # Re-apply BOTH this step's parameters and its selection right before
+            # running it: consecutive steps of the same action share one tab's
+            # controls, so plan-time fill leaves only the last such step's
+            # track_width/clearance/via/diff-pair geometry in place. Without this
+            # re-apply, e.g. a fine-pitch route step and a general route step
+            # would both run at whichever was applied last.
+            notes = apply_step_params(step, self.dialog)
+            notes += apply_step_selection(step, self.dialog)
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])

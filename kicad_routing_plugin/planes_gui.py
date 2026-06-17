@@ -1050,6 +1050,7 @@ class PlanesTab(wx.Panel):
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 analysis_grid_step=config.get('analysis_grid_step', defaults.REPAIR_ANALYSIS_GRID_STEP),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                board_edge_clearance=config.get('board_edge_clearance', defaults.BOARD_EDGE_CLEARANCE),
                 max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
