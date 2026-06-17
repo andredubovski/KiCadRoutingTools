@@ -757,11 +757,30 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     base = disconnected(list(prunable))
     kept = list(prunable)
     removed = []
-    for c in candidates:
-        trial = [s for s in kept if s is not c]
-        if disconnected(trial) <= base:
-            kept = trial
-            removed.append(c)
+    # Removing a dead end can expose its neighbour as a new dead end (a chain
+    # unwinds one segment at a time), so iterate: re-derive candidates from what
+    # is left until a full pass removes nothing. A candidate whose removal would
+    # strand a pad stays load-bearing no matter what other dead copper goes, so
+    # cache those rejections and never re-test them (keeps it O(dead ends) and
+    # guarantees termination).
+    rejected = set()
+    while True:
+        progress = False
+        for c in candidates:
+            if id(c) in rejected or c not in kept:
+                continue
+            trial = [s for s in kept if s is not c]
+            if disconnected(trial) <= base:
+                kept = trial
+                removed.append(c)
+                progress = True
+            else:
+                rejected.add(id(c))
+        if not progress:
+            break
+        _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
+                                                vias=vias, pads=pads, tol=tol,
+                                                keep_terminal_escapes=not aggressive)
     return kept, removed
 
 

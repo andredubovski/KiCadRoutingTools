@@ -616,38 +616,64 @@ def remove_segments_from_content(content: str, segments: List,
         targets.add(seg_key(pos_key(s.start_x, s.start_y),
                             pos_key(s.end_x, s.end_y), s.layer, net_token))
 
-    # Match a full flat segment block: '(segment' then text / single-level
-    # parenthesised leaves up to the matching ')'.
-    block_pattern = re.compile(r'\(segment(?:[^()]|\([^()]*\))*\)', re.DOTALL)
     start_re = re.compile(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)')
     end_re = re.compile(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)')
     layer_re = re.compile(r'\(layer\s+"?([^")]+)"?\)')
     net_name_re = re.compile(r'\(net\s+"([^"]*)"\)')
     net_id_re = re.compile(r'\(net\s+(\d+)\)')
 
+    # Scan top-level (segment ...) blocks with a quote-aware paren matcher. A
+    # plain nested-paren regex breaks on KiCad v10 auto-net names that contain
+    # parentheses, e.g. (net "Net-(R2-Pad1)") -- the inner parens are inside a
+    # string and must not count toward block nesting.
+    out = []
+    pos = 0
+    n = len(content)
     count = 0
-
-    def maybe_remove(match):
-        nonlocal count
-        block = match.group(0)
+    while True:
+        j = content.find('(segment', pos)
+        if j < 0:
+            out.append(content[pos:])
+            break
+        out.append(content[pos:j])
+        depth = 0
+        in_str = False
+        k = j
+        while k < n:
+            ch = content[k]
+            if in_str:
+                if ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    k += 1
+                    break
+            k += 1
+        block = content[j:k]
         ms, me, ml = start_re.search(block), end_re.search(block), layer_re.search(block)
-        if not (ms and me and ml):
-            return block
-        if use_names:
-            mn = net_name_re.search(block)
-            net_token = mn.group(1) if mn else None
-        else:
-            mn = net_id_re.search(block)
-            net_token = int(mn.group(1)) if mn else None
-        k = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
-                    pos_key(float(me.group(1)), float(me.group(2))),
-                    ml.group(1), net_token)
-        if k in targets:
-            count += 1
-            return ''
-        return block
-
-    return block_pattern.sub(maybe_remove, content), count
+        keep = True
+        if ms and me and ml:
+            if use_names:
+                mn = net_name_re.search(block)
+                net_token = mn.group(1) if mn else None
+            else:
+                mn = net_id_re.search(block)
+                net_token = int(mn.group(1)) if mn else None
+            key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
+                          pos_key(float(me.group(1)), float(me.group(2))),
+                          ml.group(1), net_token)
+            if key in targets:
+                keep = False
+                count += 1
+        if keep:
+            out.append(block)
+        pos = k
+    return ''.join(out), count
 
 
 def swap_via_nets_at_positions(content: str, positions: set,
