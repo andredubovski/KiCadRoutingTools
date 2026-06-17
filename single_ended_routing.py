@@ -19,8 +19,7 @@ from connectivity import (
     compute_mst_edges,
     get_zone_connected_pad_groups
 )
-from obstacle_map import (build_obstacle_map, get_same_net_through_hole_positions,
-                          get_same_net_via_grid_positions)
+from obstacle_map import build_obstacle_map, get_same_net_through_hole_positions
 from bresenham_utils import walk_line
 from geometry_utils import simplify_path
 
@@ -666,11 +665,6 @@ def route_net(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
-    # Fix C: an existing same-net via also provides a free layer transition, so a
-    # path that changes layers at its cell reuses it instead of stacking a second
-    # via on top -- this is what stops duplicate / overlapping same-net vias when a
-    # later pass re-routes a net a prior pass already dropped a via on.
-    through_hole_positions = through_hole_positions | get_same_net_via_grid_positions(pcb_data, net_id, config)
 
     # Simplify path by removing collinear intermediate points
     path = simplify_path(path)
@@ -932,11 +926,6 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
-    # Fix C: an existing same-net via also provides a free layer transition, so a
-    # path that changes layers at its cell reuses it instead of stacking a second
-    # via on top -- this is what stops duplicate / overlapping same-net vias when a
-    # later pass re-routes a net a prior pass already dropped a via on.
-    through_hole_positions = through_hole_positions | get_same_net_via_grid_positions(pcb_data, net_id, config)
 
     # Simplify path by removing collinear intermediate points
     path = simplify_path(path)
@@ -1533,11 +1522,6 @@ def route_net_with_visualization(pcb_data: PCBData, net_id: int, config: GridRou
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
-    # Fix C: an existing same-net via also provides a free layer transition, so a
-    # path that changes layers at its cell reuses it instead of stacking a second
-    # via on top -- this is what stops duplicate / overlapping same-net vias when a
-    # later pass re-routes a net a prior pass already dropped a via on.
-    through_hole_positions = through_hole_positions | get_same_net_via_grid_positions(pcb_data, net_id, config)
 
     # Simplify path by removing collinear intermediate points
     path = simplify_path(path)
@@ -1871,11 +1855,6 @@ def route_multipoint_main(
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
-    # Fix C: an existing same-net via also provides a free layer transition, so a
-    # path that changes layers at its cell reuses it instead of stacking a second
-    # via on top -- this is what stops duplicate / overlapping same-net vias when a
-    # later pass re-routes a net a prior pass already dropped a via on.
-    through_hole_positions = through_hole_positions | get_same_net_via_grid_positions(pcb_data, net_id, config)
 
     # Convert path to segments/vias
     segments, vias = _path_to_segments_vias(
@@ -2027,11 +2006,6 @@ def route_multipoint_taps(
 
     # Get through-hole pad positions for this net (layer transitions without via)
     through_hole_positions = get_same_net_through_hole_positions(pcb_data, net_id, config)
-    # Fix C: an existing same-net via also provides a free layer transition, so a
-    # path that changes layers at its cell reuses it instead of stacking a second
-    # via on top -- this is what stops duplicate / overlapping same-net vias when a
-    # later pass re-routes a net a prior pass already dropped a via on.
-    through_hole_positions = through_hole_positions | get_same_net_via_grid_positions(pcb_data, net_id, config)
 
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first

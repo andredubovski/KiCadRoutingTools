@@ -1182,26 +1182,6 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
     return positions
 
 
-def get_same_net_via_grid_positions(pcb_data: PCBData, net_id: int,
-                                    config: GridRouteConfig) -> Set[Tuple[int, int]]:
-    """Get grid cells already occupied by vias on this net.
-
-    Like through-hole pads, an existing same-net via already connects all layers,
-    so a routed path that changes layers at that cell can REUSE the via instead of
-    stacking a fresh one on top of it. This is what prevents duplicate / overlapping
-    same-net vias when a later pass re-routes a net that a prior pass left a via on:
-    the new path transitions at the existing via's cell and no second via is created.
-
-    Returns the set of (gx, gy) cells where same-net vias exist.
-    """
-    coord = GridCoord(config.grid_step)
-    positions = set()
-    for via in pcb_data.vias:
-        if via.net_id == net_id:
-            positions.add(coord.to_grid(via.x, via.y))
-    return positions
-
-
 def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
                            blocked_cells=None):
     """Block an (N, 2) array of cells on one layer via the batch API."""
