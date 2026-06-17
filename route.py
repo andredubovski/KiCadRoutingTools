@@ -363,6 +363,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Find net IDs and filter already-routed nets
     net_ids = resolve_net_ids(pcb_data, net_names)
+    # Every net in this run's --nets filter, by name (not just the routable ones
+    # resolve_net_ids keeps). The dead-end sweep uses this so it also cleans
+    # inherited stubs on in-filter nets it did not actively route -- single-pad,
+    # already-connected, or failed nets -- while still excluding nets the user
+    # left out (GND / power planes routed in a later stage). Issue #84.
+    _scope_names = set(net_names or [])
+    sweep_scope_ids = {nid for nid, net in pcb_data.nets.items()
+                       if net.name in _scope_names} or set(net_ids)
     if not net_ids:
         print("No valid nets to route!")
         if return_results:
@@ -802,7 +810,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # so untouched planes / excluded nets are never altered. Routed dead ends are
     # dropped from `results`; original input-file dead ends are returned to strip
     # from the output file.
-    _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, scope_ids)
+    _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
     if _de_segs or _de_vias:
         print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
               f"{_de_vias} unsupported via(s)")
