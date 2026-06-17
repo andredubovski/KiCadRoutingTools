@@ -676,17 +676,25 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Block via placement near each drill hole
-    # New via drill needs to be hole_to_hole_clearance away from existing drill edge
+    # Block via placement near each drill hole.
+    # A via placed at a grid cell would sit at that cell's real center; block the
+    # cell when that center is within the hole-to-hole minimum of the REAL drill
+    # center. Tested in mm (not integer cells) so the keepout radius is not
+    # floored and the hole-center quantization does not let a via slip a sub-cell
+    # inside the minimum (issue #70 / #125: PAD-DRILL-VIA-DRILL at 0.1mm grid).
+    step = config.grid_step
     for hx, hy, drill_dia in drill_holes:
         # Required center-to-center distance = (existing_drill/2) + (new_via_drill/2) + clearance
         required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        expand = coord.to_grid_dist(required_dist)
+        req_sq = required_dist * required_dist
         gx, gy = coord.to_grid(hx, hy)
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
 
         for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * step
             for ey in range(-expand, expand + 1):
-                if ex*ex + ey*ey <= expand*expand:
+                cy = (gy + ey) * step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
                     obstacles.add_blocked_via(gx + ex, gy + ey)
 
 
@@ -1141,13 +1149,20 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
             continue  # SMD pad, no drill hole
 
         # Required center-to-center distance = (pad_drill/2) + (new_via_drill/2) + clearance
+        # mm-distance test (not floored integer cells) so a via cannot land a
+        # sub-cell inside the hole-to-hole minimum (issue #70 / #125).
         required_dist = pad.drill / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        expand = coord.to_grid_dist(required_dist)
-        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        req_sq = required_dist * required_dist
+        hx, hy = pad.global_x, pad.global_y
+        gx, gy = coord.to_grid(hx, hy)
+        step = config.grid_step
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
 
         for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * step
             for ey in range(-expand, expand + 1):
-                if ex*ex + ey*ey <= expand*expand:
+                cy = (gy + ey) * step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
                     # Skip the pad center - the router can use the existing
                     # through-hole for layer transitions without a new via
                     if ex == 0 and ey == 0:

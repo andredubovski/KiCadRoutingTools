@@ -319,6 +319,7 @@ python3 tests/test_snap_stub_gaps.py     # close small same-net gaps (extend stu
 python3 tests/test_remove_segments.py    # output segment removal (incl. v10 paren net names)
 python3 tests/test_orphan_tjunction.py   # orphan detection by real copper extent (no false T-junctions)
 python3 tests/test_restore_collision.py  # collision-safe rip-up restore: refuse stale copper that would short (#134)
+python3 tests/test_drill_hole_keepout.py # hole-to-hole via keepout by mm distance, not a floored disk (#70/#125)
 ```
 
 ## Verifying With KiCad's Own DRC (manual, not part of the tests)
