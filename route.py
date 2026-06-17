@@ -772,6 +772,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     successful = len(fully_routed_ids)
     failed = len(scope_ids) - successful
 
+    # Keep only each net's authoritative result in the write-list. routed_results
+    # holds one result per net; rip-reroute paths (restore_net, layer-swap) can
+    # leave a superseded duplicate of a net's result still in `results`, and its
+    # copper is then written alongside the authoritative one -- stacking coincident
+    # same-net vias (#87). Dropping by identity is safe now that the Phase-3 commit
+    # reconciles each net's result against its actual copper, so the authoritative
+    # result is the complete one (a dropped tap is flagged and re-routed, not lost).
+    _authoritative = {id(r) for r in routed_results.values()}
+    _stale = [r for r in results if id(r) not in _authoritative]
+    if _stale:
+        results[:] = [r for r in results if id(r) in _authoritative]
+        print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
