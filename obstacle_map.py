@@ -1349,6 +1349,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             True are left unblocked (used for connector-region exemptions)
     """
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    # Sub-cell offset of the real pad center from its quantized cell, so blocking
+    # is measured from the real center, not the grid cell (issue #70).
+    off_x = pad.global_x - gx * coord.grid_step
+    off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     clearance = clearance_override if clearance_override is not None else config.clearance
@@ -1379,7 +1383,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     # exemptions) filters the array with the same predicate.
     layer_idxs = [layer_map[layer] for layer in expanded_layers if layer in layer_map]
     cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
-                                    config.grid_step, corner_radius, corner_buffer)
+                                    config.grid_step, corner_radius, corner_buffer,
+                                    off_x, off_y)
     if skip_cell is not None and len(cells):
         keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in cells),
                            dtype=bool, count=len(cells))
@@ -1391,7 +1396,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     if any(layer.endswith('.Cu') for layer in expanded_layers):
         via_margin = config.via_size / 2 + clearance + extra_clearance
         via_cells = pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
-                                            config.grid_step, corner_radius, corner_buffer)
+                                            config.grid_step, corner_radius, corner_buffer,
+                                            off_x, off_y)
         if skip_cell is not None and len(via_cells):
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))

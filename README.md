@@ -767,7 +767,12 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
 --no-power-tap-neckdown       # Disable the neck-down retry of failed wide power routes
 
 # Algorithm
---grid-step 0.1         # Grid resolution (mm)
+--grid-step 0.1         # Grid resolution (mm). For dense or fine-pitch boards use
+                        # --grid-step 0.05: it gives the router room to route legally
+                        # around correctly-blocked pads, recovering both completion and
+                        # DRC-cleanliness (e.g. castor_pollux: 0.1mm 101 nets vs 0.05mm
+                        # 123 nets, both DRC-clean). The coarser the grid, the fewer legal
+                        # routes near tight pads.
 --via-cost 50           # Via penalty in 0.1mm grid steps (50 = 5mm of path; all cost knobs
                         # are mm-calibrated, so behavior is independent of --grid-step)
 --max-iterations 200000      # A* iteration limit
@@ -1037,9 +1042,9 @@ Features:
 - No coarse grid assignment before detailed routing to plan overall topology
 - No via cost or other parameter learning/tuning
 - No design rules by region/area support
-- Fine grid steps (e.g. 0.05mm) can leave sub-cell pad-clearance DRC encroachments
-  (obstacle expansion floors where pad clearance needs ceiling) - see
-  [issue #70](https://github.com/drandyhaas/KiCadRoutingTools/issues/70)
+- Greedy rip-up routing is sensitive to obstacle perturbation: a ~1% change in
+  blocked cells can swing completion noticeably on dense boards (a finer
+  `--grid-step` is the usual remedy)
 
 ## License
 

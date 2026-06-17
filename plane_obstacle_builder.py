@@ -462,7 +462,9 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     else:
         corner_radius = 0
 
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
+                                                   off_x=pad.global_x - gx * coord.grid_step,
+                                                   off_y=pad.global_y - gy * coord.grid_step):
         obstacles.add_blocked_via(cell_gx, cell_gy)
 
 
@@ -772,7 +774,9 @@ def build_routing_obstacle_map(
                         corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
                     else:
                         corner_radius = 0
-                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius):
+                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
+                                                                   off_x=pad.global_x - gx * coord.grid_step,
+                                                                   off_y=pad.global_y - gy * coord.grid_step):
                         obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
                     pad_count += 1
     if verbose:
