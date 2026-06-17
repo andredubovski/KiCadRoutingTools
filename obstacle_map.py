@@ -811,7 +811,8 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
                                          p_net_id: int, n_net_id: int,
                                          config: GridRouteConfig,
                                          exempt_capsules: List[Tuple[float, float, float, float, float]] = None,
-                                         extra_clearance: float = 0.0):
+                                         extra_clearance: float = 0.0,
+                                         exempt_pads: set = None):
     """Add a diff pair's own pads as obstacles for centerline routing.
 
     The diff pair's nets are excluded from the base obstacle map so the route can
@@ -831,6 +832,13 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
         exempt_capsules: List of (x1, y1, x2, y2, radius_mm) capsules in mm where
             pad blocking is skipped
         extra_clearance: Additional clearance to add (diff pair half-spacing)
+        exempt_pads: Optional set of id(pad) allowed to be opened by the capsules.
+            A capsule only carves out the corridor of the leg that built it, so on
+            a multi-point pair another terminal's pad that happens to fall inside
+            this corridor must stay fully blocked - otherwise the partner-polarity
+            track grazes it (castor_pollux: J2's corridor clipped the bottom of
+            J11's 4mm connector pad). When None, every own pad is exemptable
+            (the old behavior, correct for a single-terminal corridor set).
     """
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
@@ -859,9 +867,13 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
 
     for net_id in (p_net_id, n_net_id):
         for pad in pcb_data.pads_by_net.get(net_id, []):
+            # A foreign pad (one this leg's corridors don't serve) stays fully
+            # blocked; only this leg's own terminal pads may be opened.
+            skip = (in_exempt_capsule if (exempt_pads is None or id(pad) in exempt_pads)
+                    else None)
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config,
                               extra_clearance=extra_clearance,
-                              skip_cell=in_exempt_capsule)
+                              skip_cell=skip)
 
 
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,

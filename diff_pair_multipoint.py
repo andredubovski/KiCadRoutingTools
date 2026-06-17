@@ -551,13 +551,19 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             [(centers[i], src_dir, src_both), (centers[i + 1], tgt_dir, True)], config)
         corridor_cells = _capsule_cells(capsules, config)
 
+        # Only this leg's own terminal pads may be opened by its corridors; a
+        # different terminal's pad falling inside the corridor stays blocked so
+        # the partner-polarity track can't graze it (castor_pollux J11).
+        leg_pad_ids = {id(p) for p in (term_a[0], term_a[1], term_b[0], term_b[1])}
+
         def leg_own_obstacles(obstacles, pcb, p_net_id, n_net_id, cfg, extra_clearance):
             # Own stubs/tracks/pads as obstacles, with this leg's connector
             # corridors exempted (a previous leg's connectors at a shared
             # terminal must not block the opposite-side setback)
             add_own_stubs_as_obstacles_for_diff_pair(
                 obstacles, pcb, p_net_id, n_net_id, cfg, extra_clearance,
-                exclude_cells=corridor_cells, exempt_capsules=capsules)
+                exclude_cells=corridor_cells, exempt_capsules=capsules,
+                exempt_pads=leg_pad_ids)
 
         obstacles, unrouted_stubs = build_diff_pair_obstacles(
             state.diff_pair_base_obstacles, pcb_data, config,
