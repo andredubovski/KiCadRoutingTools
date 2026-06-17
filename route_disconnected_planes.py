@@ -154,6 +154,59 @@ def _reroute_ripped_nets(input_file, output_file, pcb_data, ripped_net_ids, do_r
         sys.setrecursionlimit(old_limit)
 
 
+def _reroute_ripped_nets_in_memory(input_file, pcb_data, ripped_net_ids, repair_segments,
+                                   repair_vias, net_id_to_name, track_width, clearance,
+                                   via_size, via_drill, grid_step, hole_to_hole_clearance,
+                                   power_nets, power_nets_widths, no_bga_zone,
+                                   routing_layers, plane_layers, verbose):
+    """Re-route the ripped nets and RETURN their new (segments, vias) so the caller
+    can apply them via pcbnew (GUI return_results mode), instead of writing a file.
+
+    Writes a temp board = input with the ripped nets excluded + the repair copper
+    added, batch-routes the ripped nets on it, then extracts their copper - all of
+    which is new, since they were excluded from the temp board's input."""
+    import sys, tempfile, os
+    ripped_names = [pcb_data.nets[r].name for r in ripped_net_ids if r in pcb_data.nets]
+    if not ripped_names:
+        return [], []
+    fd1, tin = tempfile.mkstemp(suffix=".kicad_pcb", prefix="rdp_rr_in_"); os.close(fd1)
+    fd2, tout = tempfile.mkstemp(suffix=".kicad_pcb", prefix="rdp_rr_out_"); os.close(fd2)
+    try:
+        _write_output(input_file, tin, repair_segments, repair_vias,
+                      net_id_to_name=net_id_to_name, exclude_net_ids=ripped_net_ids)
+        from route import batch_route
+        all_copper = sorted(set(routing_layers) | set(plane_layers))
+        old = sys.getrecursionlimit(); sys.setrecursionlimit(max(old, 100000))
+        try:
+            batch_route(
+                input_file=tin, output_file=tout, net_names=ripped_names,
+                layers=all_copper, track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill, grid_step=grid_step,
+                hole_to_hole_clearance=hole_to_hole_clearance, verbose=verbose,
+                minimal_obstacle_cache=True, power_nets=power_nets,
+                power_nets_widths=power_nets_widths,
+                disable_bga_zones=([] if no_bga_zone else None))
+        finally:
+            sys.setrecursionlimit(old)
+        out = parse_kicad_pcb(tout)
+        rid = set(ripped_net_ids)
+        segs = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
+                 'width': s.width, 'layer': s.layer, 'net_id': s.net_id}
+                for s in out.segments if s.net_id in rid]
+        vias = [{'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
+                 'layers': ['F.Cu', 'B.Cu'], 'net_id': v.net_id}
+                for v in out.vias if v.net_id in rid]
+        print(f"Re-routed {len(ripped_names)} ripped net(s) in-memory: "
+              f"{len(segs)} segment(s), {len(vias)} via(s)")
+        return segs, vias
+    finally:
+        for f in (tin, tout):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
 def extract_zone_properties(input_file: str) -> Dict[Tuple[str, str], Dict]:
     """
     Extract zone properties (clearance, min_thickness) from PCB file.
@@ -555,6 +608,21 @@ def route_planes(
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
     kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
+
+    # GUI (return_results): apply via pcbnew, so re-route the ripped nets IN MEMORY
+    # and hand their copper + ids back (the caller deletes the ripped tracks and
+    # adds the new ones). No file is written here.
+    if return_results:
+        if ripped_net_ids and reroute_ripped_nets:
+            rsegs, rvias = _reroute_ripped_nets_in_memory(
+                input_file, pcb_data, ripped_net_ids, all_new_segments, all_new_vias,
+                kv10_names, track_width, clearance, via_size, via_drill, grid_step,
+                hole_to_hole_clearance, power_nets, power_nets_widths, no_bga_zone,
+                routing_layers, plane_layers, verbose)
+            all_new_segments = all_new_segments + rsegs
+            all_new_vias = all_new_vias + rvias
+        return (total_routes, total_regions, all_new_vias, all_new_segments, ripped_net_ids)
+
     if dry_run:
         print("\nDry run - no output file written")
     elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids:
@@ -572,7 +640,7 @@ def route_planes(
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
 
-    # Re-route the nets that were ripped to clear a blocked pad repair.
+    # CLI: re-route the ripped nets into the written file (restoring any that fail).
     if ripped_net_ids and not dry_run:
         _reroute_ripped_nets(
             input_file, output_file, pcb_data, ripped_net_ids, reroute_ripped_nets,
@@ -583,8 +651,6 @@ def route_planes(
             power_nets=power_nets, power_nets_widths=power_nets_widths,
             no_bga_zone=no_bga_zone, verbose=verbose)
 
-    if return_results:
-        return (total_routes, total_regions, all_new_vias, all_new_segments)
     return (total_routes, total_regions)
 
 
