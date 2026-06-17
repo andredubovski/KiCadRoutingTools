@@ -21,6 +21,7 @@ directory (the source board, referenced by its own absolute path, still resolves
 
 import argparse
 import os
+import json
 import shlex
 import subprocess
 import sys
@@ -74,6 +75,9 @@ def main():
     ap.add_argument("--continue-on-error", action="store_true",
                     help="Keep going if a command fails (default: replicate the agent's "
                          "sequence, where a failed step is followed by its retry)")
+    ap.add_argument("--timings-out", metavar="PATH",
+                    help="Write per-command wall-clock timings to PATH (JSON) for "
+                         "comparison across code versions")
     args = ap.parse_args()
 
     remaps = []
@@ -94,6 +98,7 @@ def main():
         print("Remaps: " + ", ".join(f"{o} -> {n}" for o, n in remaps))
 
     failures = 0
+    timings = []   # per-command (index, seconds, returncode, argv) for later comparison
     t0 = time.time()
     for i, (cwd, argv) in enumerate(cmds, 1):
         argv = apply_remaps(argv, remaps)
@@ -107,17 +112,34 @@ def main():
             continue
         if cwd and not os.path.isdir(cwd):
             os.makedirs(cwd, exist_ok=True)
+        cmd_t0 = time.time()
         rc = subprocess.run(argv, cwd=cwd).returncode
+        dt = time.time() - cmd_t0
+        timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc, "argv": argv})
+        print(f"    -> {dt:.2f}s" + (f"  exit {rc}" if rc != 0 else ""))
         if rc != 0:
             failures += 1
             # check tools return non-zero when they find issues -- not a real error
             real = not is_check_cmd(argv)
-            print(f"    -> exit {rc}" + ("" if not real else "  (non-check command failed)"))
+            if real:
+                print("    (non-check command failed)")
             if real and not args.continue_on_error:
                 print(f"\nStopping at command {i}; rerun with --continue-on-error to push through.")
                 return 2
 
-    print(f"\nReplayed {len(cmds)} command(s) in {time.time()-t0:.1f}s ({failures} non-zero exits).")
+    total = time.time() - t0
+    print(f"\nReplayed {len(cmds)} command(s) in {total:.1f}s ({failures} non-zero exits).")
+    # Per-command timing breakdown (slowest first) -- comparable across code versions.
+    if timings:
+        print("Per-command time (slowest first):")
+        for t in sorted(timings, key=lambda x: -x["seconds"]):
+            tool = next((os.path.basename(a) for a in t["argv"] if a.endswith(".py")), "?")
+            print(f"  {t['seconds']:7.2f}s  [{t['index']}] {tool}")
+    if args.timings_out:
+        with open(args.timings_out, "w") as f:
+            json.dump({"manifest": args.manifest, "total_seconds": round(total, 3),
+                       "commands": timings}, f, indent=2)
+        print(f"Wrote per-command timings to {args.timings_out}")
     return 0
 
 
