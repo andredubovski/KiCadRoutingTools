@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -793,6 +793,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _stale:
         results[:] = [r for r in results if id(r) in _authoritative]
         print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
+
+    # Close small gaps where a route stopped a fraction of a track width short of
+    # its same-net pad/via/trace (issue #84): extend the stub with a short
+    # connector when it clears other nets, so the copper physically touches
+    # instead of relying on a connectivity tolerance to bridge a gap KiCad's DRC
+    # would flag. Runs on the full routed board before the phantom/dead-end passes.
+    _snapped = snap_stub_gaps(results, pcb_data, sweep_scope_ids, config)
+    if _snapped:
+        print(f"Closed {_snapped} stub gap(s) to same-net copper")
 
     # Reconcile the write-list against the actual board so the output can never
     # contain copper that was ripped off and not restored (issue #133). See

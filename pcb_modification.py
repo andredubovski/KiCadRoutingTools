@@ -784,6 +784,159 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     return kept, removed
 
 
+def _nearest_pad_point(px, py, pad):
+    """Nearest point on a pad's (rotated) bounding box to (px, py), and the gap."""
+    cx, cy = pad.global_x, pad.global_y
+    rot = math.radians(getattr(pad, 'rotation', 0.0) or 0.0)
+    ca, sa = math.cos(-rot), math.sin(-rot)
+    # into pad-local frame
+    lx = (px - cx) * ca - (py - cy) * sa
+    ly = (px - cx) * sa + (py - cy) * ca
+    hx, hy = pad.size_x / 2, pad.size_y / 2
+    clx = max(-hx, min(hx, lx))
+    cly = max(-hy, min(hy, ly))
+    # back to board frame
+    ca2, sa2 = math.cos(rot), math.sin(rot)
+    tx = cx + clx * ca2 - cly * sa2
+    ty = cy + clx * sa2 + cly * ca2
+    return (tx, ty), math.hypot(px - tx, py - ty)
+
+
+def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
+                   max_gap_factor: float = 1.5) -> int:
+    """Close small gaps where a routed dead end stopped just short of same-net
+    copper (issue #84).
+
+    A route can land up to ~half a grid step shy of its target, leaving a stub
+    whose loose end is a fraction of a track width from a same-net pad, via, or
+    trace. The connectivity model bridges that with tolerance, but the copper does
+    not physically touch -- KiCad's DRC sees a dangling end. Rather than report it
+    or loosen the checker, extend the stub with a short connector to the nearest
+    same-net copper, provided the connector clears every OTHER net's copper by the
+    configured clearance (same gate principle as removal, applied to addition).
+
+    Only gaps up to ``max_gap_factor`` x the stub's track width are closed. Adds
+    the connector to ``results`` (and pcb_data) so both the CLI writer and the GUI
+    pick it up. Returns the number of connectors added.
+    """
+    coord_clear = config.clearance
+    added = 0
+    new_conns = []
+
+    # Same-net copper grouped for fast lookup.
+    segs_by_net_layer = {}
+    for s in pcb_data.segments:
+        segs_by_net_layer.setdefault((s.net_id, s.layer), []).append(s)
+
+    for net_id in scope_net_ids:
+        net = pcb_data.nets.get(net_id)
+        if net is None:
+            continue
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        for (nid, lyr), segs in list(segs_by_net_layer.items()):
+            if nid != net_id:
+                continue
+            # Degree-1 endpoints on this layer (exact-coord coincidence).
+            deg = {}
+            for s in segs:
+                deg[(s.start_x, s.start_y)] = deg.get((s.start_x, s.start_y), 0) + 1
+                deg[(s.end_x, s.end_y)] = deg.get((s.end_x, s.end_y), 0) + 1
+            for s in segs:
+                for (px, py) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                    if deg[(px, py)] != 1:
+                        continue
+                    w = s.width
+                    limit = max_gap_factor * w
+                    best = None  # (gap, target_point)
+                    # nearest same-net trace on this layer (a real T-junction)
+                    for o in segs:
+                        if o is s:
+                            continue
+                        dx, dy = o.end_x - o.start_x, o.end_y - o.start_y
+                        L2 = dx * dx + dy * dy
+                        if L2 < 1e-12:
+                            continue
+                        t = max(0.0, min(1.0, ((px - o.start_x) * dx + (py - o.start_y) * dy) / L2))
+                        fx, fy = o.start_x + t * dx, o.start_y + t * dy
+                        g = math.hypot(px - fx, py - fy)
+                        if best is None or g < best[0]:
+                            best = (g, (fx, fy))
+                    # nearest same-net pad on this layer (land on its copper)
+                    for pad in net_pads:
+                        if not (lyr in pad.layers or any('*' in L for L in pad.layers)):
+                            continue
+                        tp, g = _nearest_pad_point(px, py, pad)
+                        if best is None or g < best[0]:
+                            best = (g, tp)
+                    # nearest same-net via (vias span layers): land just inside it
+                    for v in net_vias:
+                        dc = math.hypot(px - v.x, py - v.y)
+                        r = getattr(v, 'size', 0.0) / 2
+                        if dc < 1e-9:
+                            continue
+                        ux, uy = (v.x - px) / dc, (v.y - py) / dc
+                        tp = (px + ux * max(0.0, dc - 0.9 * r), py + uy * max(0.0, dc - 0.9 * r))
+                        g = math.hypot(px - tp[0], py - tp[1])
+                        if best is None or g < best[0]:
+                            best = (g, tp)
+
+                    if best is None or not (1e-4 < best[0] <= limit):
+                        continue  # already touching, no target, or gap too big
+                    tx, ty = best[1]
+
+                    # Clearance check: the connector must keep `clearance` from
+                    # every OTHER net's copper.
+                    if not _connector_clear(px, py, tx, ty, w, lyr, net_id,
+                                            pcb_data, coord_clear):
+                        continue
+                    conn = Segment(start_x=px, start_y=py, end_x=tx, end_y=ty,
+                                   width=w, layer=lyr, net_id=net_id)
+                    new_conns.append(conn)
+                    segs.append(conn)  # so a later endpoint sees it connected
+                    deg[(px, py)] = deg.get((px, py), 0) + 1
+                    deg[(tx, ty)] = deg.get((tx, ty), 0) + 1
+                    added += 1
+
+    if new_conns:
+        for c in new_conns:
+            pcb_data.segments.append(c)
+        results.append({'new_segments': new_conns, 'new_vias': []})
+    return added
+
+
+def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
+    """True if a candidate connector segment keeps `clearance` from all OTHER
+    nets' copper (segments on its layer, vias on any layer, pads on its layer)."""
+    from geometry_utils import segment_to_segment_distance, point_to_segment_distance
+    from check_drc import segment_to_rect_distance
+    half = width / 2
+    for s in pcb_data.segments:
+        if s.net_id == net_id or s.layer != layer:
+            continue
+        if segment_to_segment_distance(x1, y1, x2, y2,
+                                       s.start_x, s.start_y, s.end_x, s.end_y) \
+                < clearance + half + s.width / 2:
+            return False
+    for v in pcb_data.vias:
+        if v.net_id == net_id:
+            continue
+        if point_to_segment_distance(v.x, v.y, x1, y1, x2, y2) \
+                < clearance + half + getattr(v, 'size', 0.0) / 2:
+            return False
+    for nid, pads in pcb_data.pads_by_net.items():
+        if nid == net_id:
+            continue
+        for pad in pads:
+            if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+                continue
+            d, _ = segment_to_rect_distance(x1, y1, x2, y2, pad.global_x, pad.global_y,
+                                            pad.size_x / 2, pad.size_y / 2)
+            if d < clearance + half:
+                return False
+    return True
+
+
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                     tol: float = 0.05) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
