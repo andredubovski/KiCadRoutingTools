@@ -307,6 +307,18 @@ skipped automatically; ~30s total.
 python3 tests/run_doc_examples.py
 ```
 
+### Post-route cleanup unit tests
+
+Fast, board-free regression tests for the output-cleanup pass (issues #133 / #84).
+No KiCad needed; each runs in well under a second.
+
+```bash
+python3 tests/test_phantom_copper.py     # drop write-list copper not on the board (#133)
+python3 tests/test_dead_end_prune.py     # dead-end spur pruning + connectivity-gated removal
+python3 tests/test_remove_segments.py    # output segment removal (incl. v10 paren net names)
+python3 tests/test_orphan_tjunction.py   # orphan detection by real copper extent (no false T-junctions)
+```
+
 ## Verifying With KiCad's Own DRC (manual, not part of the tests)
 
 The tests use the project's `check_drc.py` so they run without KiCad installed.
