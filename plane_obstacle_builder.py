@@ -15,7 +15,8 @@ from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
-                          add_user_keepout_obstacles, add_rule_area_keepout_obstacles)
+                          add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
+                          block_via_cells_near_drills)
 
 import sys
 import os
@@ -655,8 +656,6 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     if config.hole_to_hole_clearance <= 0:
         return
 
-    coord = GridCoord(config.grid_step)
-
     # Collect drill holes
     drill_holes = []
 
@@ -674,18 +673,11 @@ def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Group drill holes by radius for batched blocking
-    from collections import defaultdict
-    radius_groups: Dict[float, List[Tuple[int, int]]] = defaultdict(list)
-    for hx, hy, drill_dia in drill_holes:
-        required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        radius_sq = (required_dist / config.grid_step) ** 2
-        gx, gy = coord.to_grid(hx, hy)
-        radius_groups[radius_sq].append((gx, gy))
-
-    for radius_sq, centers in radius_groups.items():
-        circle_offsets = _precompute_circle_offsets(radius_sq)
-        _batch_block_circles_via(obstacles, centers, circle_offsets)
+    # Enforce the keepout by REAL mm distance from each drill centre (shared with
+    # the signal router) rather than a disk centred on the quantized drill cell,
+    # so a stitching via cannot land a sub-cell inside the minimum (issue #70).
+    block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
+                                config.hole_to_hole_clearance, config.grid_step)
 
 
 def block_via_position(obstacles: GridObstacleMap, via_x: float, via_y: float,

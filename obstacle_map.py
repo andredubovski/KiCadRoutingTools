@@ -645,6 +645,50 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygon: List[Tuple[
             obstacles.add_blocked_vias_batch(np.column_stack([via_gx, via_gy]))
 
 
+def block_via_cells_near_drills(obstacles: GridObstacleMap,
+                                 drill_holes, via_drill: float,
+                                 hole_to_hole_clearance: float, grid_step: float):
+    """Block via-placement cells within the hole-to-hole drill minimum of each
+    drill hole.
+
+    A via placed on the grid sits at its cell's real center; block the cell when
+    that center is within the required center-to-center distance of the REAL
+    drill center, tested in mm -- NOT as a floored/quantized integer-cell disk.
+    Flooring the radius (or centering the disk on the quantized drill cell) lets
+    a via land a sub-cell inside the hole-to-hole minimum (issue #70 / #125:
+    PAD-DRILL-VIA-DRILL at the default 0.1mm grid). Being exact in mm avoids both
+    the under-block (a real fab violation) and the over-block (lost routability).
+
+    Shared by the signal router (add_drill_hole_obstacles) and route_planes
+    (_add_drill_hole_via_obstacles) so both enforce the keepout identically.
+
+    Args:
+        obstacles: the obstacle map to add via-blocks to
+        drill_holes: iterable of (x_mm, y_mm, drill_diameter_mm)
+        via_drill: drill diameter of the via being placed (mm)
+        hole_to_hole_clearance: minimum drill edge-to-edge clearance (mm)
+        grid_step: grid resolution (mm)
+    """
+    if hole_to_hole_clearance <= 0:
+        return
+    coord = GridCoord(grid_step)
+    cells = []
+    for hx, hy, drill_dia in drill_holes:
+        # Required center-to-center distance = drill/2 + via_drill/2 + clearance.
+        required_dist = drill_dia / 2.0 + via_drill / 2.0 + hole_to_hole_clearance
+        req_sq = required_dist * required_dist
+        gx, gy = coord.to_grid(hx, hy)
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
+        for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * grid_step
+            for ey in range(-expand, expand + 1):
+                cy = (gy + ey) * grid_step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
+                    cells.append((gx + ex, gy + ey))
+    if cells:
+        obstacles.add_blocked_vias_batch(np.array(cells, dtype=np.int32))
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set):
     """Block via placement near existing drill holes (hole-to-hole clearance).
@@ -657,8 +701,6 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     """
     if config.hole_to_hole_clearance <= 0:
         return
-
-    coord = GridCoord(config.grid_step)
 
     # Collect all existing drill holes: (x, y, drill_diameter)
     drill_holes = []
@@ -676,26 +718,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Block via placement near each drill hole.
-    # A via placed at a grid cell would sit at that cell's real center; block the
-    # cell when that center is within the hole-to-hole minimum of the REAL drill
-    # center. Tested in mm (not integer cells) so the keepout radius is not
-    # floored and the hole-center quantization does not let a via slip a sub-cell
-    # inside the minimum (issue #70 / #125: PAD-DRILL-VIA-DRILL at 0.1mm grid).
-    step = config.grid_step
-    for hx, hy, drill_dia in drill_holes:
-        # Required center-to-center distance = (existing_drill/2) + (new_via_drill/2) + clearance
-        required_dist = drill_dia / 2 + config.via_drill / 2 + config.hole_to_hole_clearance
-        req_sq = required_dist * required_dist
-        gx, gy = coord.to_grid(hx, hy)
-        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
-
-        for ex in range(-expand, expand + 1):
-            cx = (gx + ex) * step
-            for ey in range(-expand, expand + 1):
-                cy = (gy + ey) * step
-                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+    block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
+                                config.hole_to_hole_clearance, config.grid_step)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
