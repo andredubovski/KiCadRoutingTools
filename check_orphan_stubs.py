@@ -19,6 +19,7 @@ Examples:
 """
 
 import argparse
+import math
 import sys
 from collections import Counter, defaultdict
 from typing import Set, Tuple, Dict, List, Optional
@@ -55,6 +56,41 @@ class SpatialIndex:
         return False
 
 
+def _on_segment_interior(pt: Tuple[float, float], segments: List[Dict],
+                         eps: float = 1e-4) -> bool:
+    """True if pt lands on the copper interior of one of the segments.
+
+    pt is a degree-1 endpoint (it is the end of exactly one segment, its stub).
+    If it lies within the combined copper half-widths of ANOTHER segment, away
+    from that segment's own endpoints, the two traces overlap there -- a
+    T-junction tap, electrically connected, not a dead end. The stub's own
+    segment is skipped via the strict-interior test (pt sits at its endpoint,
+    t in {0, 1}).
+    """
+    px, py = pt
+    # Width of the stub this endpoint belongs to (for the copper-overlap margin).
+    stub_w = 0.0
+    for s in segments:
+        if s['start'] == pt or s['end'] == pt:
+            stub_w = max(stub_w, s.get('width', 0.0))
+    for s in segments:
+        sx, sy = s['start']
+        ex, ey = s['end']
+        dx, dy = ex - sx, ey - sy
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-12:
+            continue
+        t = ((px - sx) * dx + (py - sy) * dy) / seg_len_sq
+        if t <= eps or t >= 1.0 - eps:
+            continue  # at/over an endpoint (incl. this stub's own segment)
+        cx, cy = sx + t * dx, sy + t * dy
+        dist = math.hypot(px - cx, py - cy)
+        # Copper overlaps when the gap is within the two traces' half-widths.
+        if dist < s.get('width', 0.0) / 2 + stub_w / 2 + 0.01:
+            return True
+    return False
+
+
 def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
                       layer: Optional[str] = None) -> Dict[str, Dict[str, Set[Tuple[float, float]]]]:
     """
@@ -75,7 +111,8 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
     for seg in pcb_data.segments:
         segments_by_net_layer[(seg.net_id, seg.layer)].append({
             'start': (seg.start_x, seg.start_y),
-            'end': (seg.end_x, seg.end_y)
+            'end': (seg.end_x, seg.end_y),
+            'width': getattr(seg, 'width', 0.0)
         })
 
     # Determine which nets to check
@@ -134,6 +171,13 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
                 # Use spatial index for fast proximity queries
                 spatial_idx = SpatialIndex(all_valid_endpoints)
                 orphans = {pt for pt in single_endpoints if not spatial_idx.has_nearby(pt)}
+
+            # A degree-1 endpoint that lands on the INTERIOR of another same-net
+            # segment is a T-junction tap, not a dead end -- the copper overlaps,
+            # so it is electrically connected. Drop those (they are not orphans).
+            if orphans:
+                orphans = {pt for pt in orphans
+                           if not _on_segment_interior(pt, segments)}
 
             if orphans:
                 net_results[lyr] = orphans
