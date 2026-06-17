@@ -2808,6 +2808,31 @@ class RoutingDialog(wx.Dialog):
             """Convert layer name to pcbnew layer ID."""
             return name_to_id.get(layer_name, pcbnew.F_Cu)
 
+        # Remove original-board dead-end copper the sweep flagged (issue #84),
+        # mirroring the CLI writer's strip so the GUI output matches. Match each
+        # flagged segment to an existing board track by its unordered endpoint
+        # pair, layer, and net, then delete it.
+        tracks_removed = 0
+        segs_to_remove = results_data.get('segments_to_remove') or []
+        if segs_to_remove:
+            remove_keys = set()
+            for s in segs_to_remove:
+                a = (round(s.start_x, POSITION_DECIMALS), round(s.start_y, POSITION_DECIMALS))
+                b = (round(s.end_x, POSITION_DECIMALS), round(s.end_y, POSITION_DECIMALS))
+                remove_keys.add((frozenset((a, b)), s.layer, s.net_id))
+            for track in list(board.GetTracks()):
+                if track.Type() != pcbnew.PCB_TRACE_T:
+                    continue  # skip vias / arcs
+                a = (round(pcbnew.ToMM(track.GetStart().x), POSITION_DECIMALS),
+                     round(pcbnew.ToMM(track.GetStart().y), POSITION_DECIMALS))
+                b = (round(pcbnew.ToMM(track.GetEnd().x), POSITION_DECIMALS),
+                     round(pcbnew.ToMM(track.GetEnd().y), POSITION_DECIMALS))
+                key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
+                       track.GetNetCode())
+                if key in remove_keys:
+                    board.Remove(track)
+                    tracks_removed += 1
+
         # Add segments from routing results
         for result in results_data.get('results', []):
             for seg in result.get('new_segments', []):
@@ -2875,6 +2900,8 @@ class RoutingDialog(wx.Dialog):
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} segments\n"
         msg += f"  {vias_added} vias\n"
+        if tracks_removed > 0:
+            msg += f"  {tracks_removed} dead-end stub(s) removed\n"
         if text_moved > 0:
             msg += f"  {text_moved} text items moved to silkscreen\n"
         if debug_lines_added > 0:

@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper
+from pcb_modification import drop_phantom_copper, sweep_dead_ends
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -794,6 +794,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Dropped {_phantom_segs} phantom segment(s) and {_phantom_vias} "
               f"phantom via(s) not on the board from the write-list")
 
+    # Final dead-end sweep (issue #84): trim copper that dead-ends -- tap tails
+    # superseded by rip-and-reroute, spurs left when a blocker was ripped, and
+    # fanout/escape stubs a net routed away from or never completed -- which
+    # collapse_appendices' per-commit pass does not reach. Runs after the phantom
+    # drop so it only sees real board copper. Scoped to the nets this run routed
+    # so untouched planes / excluded nets are never altered. Routed dead ends are
+    # dropped from `results`; original input-file dead ends are returned to strip
+    # from the output file.
+    _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, scope_ids)
+    if _de_segs or _de_vias:
+        print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
+              f"{_de_vias} unsupported via(s)")
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -882,6 +895,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'all_segment_modifications': all_segment_modifications,
             'exclusion_zone_lines': exclusion_zone_lines if debug_lines else [],
             'boundary_debug_labels': boundary_debug_labels if debug_lines else [],
+            # Original-file dead-end copper the caller (GUI) should delete from the
+            # live board, mirroring the writer's strip (issue #84).
+            'segments_to_remove': dead_end_input_segments,
         }
     else:
         # Write output file using extracted output_writer module
@@ -899,7 +915,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             exclusion_zone_lines=exclusion_zone_lines,
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
-            add_teardrops=add_teardrops
+            add_teardrops=add_teardrops,
+            segments_to_remove=dead_end_input_segments
         )
 
     # Update schematics with swap info if directory specified
