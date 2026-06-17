@@ -321,6 +321,7 @@ python3 tests/test_orphan_tjunction.py   # orphan detection by real copper exten
 python3 tests/test_restore_collision.py  # collision-safe rip-up restore: refuse stale copper that would short (#134)
 python3 tests/test_drill_hole_keepout.py # hole-to-hole via keepout by mm distance, not a floored disk (#70/#125)
 python3 tests/test_pad_offset_keepout.py # pad keepout measured from the real center, not the quantized cell (#70)
+python3 tests/test_arc_track_parse.py    # (arc) track elements linearized into connected segments (hand-routed-board ingest)
 ```
 
 ## Verifying With KiCad's Own DRC (manual, not part of the tests)
