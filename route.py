@@ -243,6 +243,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         print("Using provided PCB data...")
 
+    # Issue #8: snapshot the input board's copper per net BEFORE any routing.
+    # The final connectivity reconciliation reports against the copper that will
+    # be WRITTEN (this original copper + the write-list's new copper), not against
+    # pcb_data -- which accumulates orphan copper from rip/reroute that never
+    # reaches the write-list and would make a net look connected when the output
+    # has it split (glasgow /IO_Banks/IO_Buffer_A/P1).
+    _orig_seg_by_net: Dict[int, list] = {}
+    for _s in pcb_data.segments:
+        _orig_seg_by_net.setdefault(_s.net_id, []).append(_s)
+    _orig_via_by_net: Dict[int, list] = {}
+    for _v in pcb_data.vias:
+        _orig_via_by_net.setdefault(_v.net_id, []).append(_v)
+
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
         layers = DEFAULT_4_LAYER_STACK
@@ -778,42 +791,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             failed_single.append(net_name)
             failed_single_ids.append(net_id)
 
-    # Collect multi-point tap routing stats and failed pad details
-    tap_pads_connected = 0
-    tap_pads_total = 0
-    tap_edges_routed = 0
-    tap_edges_failed = 0
-    multipoint_nets = 0
-    failed_multipoint = []  # List of {net_name, net_id, failed_pads: [{pad_idx, x, y, component_ref, pad_number}]}
-    for net_id, result in routed_results.items():
-        if result.get('is_multipoint'):
-            multipoint_nets += 1
-            tap_pads_connected += result.get('tap_pads_connected', 0)
-            tap_pads_total += result.get('tap_pads_total', 0)
-            tap_edges_routed += result.get('tap_edges_routed', 0)
-            tap_edges_failed += result.get('tap_edges_failed', 0)
-            # Collect failed pad details for this net
-            failed_pads_info = result.get('failed_pads_info', [])
-            if failed_pads_info:
-                net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
-                failed_multipoint.append({
-                    'net_name': net_name,
-                    'net_id': net_id,
-                    'failed_pads': failed_pads_info
-                })
-    # Derive final counts set-based from this run's scope rather than the
-    # loop counters: a multipoint net with unconnected tap pads is not fully
-    # routed, a net ripped during Phase 3 whose re-route failed never reaches
-    # the failure counter, and on re-chained boards the loop counters don't
-    # include skipped already-routed nets - mixing them produced negative
-    # "successful" values like -2215 (issue #87).
-    scope_ids = {nid for _, nid in single_ended_nets}
-    failed_multipoint_ids = {m['net_id'] for m in failed_multipoint}
-    fully_routed_ids = {nid for nid in scope_ids
-                        if nid in routed_results and nid not in failed_multipoint_ids}
-    successful = len(fully_routed_ids)
-    failed = len(scope_ids) - successful
-
     # Keep only each net's authoritative result in the write-list. routed_results
     # holds one result per net; rip-reroute paths (restore_net, layer-swap) can
     # leave a superseded duplicate of a net's result still in `results`, and its
@@ -859,6 +836,89 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
+
+    # Issue #8: reconcile the reported success counts with the FINAL segment
+    # graph -- i.e. the board that will actually be written. This runs AFTER the
+    # stale-result drop, snap, phantom drop and dead-end sweep (and pcb_data was
+    # synced to the write-list at the stale drop), so pcb_data now matches the
+    # output. A net's pads are reconciled at Phase-3 commit, but its copper can
+    # change afterwards (a later net's rip-up, the recovery reroute, a dropped
+    # superseded result) and leave it split, or a multi-pad net may be routed
+    # with a result that never tracked every pad -- either way it would ship as
+    # phantom success (neo6502 /GPIO4, glasgow /IO_Banks/IO_Buffer_A/P1). Use the
+    # AUTHORITATIVE union-find (check_net_connectivity -- the model
+    # filter_already_routed and check_connected.py use); the stricter geometric
+    # pad-group split wrongly splits genuinely-connected power/bus nets.
+    from check_connected import check_net_connectivity
+    # Per-net copper as it will be WRITTEN: the input board's original copper
+    # plus the write-list's new copper. NOT pcb_data, which also holds orphan
+    # copper from rip/reroute that never reaches the write-list (issue #8).
+    _segs_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
+    _vias_by_net: Dict[int, list] = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+    for _r0 in results:
+        for _s in _r0.get('new_segments', []):
+            _segs_by_net.setdefault(_s.net_id, []).append(_s)
+        for _v in _r0.get('new_vias', []):
+            _vias_by_net.setdefault(_v.net_id, []).append(_v)
+    _zones_by_net: Dict[int, list] = {}
+    for _z in getattr(pcb_data, 'zones', []) or []:
+        _zones_by_net.setdefault(_z.net_id, []).append(_z)
+    for _nid, _res in routed_results.items():
+        if _nid in state.diff_pair_by_net_id:
+            continue  # diff pairs report via their own path
+        _pads = pcb_data.pads_by_net.get(_nid, [])
+        if len(_pads) < 2:
+            continue
+        _r = check_net_connectivity(
+            _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
+            _pads, _zones_by_net.get(_nid, []), tolerance=0.02)
+        _dp = _r.get('disconnected_pads') or []
+        if _dp:
+            _res['failed_pads_info'] = [
+                {'x': _p[0], 'y': _p[1],
+                 'component_ref': _p[3] if len(_p) > 3 else '?',
+                 'pad_number': '?'}
+                for _p in _dp]
+        elif _res.get('failed_pads_info'):
+            # Authoritatively connected now: drop a stale (stricter-model or
+            # pre-rip) failure flag so the net is not reported as a phantom fail.
+            _res['failed_pads_info'] = []
+
+    # Collect multi-point tap routing stats and failed pad details
+    tap_pads_connected = 0
+    tap_pads_total = 0
+    tap_edges_routed = 0
+    tap_edges_failed = 0
+    multipoint_nets = 0
+    failed_multipoint = []  # List of {net_name, net_id, failed_pads: [...]}
+    for net_id, result in routed_results.items():
+        if result.get('is_multipoint'):
+            multipoint_nets += 1
+            tap_pads_connected += result.get('tap_pads_connected', 0)
+            tap_pads_total += result.get('tap_pads_total', 0)
+            tap_edges_routed += result.get('tap_edges_routed', 0)
+            tap_edges_failed += result.get('tap_edges_failed', 0)
+        # Collect failed pad details for any net with unreached pads. Issue #8:
+        # non-multipoint multi-pad nets can also end disconnected (glasgow P1),
+        # so this is no longer gated on is_multipoint.
+        failed_pads_info = result.get('failed_pads_info', [])
+        if failed_pads_info:
+            net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"Net {net_id}"
+            failed_multipoint.append({
+                'net_name': net_name,
+                'net_id': net_id,
+                'failed_pads': failed_pads_info
+            })
+    # Derive final counts set-based from this run's scope rather than the loop
+    # counters (issue #87): a net with unconnected pads is not fully routed, and
+    # a net ripped during Phase 3 whose re-route failed never reaches the failure
+    # counter.
+    scope_ids = {nid for _, nid in single_ended_nets}
+    failed_multipoint_ids = {m['net_id'] for m in failed_multipoint}
+    fully_routed_ids = {nid for nid in scope_ids
+                        if nid in routed_results and nid not in failed_multipoint_ids}
+    successful = len(fully_routed_ids)
+    failed = len(scope_ids) - successful
 
     # Print human-readable summary
     print("\n" + "=" * 60)
