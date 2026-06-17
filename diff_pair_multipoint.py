@@ -134,6 +134,42 @@ def terminal_separation(terminal: Tuple[Pad, Pad]) -> float:
     return math.hypot(pp.global_x - nn.global_x, pp.global_y - nn.global_y)
 
 
+# A coupled diff-pair only earns its keep over an electrically long run. Over a
+# leg shorter than a few setbacks there is no real coupled section - you spend
+# ~1 setback fanning in and ~1 fanning out - so coupling buys nothing and only
+# tangles the pair through clustered connector pads (castor_pollux /MCU/CONN_D, a
+# USB connector). Such a leg is routed single-ended instead. 5x the connector
+# setback is the floor. (Physics: even a 10 GHz / 10 Gb/s edge is electrically
+# short over ~1-3 mm, so a few-mm connector fan-in never needs coupling.)
+DIFF_PAIR_MIN_COUPLED_SETBACKS = 5.0
+
+
+def diff_pair_min_coupled_length(config: GridRouteConfig) -> float:
+    """Minimum leg length (mm) below which coupling gains nothing -> single-end.
+
+    = DIFF_PAIR_MIN_COUPLED_SETBACKS * connector setback (the centerline setback
+    if configured, else 4x the pair half-spacing - the same setback the corridor
+    capsules use)."""
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
+    setback = (config.diff_pair_centerline_setback
+               if config.diff_pair_centerline_setback is not None else spacing_mm * 4)
+    return DIFF_PAIR_MIN_COUPLED_SETBACKS * setback
+
+
+def leg_electrically_short(term_a: Tuple[Pad, Pad], term_b: Tuple[Pad, Pad],
+                           config: GridRouteConfig) -> bool:
+    """True if the leg between two terminals is too short for coupled routing to
+    matter. Measured by the SHORTER of the leg's P-run and N-run: if either track
+    cannot sustain a coupled section, route the leg single-ended. term_a/term_b
+    are (P pad, N pad) tuples (oriented to current polarity)."""
+    threshold = diff_pair_min_coupled_length(config)
+    p_dist = math.hypot(term_a[0].global_x - term_b[0].global_x,
+                        term_a[0].global_y - term_b[0].global_y)
+    n_dist = math.hypot(term_a[1].global_x - term_b[1].global_x,
+                        term_a[1].global_y - term_b[1].global_y)
+    return min(p_dist, n_dist) < threshold
+
+
 def classify_terminals(terminals: List[Tuple[Pad, Pad]], config: GridRouteConfig
                        ) -> Tuple[List[Tuple[Pad, Pad]], List[Tuple[Pad, Pad]]]:
     """Split terminals into (coupled, uncoupled).
@@ -414,8 +450,11 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     terminals depend on the routing order, so a reversed chain can succeed
     where the forward one wraps itself into a corner).
 
-    Returns (leg_results, merged_result) on full success, ([], None) on
-    failure (failed attempts' legs are ripped back out).
+    Returns (leg_results, merged_result, peeled). leg_results is None ONLY on
+    genuine failure (an empty list means every leg was deferred to single-ended,
+    which is success); merged_result is None when no leg was coupled; peeled is
+    the list of terminals left for single-ended routing (far-apart peeled and/or
+    electrically-short deferred legs). Failed attempts' legs are ripped out.
     """
     config = state.config
     pcb_data = state.pcb_data
@@ -424,10 +463,11 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
     print(f"  Multi-point pair: {len(terminals)} terminals, {len(terminals) - 1} legs")
     # Try the full coupled chain first - a pair that routes fine through a
     # widely-spaced terminal (e.g. a test point reached as a chain end) must not
-    # be broken up needlessly (issue #121).
-    leg_results, merged = _route_terminal_set(state, pair, pair_name, terminals)
-    if merged is not None:
-        return leg_results, merged, []
+    # be broken up needlessly (issue #121). Electrically short legs inside the
+    # chain are deferred to single-ended and returned in `peeled`.
+    leg_results, merged, se = _route_terminal_set(state, pair, pair_name, terminals)
+    if leg_results is not None:
+        return leg_results, merged, se
 
     # The chain couldn't launch on the terminals' own layers (jammed outer
     # layers). Relocate the blocked terminals onto an open layer (drop a via,
@@ -439,17 +479,18 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
             if not fans:
                 continue
             print(f"  Retrying chain with {len(fans)//2} terminal(s) relocated to {layer}...")
-            legs, m = _route_terminal_set(state, pair, pair_name, reloc)
-            if m is not None:
-                _attach_fans(m, fans)
-                return legs, m
+            legs, m, se_legs = _route_terminal_set(state, pair, pair_name, reloc)
+            if legs is not None:
+                if m is not None:
+                    _attach_fans(m, fans)
+                return legs, m, se_legs
             _cleanup_fans(pcb_data, fans)
-        return [], None
+        return None, None, []
 
     if obstacles is not None:
-        leg_results, merged = _try_relocated(terminals)
-        if merged is not None:
-            return leg_results, merged, []
+        leg_results, merged, se = _try_relocated(terminals)
+        if leg_results is not None:
+            return leg_results, merged, se
 
     # Still stuck. If some terminals are too far apart to be a coupled
     # differential connection, peel them off and route only the coupled
@@ -460,28 +501,38 @@ def route_multipoint_diff_pair(state, pair: DiffPairNet, pair_name: str,
         print(f"  Coupled chain failed; peeling {len(uncoupled)} far-apart terminal(s) "
               f"(P/N >= {far:.1f}mm apart) to route single-ended, retrying "
               f"coupled {len(coupled)}-terminal chain...")
-        leg_results, merged = _route_terminal_set(state, pair, pair_name, coupled)
-        if merged is not None:
-            return leg_results, merged, uncoupled
+        leg_results, merged, se = _route_terminal_set(state, pair, pair_name, coupled)
+        if leg_results is not None:
+            return leg_results, merged, uncoupled + se
         if obstacles is not None:
-            leg_results, merged = _try_relocated(coupled)
-            if merged is not None:
-                return leg_results, merged, uncoupled
-    return [], None, []
+            leg_results, merged, se = _try_relocated(coupled)
+            if leg_results is not None:
+                return leg_results, merged, uncoupled + se
+    return None, None, []
 
 
 def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
                         terminals: List[Tuple[Pad, Pad]]):
     """Route a fixed set of terminals as a coupled chain, trying alternative
-    chain orderings. Returns (leg_results, merged) or ([], None)."""
+    chain orderings.
+
+    Returns (leg_results, merged, se_terminals). On success leg_results is the
+    (possibly empty) list of coupled legs, merged is their combined result (None
+    if every leg was electrically short -> deferred), and se_terminals lists the
+    terminals deferred to single-ended. On genuine failure returns (None, None,
+    []); leg_results is None ONLY on failure (empty list = all-deferred success)."""
     if len(terminals) < 2:
-        return [], None
+        return None, None, []
     chains = candidate_terminal_chains(terminals)
     for attempt, chain in enumerate(chains):
         if attempt > 0:
             print(f"  Trying alternative chain order ({attempt + 1}/{len(chains)})...")
-        leg_results = _route_chain_attempt(state, pair, pair_name, chain)
+        leg_results, se_terminals = _route_chain_attempt(state, pair, pair_name, chain)
         if leg_results is not None:
+            if not leg_results:
+                # Every leg was electrically short - nothing coupled to merge,
+                # but this is success: the whole pair goes to single-ended.
+                return leg_results, None, se_terminals
             # Merge legs into a single result for bookkeeping (rip-up, sync,
             # caches). Segments/vias are already in pcb_data - the merged
             # result must NOT be passed to add_route_to_pcb_data again.
@@ -491,14 +542,18 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             merged['iterations'] = sum(r.get('iterations', 0) for r in leg_results)
             merged['p_path'] = [pt for r in leg_results for pt in (r.get('p_path') or [])]
             merged['n_path'] = [pt for r in leg_results for pt in (r.get('n_path') or [])]
-            return leg_results, merged
-    return [], None
+            return leg_results, merged, se_terminals
+    return None, None, []
 
 
 def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
-                         chain: List[Tuple[Pad, Pad]]) -> Optional[List[dict]]:
-    """Route one chain ordering leg by leg. Returns the list of leg results on
-    success, or None on failure (committed legs are ripped back out)."""
+                         chain: List[Tuple[Pad, Pad]]):
+    """Route one chain ordering leg by leg.
+
+    Returns (leg_results, se_terminals): leg_results is the list of coupled leg
+    results (possibly empty if every leg was electrically short), se_terminals is
+    the list of terminals whose connecting leg was deferred to single-ended
+    routing. Returns (None, []) on genuine failure (committed legs ripped out)."""
     pcb_data = state.pcb_data
     config = state.config
 
@@ -507,6 +562,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
 
     centers = [_terminal_center(t) for t in chain]
     leg_results = []
+    se_terminals = []  # terminals whose leg is too short to couple -> single-ended
     committed_segments = []  # all committed legs' segments, for crossing checks
     applied_swaps = []  # polarity pad swaps applied by this attempt's legs
     forced_dir_next = None  # forced source direction for the next leg (opposite
@@ -531,6 +587,17 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
         print(f"  Leg {i + 1}/{len(chain) - 1}: "
               f"{term_a[0].component_ref}:{term_a[0].pad_number}/{term_a[1].pad_number} -> "
               f"{term_b[0].component_ref}:{term_b[0].pad_number}/{term_b[1].pad_number}")
+
+        # An electrically short leg gains nothing from coupling and only tangles
+        # the pair through clustered pads - defer it to single-ended routing. The
+        # chain breaks here (next leg starts fresh); the deferred terminals are
+        # reconnected by the single-ended follow-up pass.
+        if leg_electrically_short(term_a, term_b, config):
+            print(f"    electrically short (< {diff_pair_min_coupled_length(config):.1f}mm "
+                  f"coupled) - deferring leg to single-ended")
+            se_terminals.extend([chain[i], chain[i + 1]])
+            forced_dir_next = None
+            continue
 
         endpoints = (_make_endpoint(term_a, config), _make_endpoint(term_b, config))
 
@@ -599,7 +666,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             print(f"  Leg {i + 1} FAILED ({failed_reason}) - "
                   f"ripping {len(leg_results)} committed leg(s)")
             rip_attempt()
-            return None
+            return None, []
 
         # Apply a polarity pad swap decided by this leg BEFORE committing the
         # route: the appendix cleanup must see the swapped pad nets
@@ -611,7 +678,7 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
                 print(f"  Leg {i + 1} FAILED (pad swap could not be applied) - "
                       f"ripping {len(leg_results)} committed leg(s)")
                 rip_attempt()
-                return None
+                return None, []
 
         # Commit this leg so the next leg sees it (as obstacle and topology)
         add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
@@ -622,4 +689,4 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
         used_dir = result['target_base_dir']
         forced_dir_next = (-used_dir[0], -used_dir[1])
 
-    return leg_results
+    return leg_results, se_terminals
