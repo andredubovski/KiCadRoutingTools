@@ -194,11 +194,20 @@ The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs
 
 ### Installation
 
-Two ways to install:
+Three ways to install:
 
 **A. KiCad Plugin and Content Manager (PCM)** — the recommended path for end users. Open the PCM from the KiCad main window, find *KiCad Routing Tools*, and click Install. (The package is in the process of being added to the official repository; once accepted, this will be available out-of-the-box.) On first launch, the plugin checks the Python packages listed in `requirements.txt` (currently `scipy` and `shapely` — KiCad already bundles `numpy`) and offers a one-click pip install for any that are missing into KiCad's Python.
 
-**B. Manual install from source** — for development or for using the CLI tools as well:
+**B. PCM "Install from File…" using the release zip** — works today, before the package lands in the official repository. Each [GitHub Release](https://github.com/drandyhaas/KiCadRoutingTools/releases) ships a ready-to-install PCM package zip named `KiCadRoutingTools-<version>.zip` (a single cross-platform archive bundling the prebuilt Rust binaries for all platforms — **not** the auto-generated "Source code (zip)"). To install it:
+
+1. From the Release's *Assets*, download `KiCadRoutingTools-<version>.zip` (e.g. `KiCadRoutingTools-0.15.13.zip`).
+2. In KiCad, open **Plugin and Content Manager** from the main window.
+3. Click **Install from File…** (bottom of the PCM dialog) and select the downloaded zip.
+4. Click **Apply Pending Changes**, then restart KiCad if prompted.
+
+The plugin appears under *Tools → External Plugins* in the PCB Editor. The same first-launch `scipy`/`shapely` dependency check described in (A) applies. This path keeps the plugin manageable from the PCM (you can update or uninstall it there), unlike the manual install below.
+
+**C. Manual install from source** — for development or for using the CLI tools as well:
 
 ```bash
 # Install the plugin (copies to KiCad plugins directory)
