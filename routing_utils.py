@@ -16,6 +16,79 @@ import numpy as np
 from kicad_parser import Segment, POSITION_DECIMALS
 
 
+# --- Rotation-aware pad-rectangle geometry -------------------------------------
+# A pad's size_x/size_y are board-resolved (axis-aligned for orthogonal pads);
+# any residual tilt is carried in pad.rect_rotation (0 for the common case, a
+# value in (-90,90] for non-orthogonally-placed pads). These helpers test the
+# pad's TRUE rectangle at any angle. All reduce to the plain axis-aligned test
+# when rect_rotation == 0, so orthogonal pads are unaffected.
+
+def _to_pad_frame(x: float, y: float, pad) -> Tuple[float, float]:
+    """Offset of (x, y) from the pad centre, expressed in the pad's own frame."""
+    dx = x - pad.global_x
+    dy = y - pad.global_y
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        rad = math.radians(rr)
+        c, s = math.cos(rad), math.sin(rad)
+        return dx * c + dy * s, -dx * s + dy * c
+    return dx, dy
+
+
+def point_in_pad_rect(x: float, y: float, pad, margin: float = 0.0) -> bool:
+    """True if (x, y) lies within the pad rectangle expanded by `margin`."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    return abs(lx) <= pad.size_x / 2 + margin and abs(ly) <= pad.size_y / 2 + margin
+
+
+def point_to_pad_rect_dist(x: float, y: float, pad, margin: float = 0.0) -> float:
+    """Distance from (x, y) to the pad rectangle (+margin); 0.0 if inside."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    ox = max(abs(lx) - (pad.size_x / 2 + margin), 0.0)
+    oy = max(abs(ly) - (pad.size_y / 2 + margin), 0.0)
+    return math.hypot(ox, oy)
+
+
+def into_pad_frame_point(x: float, y: float, pad) -> Tuple[float, float]:
+    """Rotate a board point about the pad centre into the pad's axis-aligned
+    frame, returned in absolute board coordinates. Lets a routine that tests an
+    axis-aligned pad rectangle (e.g. segment_to_rect_distance) stay exact for a
+    tilted pad: rotate the query geometry with this, keep the pad axis-aligned."""
+    lx, ly = _to_pad_frame(x, y, pad)
+    return pad.global_x + lx, pad.global_y + ly
+
+
+def filter_cells_in_pad_rect(cells: "np.ndarray", grid_step: float, pad,
+                             margin: float = 0.0) -> "np.ndarray":
+    """Filter an (N, 2+) int grid-cell array to rows whose board position lies in
+    the pad rectangle (+margin), honoring rect_rotation. No-op (returns the input)
+    for axis-aligned pads, so orthogonal keepouts are unchanged."""
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if not rr or len(cells) == 0:
+        return cells
+    bx = cells[:, 0] * grid_step - pad.global_x
+    by = cells[:, 1] * grid_step - pad.global_y
+    rad = math.radians(rr)
+    c, s = math.cos(rad), math.sin(rad)
+    lx = bx * c + by * s
+    ly = -bx * s + by * c
+    mask = (np.abs(lx) <= pad.size_x / 2 + margin) & (np.abs(ly) <= pad.size_y / 2 + margin)
+    return cells[mask]
+
+
+def pad_rect_halfspan(pad, margin: float = 0.0) -> Tuple[float, float]:
+    """Axis-aligned bounding-box half-extents (in x, y) of the pad rectangle
+    rotated by rect_rotation, plus `margin`. Used to size a search/keepout box
+    that fully contains the (possibly tilted) pad."""
+    hx, hy = pad.size_x / 2, pad.size_y / 2
+    rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+    if rr:
+        rad = math.radians(rr)
+        c, s = abs(math.cos(rad)), abs(math.sin(rad))
+        return hx * c + hy * s + margin, hx * s + hy * c + margin
+    return hx + margin, hy + margin
+
+
 def build_layer_map(layers: List[str]) -> Dict[str, int]:
     """
     Build a mapping from layer names to indices.

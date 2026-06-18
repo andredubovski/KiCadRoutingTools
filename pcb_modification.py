@@ -9,7 +9,7 @@ import math
 from typing import List, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via
-from routing_utils import pos_key, POSITION_DECIMALS
+from routing_utils import pos_key, POSITION_DECIMALS, into_pad_frame_point
 
 
 def get_copper_layers_from_segments(segments: List[Segment], existing_segments: List[Segment] = None) -> List[str]:
@@ -932,7 +932,11 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
         for pad in pads:
             if not (layer in pad.layers or any('*' in L for L in pad.layers)):
                 continue
-            d, _ = segment_to_rect_distance(x1, y1, x2, y2, pad.global_x, pad.global_y,
+            # Rotate the segment into the pad's frame so a tilted pad is tested
+            # against its true rectangle (distance is rotation-invariant).
+            rx1, ry1 = into_pad_frame_point(x1, y1, pad)
+            rx2, ry2 = into_pad_frame_point(x2, y2, pad)
+            d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
                                             pad.size_x / 2, pad.size_y / 2)
             if d < clearance + half:
                 return False
