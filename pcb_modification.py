@@ -787,7 +787,9 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
 def _nearest_pad_point(px, py, pad):
     """Nearest point on a pad's (rotated) bounding box to (px, py), and the gap."""
     cx, cy = pad.global_x, pad.global_y
-    rot = math.radians(getattr(pad, 'rotation', 0.0) or 0.0)
+    # size_x/size_y are board-resolved (axis-aligned for orthogonal pads); only
+    # the residual rect_rotation tilts the rectangle - NOT the total pad rotation.
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
     ca, sa = math.cos(-rot), math.sin(-rot)
     # into pad-local frame
     lx = (px - cx) * ca - (py - cy) * sa

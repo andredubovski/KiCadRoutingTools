@@ -120,7 +120,9 @@ def _point_in_pad_copper(pad: Pad, x: float, y: float, extra: float = 0.0) -> bo
     """
     dx = x - pad.global_x
     dy = y - pad.global_y
-    rot = math.radians(pad.rotation or 0.0)
+    # size_x/size_y are board-resolved; the rectangle's residual tilt is
+    # rect_rotation (0 for orthogonal pads), not the total pad rotation.
+    rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
     cos_r = math.cos(rot)
     sin_r = math.sin(rot)
     lx = dx * cos_r + dy * sin_r
