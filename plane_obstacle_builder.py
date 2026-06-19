@@ -455,6 +455,10 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     half_height = pad.size_y / 2
     # Add half grid step buffer to account for grid quantization errors
     clearance = config.clearance if clearance_override is None else clearance_override
+    # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
+    # unless an explicit same-net override was supplied.
+    if clearance_override is None:
+        clearance = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
     margin = config.via_size / 2 + clearance + config.grid_step / 2
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
     if pad.shape in ('circle', 'oval'):
@@ -769,7 +773,12 @@ def build_routing_obstacle_map(
                     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                     half_width = pad.size_x / 2
                     half_height = pad.size_y / 2
-                    margin = config.track_width / 2 + config.clearance
+                    # Honor a per-pad local clearance override (e.g. fiducial
+                    # keep-clear rings carry a clearance far larger than the
+                    # board global), else copper routes within the pad's
+                    # required clearance (no-net fiducial DRC, upduino #146).
+                    pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                    margin = config.track_width / 2 + pad_clr
                     # Corner radius based on pad shape
                     if pad.shape in ('circle', 'oval'):
                         corner_radius = min(half_width, half_height)

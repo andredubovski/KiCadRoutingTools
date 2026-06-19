@@ -55,6 +55,10 @@ class Pad:
     # orthogonal pads (deg, in (-90,90]). 0 for axis-aligned pads (the common
     # case) where the rotation is already baked into size_x/size_y. The
     # obstacle/DRC geometry rotates the pad rectangle by this angle.
+    local_clearance: float = 0.0  # Per-pad clearance override (mm) from the
+    # pad's own (clearance ...) token. 0 means "no override, use the global
+    # clearance". Larger-than-global values (e.g. fiducial keep-clear rings)
+    # must widen the obstacle halo or copper routes within the pad's clearance.
 
 
 @dataclass
@@ -1157,6 +1161,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             rratio_match = re.search(r'\(roundrect_rratio\s+([\d.]+)\)', pad_text)
             roundrect_rratio = float(rratio_match.group(1)) if rratio_match else 0.0
 
+            # Extract per-pad local clearance override, e.g. fiducial keep-clear
+            # rings carry (clearance 0.375). The leading "(" avoids matching the
+            # footprint's (pad_to_mask_clearance ...) token. 0 = no override.
+            clr_match = re.search(r'\(clearance\s+([\d.]+)\)', pad_text)
+            local_clearance = float(clr_match.group(1)) if clr_match else 0.0
+
             # Calculate global coordinates
             global_x, global_y = local_to_global(fp_x, fp_y, fp_rotation, local_x, local_y)
 
@@ -1178,7 +1188,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 pintype=pintype,
                 drill=drill_size,
                 roundrect_rratio=roundrect_rratio,
-                rect_rotation=rect_rotation
+                rect_rotation=rect_rotation,
+                local_clearance=local_clearance
             )
 
             footprint.pads.append(pad)
@@ -1849,6 +1860,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             except Exception:
                 roundrect_rratio = 0.0
 
+            # Per-pad local clearance override (fiducial keep-clear rings etc.).
+            # GetLocalClearance() returns the pad's own override in IU, or a
+            # falsy/None when unset depending on KiCad version. 0 = no override.
+            try:
+                lc = pad.GetLocalClearance()
+                local_clearance = to_mm(lc) if lc else 0.0
+            except Exception:
+                local_clearance = 0.0
+
             pad_obj = Pad(
                 component_ref=reference,
                 pad_number=pad_num,
@@ -1867,7 +1887,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 pintype=pintype,
                 drill=drill,
                 roundrect_rratio=roundrect_rratio,
-                rect_rotation=rect_rotation
+                rect_rotation=rect_rotation,
+                local_clearance=local_clearance
             )
 
             footprint.pads.append(pad_obj)

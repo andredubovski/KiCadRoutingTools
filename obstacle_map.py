@@ -1368,6 +1368,10 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
     clearance = clearance_override if clearance_override is not None else config.clearance
+    # Honor a per-pad local clearance override (e.g. fiducial keep-clear rings)
+    # unless an explicit override was supplied for this call.
+    if clearance_override is None:
+        clearance = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
     margin = config.track_width / 2 + clearance + extra_clearance
     # Compute corner radius based on pad shape:
     # - circle/oval: use min dimension to model as stadium/capsule shape

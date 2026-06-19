@@ -1201,8 +1201,10 @@ def build_base_obstacles(
             if not pad_layers_on:
                 continue
 
-            # Block rectangular area around pad with clearance for track routing
-            pad_expansion_mm = track_width / 2 + config.clearance
+            # Block rectangular area around pad with clearance for track routing.
+            # Honor a per-pad local clearance override (fiducial keep-clear etc.).
+            pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+            pad_expansion_mm = track_width / 2 + pad_clr
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
             max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
