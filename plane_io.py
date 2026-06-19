@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, parse_kicad_pcb
-from kicad_writer import generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen, add_teardrops_to_pads
+from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
+                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
 
 
 @dataclass
@@ -280,6 +281,7 @@ def write_plane_output(
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
+    content = move_copper_graphics_to_silkscreen(content)
 
     # Add teardrops to all pads if requested
     if add_teardrops:
