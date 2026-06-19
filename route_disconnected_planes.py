@@ -91,6 +91,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
 
 def _reroute_ripped_nets(input_file, output_file, pcb_data, ripped_net_ids, do_reroute,
                          routing_layers, plane_layers, plane_vias, net_id_to_name,
+                         plane_segments,
                          track_width, clearance, via_size, via_drill, grid_step,
                          hole_to_hole_clearance, power_nets, power_nets_widths,
                          no_bga_zone, verbose):
@@ -136,14 +137,15 @@ def _reroute_ripped_nets(input_file, output_file, pcb_data, ripped_net_ids, do_r
                 r, sb.get(r, []), vb.get(r, []), out.pads_by_net.get(r, []),
                 zb.get(r, [])).get('connected', False)]
             if still:
-                restored, vrem = restore_failed_reroute_nets(
+                restored, vrem, srem = restore_failed_reroute_nets(
                     input_file=input_file, output_file=output_file, broken_net_ids=still,
                     plane_vias=plane_vias, net_id_to_name=net_id_to_name,
-                    via_size=via_size, clearance=clearance)
+                    via_size=via_size, clearance=clearance, plane_segments=plane_segments)
                 if restored:
                     names = [pcb_data.nets[r].name if r in pcb_data.nets else f"net_{r}" for r in restored]
                     print(f"Restored {len(restored)} ripped net(s) that failed to re-route "
-                          f"(removed {vrem} colliding via(s)): {', '.join(names)}")
+                          f"(removed {vrem} colliding via(s), {srem} colliding segment(s)): "
+                          f"{', '.join(names)}")
                 unrest = [r for r in still if r not in restored]
                 if unrest:
                     names = [pcb_data.nets[r].name if r in pcb_data.nets else f"net_{r}" for r in unrest]
@@ -644,7 +646,7 @@ def route_planes(
     if ripped_net_ids and not dry_run:
         _reroute_ripped_nets(
             input_file, output_file, pcb_data, ripped_net_ids, reroute_ripped_nets,
-            routing_layers, plane_layers, all_new_vias, kv10_names,
+            routing_layers, plane_layers, all_new_vias, kv10_names, all_new_segments,
             track_width=track_width, clearance=clearance, via_size=via_size,
             via_drill=via_drill, grid_step=grid_step,
             hole_to_hole_clearance=hole_to_hole_clearance,
