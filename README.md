@@ -523,7 +523,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Bus Routing](docs/bus-routing.md) | Bus detection, middle-out ordering, neighbor attraction |
 | [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
-| [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher |
+| [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher, DRC-settings fixer |
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
 | [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
@@ -595,6 +595,8 @@ KiCadRoutingTools/
 ├── check_drc.py              # DRC violation checker
 ├── check_connected.py        # Connectivity checker (with T-junction detection)
 ├── check_orphan_stubs.py     # Orphan stub detector
+├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
+├── fix_kicad_drc_settings.py # Fix .kicad_pro DRC rules/severities (hole clearance, courtyard/mask noise)
 ├── bga_fanout.py             # BGA fanout CLI wrapper
 ├── bga_fanout/               # BGA fanout package
 │   ├── __init__.py           # Main fanout logic and public API

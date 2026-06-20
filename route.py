@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -829,10 +829,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # so untouched planes / excluded nets are never altered. Routed dead ends are
     # dropped from `results`; original input-file dead ends are returned to strip
     # from the output file.
+    # Enforce the per-net tree invariant (cycle analog of the dead-end sweep):
+    # rip-reroute / failed-edge retry re-adds same-net copper that closes loops
+    # (e.g. RAM_A9: 3 loops for a 3-pad net, with its short on a loop edge). Break
+    # every cycle by dropping a redundant non-bridge segment, preferring one that
+    # grazes foreign copper. Runs before the dead-end sweep so spurs left by a
+    # removed loop edge get trimmed. Scoped + zone-skipping like the dead-end sweep.
+    _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
+    if _cy_segs:
+        print(f"Cycle prune: removed {_cy_segs} redundant loop segment(s) across {_cy_nets} net(s)")
+
     _de_segs, _de_vias, dead_end_input_segments = sweep_dead_ends(results, pcb_data, sweep_scope_ids)
     if _de_segs or _de_vias:
         print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
               f"{_de_vias} unsupported via(s)")
+    # Merge any original input-file loop edges into the writer's strip list.
+    if cycle_input_segments:
+        dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)

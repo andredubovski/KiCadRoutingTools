@@ -1095,6 +1095,270 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def _pt_seg_dist(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Shortest distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0.0 and dy == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
+                      foreign, clearance: float):
+    """Reduce one net's routed copper to a spanning tree (forest if split).
+
+    Builds a spanning tree by union-find over the segments, so every segment that
+    would close a cycle (endpoints already connected) is REDUNDANT and removed,
+    while every structural (bridge) segment is kept -- connectivity is preserved
+    exactly. Nodes are keyed by (x, y, layer); vias and through-hole pads join the
+    layer-nodes at their location (a via/TH pad connects all copper there), so
+    cross-layer connectivity is modelled and inter-layer loops are found.
+
+    Segments are processed non-grazing-and-short first, so a segment that grazes
+    foreign copper (within ``clearance``) is the one left as the redundant cycle
+    edge and dropped (removing a graze that sits on a loop, e.g. the RAM_A9 short,
+    for free). Returns (kept, removed)."""
+    if len(net_segs) < 3:
+        return net_segs, []
+    tol = 0.02  # endpoint coincidence tolerance (mm), matching check_connected
+
+    def grazes(s):
+        hw = s.width / 2.0
+        for cx, cy, rad, n, layers in foreign:
+            if n == net_id:
+                continue
+            if layers is not None and s.layer not in layers:
+                continue
+            if _pt_seg_dist(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y) < rad + hw + clearance:
+                return True
+        return False
+
+    # --- Phase 1: cluster segment endpoints into NODES (real connectivity) ---
+    # Each segment contributes two "ports" (its endpoints). Ports coincide (same
+    # node) when they match on the same layer, OR are bridged across layers by a
+    # via / through-hole pad (joined by its copper size, like KiCad). This mirrors
+    # check_net_connectivity so the via-pad-to-trace touch that exact-match misses
+    # is captured -- without it the net looks split and loops are missed.
+    ports = []  # (x, y, layer, seg_index, end 0/1)
+    for i, s in enumerate(net_segs):
+        ports.append((s.start_x, s.start_y, s.layer, i, 0))
+        ports.append((s.end_x, s.end_y, s.layer, i, 1))
+
+    pp = list(range(len(ports)))
+
+    def pfind(x):
+        while pp[x] != x:
+            pp[x] = pp[pp[x]]
+            x = pp[x]
+        return x
+
+    def punion(a, b):
+        ra, rb = pfind(a), pfind(b)
+        if ra != rb:
+            pp[ra] = rb
+
+    n = len(ports)
+    for a in range(n):
+        xa, ya, la = ports[a][0], ports[a][1], ports[a][2]
+        for b in range(a + 1, n):
+            if ports[b][2] == la and abs(ports[b][0] - xa) < tol and abs(ports[b][1] - ya) < tol:
+                punion(a, b)
+
+    # Vias and through-hole pads bridge layers: union all ports within the
+    # connector's copper reach (size/4, >= tol), regardless of layer.
+    def join_near(cx, cy, reach):
+        near = [i for i in range(n) if math.hypot(ports[i][0] - cx, ports[i][1] - cy) < reach]
+        for j in near[1:]:
+            punion(near[0], j)
+
+    for v in (net_vias or []):
+        join_near(v.x, v.y, max(getattr(v, 'size', 0.6) / 4.0, tol))
+    for pad in (net_pads or []):
+        if getattr(pad, 'drill', 0) and pad.drill > 0:
+            reach = max(max(pad.size_x, pad.size_y) / 4.0, tol)
+            join_near(getattr(pad, 'global_x', 0.0), getattr(pad, 'global_y', 0.0), reach)
+
+    # --- Phase 2: T-junction-aware spanning tree; redundant segments removed ---
+    # A segment "touches" its two endpoint clusters AND any cluster that lies on
+    # its INTERIOR (a T-junction). A segment running collinear on top of another
+    # lands on the other's interior, so overlapping copper is caught the same way.
+    # Keeping a segment connects every node it touches; a segment all of whose
+    # touched nodes are already connected adds no connectivity -- it is a loop /
+    # overlap and is removed. Processed non-grazing-and-short first so a grazing or
+    # overlapping segment is the redundant one dropped.
+    from collections import defaultdict
+    from check_connected import point_on_segment, points_match
+
+    reps = {}
+    rep_layers = defaultdict(set)
+    for i in range(n):
+        r = pfind(i)
+        reps.setdefault(r, (ports[i][0], ports[i][1]))
+        rep_layers[r].add(ports[i][2])
+    rep_items = list(reps.items())
+
+    touched = []
+    for i, s in enumerate(net_segs):
+        ra, rb = pfind(2 * i), pfind(2 * i + 1)
+        nodes = {ra, rb}
+        if ra != rb:
+            for r, (cx, cy) in rep_items:
+                if r == ra or r == rb or s.layer not in rep_layers[r]:
+                    continue
+                if point_on_segment(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y, tol) \
+                   and not points_match(cx, cy, s.start_x, s.start_y, tol) \
+                   and not points_match(cx, cy, s.end_x, s.end_y, tol):
+                    nodes.add(r)
+        touched.append(nodes)
+
+    cpar = {r: r for r in reps}
+
+    def cfind(x):
+        while cpar[x] != x:
+            cpar[x] = cpar[cpar[x]]
+            x = cpar[x]
+        return x
+
+    order = sorted(range(len(net_segs)),
+                   key=lambda i: (grazes(net_segs[i]),
+                                  math.hypot(net_segs[i].end_x - net_segs[i].start_x,
+                                             net_segs[i].end_y - net_segs[i].start_y)))
+    kept, removed = [], []
+    for i in order:
+        roots = {cfind(r) for r in touched[i]}
+        if len(roots) <= 1:
+            removed.append(net_segs[i])  # adds no new connectivity -> redundant loop/overlap
+        else:
+            base = next(iter(touched[i]))
+            for r in touched[i]:
+                ra, rb = cfind(base), cfind(r)
+                if ra != rb:
+                    cpar[ra] = rb
+            kept.append(net_segs[i])
+
+    if not removed:
+        return kept, []
+    # Validate each PROPOSED removal against the authoritative connectivity oracle.
+    # The clustering above can over-merge (its tolerances differ from
+    # check_connected's), so a proposed-redundant segment may actually be
+    # load-bearing; checking each removal guarantees we never split the net. Drop
+    # grazing, then longer, candidates first.
+    from check_connected import check_net_connectivity
+    base = check_net_connectivity(net_id, net_segs, net_vias, net_pads)
+    if base.get('connected') is False:
+        return net_segs, []
+    base_comps = base.get('num_components') or 1
+    base_disc = len(base.get('disconnected_pads') or [])
+    cur = list(net_segs)
+    safe_removed = []
+    for s in sorted(removed, key=lambda s: (not grazes(s),
+                    -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
+        trial = [x for x in cur if x is not s]
+        t = check_net_connectivity(net_id, trial, net_vias, net_pads)
+        if t.get('connected') and (t.get('num_components') or 1) <= base_comps \
+           and len(t.get('disconnected_pads') or []) <= base_disc:
+            cur = trial
+            safe_removed.append(s)
+    return cur, safe_removed
+
+
+def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
+                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+    """Enforce the per-net TREE invariant: remove redundant cycle edges (the cycle
+    analog of sweep_dead_ends).
+
+    A multipoint net is routed as an MST (a tree on pads), but the incremental
+    repair layer -- rip+restore and failed-edge retry -- re-adds obstacle-exempt
+    same-net copper to reconnect pads WITHOUT enforcing acyclicity, so cycles
+    accumulate (e.g. RAM_A9: 3 loops / 27 segments for a 3-pad net, with the short
+    sitting on a loop edge). This breaks every cycle by dropping a redundant
+    (non-bridge) segment, keeping all pads/vias connected, preferring to drop one
+    that grazes foreign copper. Nets with a copper pour/zone are skipped (planes
+    are meshes, not trees). Mirrors sweep_dead_ends' write-list sync; also drops
+    removed routed copper from pcb_data so the later passes see the tree.
+
+    Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
+    from collections import defaultdict
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    # Foreign copper (other nets' pads + vias), built once for the grazing test.
+    copper = set(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    foreign = []
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            rad = max(p.size_x, p.size_y) / 2.0
+            if rad <= 0:
+                continue
+            if p.drill and p.drill > 0:
+                layers = None
+            else:
+                pl = set(p.layers or [])
+                on = frozenset(l for l in pl if l in copper)
+                layers = None if any(l == '*.Cu' for l in pl) else (on or None)
+            foreign.append((p.global_x, p.global_y, rad, p.net_id, layers))
+    for v in pcb_data.vias:
+        foreign.append((v.x, v.y, v.size / 2.0, v.net_id, None))
+
+    zoned_nets = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    removed_routed_ids = set()
+    original_to_remove = []
+    nets_pruned = 0
+    from check_connected import check_net_connectivity
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    for net_id, net_segs in segs_by_net.items():
+        if net_id in zoned_nets:  # planes / pours are meshes, not trees
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+        kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
+                                          net_pads, foreign, clearance)
+        if not removed:
+            continue
+        # Safety: the cycle model uses tolerance clustering which can imperfectly
+        # merge nodes -- so VERIFY with the authoritative connectivity check that
+        # the prune did not split the net or strand a pad; if it did, revert this
+        # net (drop nothing). The pass can then only ever remove truly-redundant
+        # copper.
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads)
+        after = check_net_connectivity(net_id, kept, net_vias, net_pads)
+        if (before.get('connected') and not after.get('connected')) or \
+           len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or \
+           (after.get('num_components') or 1) > (before.get('num_components') or 1):
+            continue  # revert: keep all of this net's copper
+        nets_pruned += 1
+        for s in removed:
+            if id(s) in routed_seg_ids:
+                removed_routed_ids.add(id(s))
+            else:
+                original_to_remove.append(s)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+
+    return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
+
+
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
     """Swap the net assignments of two pads in pcb_data (net_id, net_name, and
     membership in pads_by_net / Net.pads).
