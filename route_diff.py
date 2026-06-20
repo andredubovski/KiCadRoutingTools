@@ -1067,9 +1067,25 @@ Examples:
     if args.nets:
         all_patterns.extend(args.nets)
 
+    # Accept comma-separated patterns inside one token, e.g.
+    # --nets "/DVI_CK_P,/DVI_CK_N" (issue #143): split so each is matched on its
+    # own instead of as a single glob containing a comma (which matches nothing).
+    all_patterns = [p.strip() for token in all_patterns for p in token.split(',') if p.strip()]
+
     # Default to "*" (all nets) if no patterns specified
     if not all_patterns:
         all_patterns = ["*"]
+
+    # Warn loudly about any pattern that matches no REAL net, instead of silently
+    # routing fewer pairs than asked for (issue #143). expand_net_patterns passes
+    # an exact name through even when the board has no such net, so check the
+    # expansion against the actual net names.
+    real_names = {n.name for n in pcb_data.nets.values() if n.name}
+    for pat in all_patterns:
+        if pat == "*":
+            continue
+        if not any(nm in real_names for nm in expand_net_patterns(pcb_data, [pat])):
+            print(f"WARNING: net pattern '{pat}' matched no net in this board.")
 
     # Expand patterns to net names
     net_names = expand_net_patterns(pcb_data, all_patterns)
