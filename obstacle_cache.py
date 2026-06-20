@@ -13,7 +13,7 @@ import numpy as np
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
-    pad_blocked_cells_array, square_offsets, circle_offsets
+    pad_blocked_cells_array, segment_blocked_cells_array, square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 
@@ -108,12 +108,16 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
     expansion_grid_by_layer = {}
+    expansion_mm_by_layer = {}
     via_block_grid_by_layer = {}
     via_track_expansion_grid_list = []
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
         expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
+        # Float keep-out half-width for the capsule segment stamp (no floor): the
+        # true perpendicular clearance, so off-grid / diagonal tracks are covered.
+        expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
         expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
@@ -130,9 +134,9 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        expansion_grid = expansion_grid_by_layer.get(seg.layer, 1)
+        expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
         via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
-        _collect_segment_obstacles(seg, coord, layer_idx, expansion_grid, via_block_grid,
+        _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
                                     blocked_cells_set, blocked_vias_set)
 
     # Process vias
@@ -168,27 +172,31 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
 
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
-                                expansion_grid: int, via_block_grid: int,
+                                track_margin_mm: float, via_block_grid: int,
                                 blocked_cells: List["np.ndarray"],
                                 blocked_vias: List["np.ndarray"]):
-    """Collect segment obstacle cells into sets (no obstacle map modification)."""
+    """Collect segment obstacle cells into sets (no obstacle map modification).
+
+    The track keep-out is a capsule measured from the REAL float segment (handles
+    off-grid endpoints + diagonals); the via keep-out still uses the Bresenham line
+    (vias land on grid cells, and the diagonal margin already compensates there).
+    """
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
     is_diagonal = is_diagonal_segment(gx1, gy1, gx2, gy2)
     effective_via_block_sq, via_block_range = get_diagonal_via_blocking_params(via_block_grid, is_diagonal)
 
-    # Batched rasterization (issue #35): collect cell arrays; the caller
-    # deduplicates with np.unique, matching the old per-cell set semantics.
-    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-
-    track_offs = square_offsets(expansion_grid)
-    cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
+    # Track blocking: capsule around the true segment (issue #70/B).
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                        track_margin_mm, coord.grid_step)
     rows = np.empty((len(cells), 3), dtype=np.int32)
     rows[:, :2] = cells
     rows[:, 2] = layer_idx
     blocked_cells.append(rows)
 
+    # Via blocking still rasterized along the Bresenham line (issue #35).
+    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
     via_offs = circle_offsets(via_block_range, effective_via_block_sq)
     blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
 
