@@ -41,6 +41,14 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
             if pad.drill and pad.drill > 0:
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
                 free_via_positions.append((gx, gy))
+    # Every EXISTING same-net via (fanout via-in-pad, a prior route's via, or a
+    # board via) is a reusable zero-cost layer transition, so the router reuses it
+    # instead of dropping its own beside it. The emitted layer-change via at such a
+    # position must be REUSED, not added (see via dedup at route conversion).
+    net_id_set = set(net_ids)
+    for v in pcb_data.vias:
+        if v.net_id in net_id_set:
+            free_via_positions.append(coord.to_grid(v.x, v.y))
     if free_via_positions:
         obstacles.add_free_vias_batch(free_via_positions)
 

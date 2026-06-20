@@ -44,6 +44,13 @@ import sys
 COURTYARD_CATS = ["courtyards_overlap", "malformed_courtyard",
                   "npth_inside_courtyard", "pth_inside_courtyard"]
 MASK_CATS = ["solder_mask_bridge"]
+# Footprint / library-geometry issues inherited from the source board's
+# footprints (annular rings, pad/footprint library mismatches). The router does
+# not create or fix these, so they are pure noise when reviewing a routed board
+# -- on the stress boards they dominate the report (e.g. 199 annular_width + 149
+# lib_footprint markers on orangecrab). Ignored by default; --keep-footprint
+# restores them.
+FOOTPRINT_CATS = ["annular_width", "lib_footprint_issues", "lib_footprint_mismatch"]
 
 
 def find_project(path: str) -> str:
@@ -73,6 +80,8 @@ def main():
                     help="Hole-clearance floor in mm (default: copper clearance)")
     ap.add_argument("--keep-courtyards", action="store_true", help="Do not ignore courtyard categories")
     ap.add_argument("--keep-mask", action="store_true", help="Do not ignore solder-mask bridge")
+    ap.add_argument("--keep-footprint", action="store_true",
+                    help="Do not ignore footprint/library categories (annular_width, lib_footprint_*)")
     ap.add_argument("--ignore", nargs="+", default=[], metavar="CAT",
                     help="Extra severity categories to set to ignore")
     ap.add_argument("--ignore-warnings", action="store_true",
@@ -113,6 +122,8 @@ def main():
         to_ignore += COURTYARD_CATS
     if not args.keep_mask:
         to_ignore += MASK_CATS
+    if not args.keep_footprint:
+        to_ignore += FOOTPRINT_CATS
     if args.ignore_warnings:
         to_ignore += [cat for cat, s in sev.items() if s == "warning"]
     for cat in to_ignore:

@@ -730,9 +730,13 @@ defaults, which produce two kinds of noise:
    spurious at the real manufacturing floor; `check_drc.py` never reports them.
 2. **Placement / fabrication categories** (courtyard overlaps, solder-mask
    bridges) fire as errors even though they are not routing problems.
+3. **Footprint / library categories** (`annular_width`, `lib_footprint_issues`,
+   `lib_footprint_mismatch`) are inherited from the source board's footprints —
+   the router neither creates nor fixes them — yet they often dominate the report
+   (e.g. ~200 annular + ~150 library markers on the orangecrab stress board).
 
 The script sets `min_hole_clearance` to the board's copper-clearance floor and
-sets the courtyard / solder-mask severities to `ignore`. `clearance`,
+sets the courtyard / solder-mask / footprint severities to `ignore`. `clearance`,
 `shorting_items` and `unconnected_items` are left untouched (KiCad shows
 unconnected items in their own tab).
 
@@ -750,6 +754,8 @@ Options:
                         clearance -- the Default netclass, else rules.min_clearance)
   --keep-courtyards     Do not ignore the courtyard categories
   --keep-mask           Do not ignore solder_mask_bridge
+  --keep-footprint      Do not ignore footprint/library categories
+                        (annular_width, lib_footprint_issues, lib_footprint_mismatch)
   --ignore CAT [CAT...] Additional severity categories to set to "ignore"
   --ignore-warnings     Set EVERY category currently at "warning" severity to
                         "ignore" (hides all warning markers; errors untouched)
@@ -764,7 +770,8 @@ then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
 ### Examples
 
 ```bash
-# Default: hole clearance -> copper floor; ignore courtyards + solder-mask noise
+# Default: hole clearance -> copper floor; ignore courtyard, solder-mask and
+# footprint/library (annular_width, lib_footprint_*) noise
 python3 fix_kicad_drc_settings.py routed.kicad_pcb
 
 # Preview without writing

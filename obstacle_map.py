@@ -1208,18 +1208,24 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
 
 def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
                                         config: GridRouteConfig) -> Set[Tuple[int, int]]:
-    """Get grid positions of through-hole pads on this net.
+    """Get grid positions where this net already has a hole spanning all layers.
 
-    These positions can be used for layer transitions without placing a new via,
-    since the existing through-hole already connects all layers.
+    A layer change at one of these cells needs NO new via: an existing through-hole
+    pad OR an existing same-net via (fanout via-in-pad, a prior route's via, a board
+    via) already connects the layers. The router reuses the hole (see the free-via
+    override in the Rust router), and route conversion must SUPPRESS emitting its own
+    via there -- otherwise it stacks a second, near-coincident via beside the existing
+    one (an un-manufacturable hole-to-hole short). Each cell is to_grid(x, y), matching
+    the free-via registration, so the suppressed cell is exactly where the router
+    transitions.
 
     Args:
-        pcb_data: PCB data with pads_by_net
-        net_id: Net ID to get through-hole positions for
+        pcb_data: PCB data with pads_by_net and vias
+        net_id: Net ID to get hole positions for
         config: Grid routing config (for grid_step)
 
     Returns:
-        Set of (gx, gy) grid coordinates where through-hole pads exist
+        Set of (gx, gy) grid coordinates where a same-net through-hole exists
     """
     coord = GridCoord(config.grid_step)
     positions = set()
@@ -1229,6 +1235,13 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
         if pad.drill and pad.drill > 0:
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
             positions.add((gx, gy))
+
+    # Existing same-net vias are reusable holes too (see free-via reuse). Without
+    # this, only the multipoint tap path augmented the set, so the Phase-1 main edge
+    # and single-ended routes dropped a duplicate via onto an existing via-in-pad.
+    for via in pcb_data.vias:
+        if via.net_id == net_id:
+            positions.add(coord.to_grid(via.x, via.y))
 
     return positions
 
