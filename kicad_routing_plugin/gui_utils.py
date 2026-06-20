@@ -23,3 +23,45 @@ class StdoutRedirector:
     def flush(self):
         if self.original:
             self.original.flush()
+
+
+def move_copper_graphics_to_silkscreen_board(board):
+    """Move copper graphic shapes (logos / artwork drawn as polys, lines, arcs,
+    circles, rects, curves) from F.Cu/B.Cu to the matching silkscreen layer on the
+    live pcbnew board.
+
+    Mirrors kicad_writer.move_copper_graphics_to_silkscreen so the GUI matches CLI
+    output (issue #146): a net-less copper graphic is not modelled as a router
+    obstacle, so plane pours and routed copper run straight over it and short
+    against it. Relocating it to silkscreen preserves it visually while taking it
+    out of copper.
+
+    Walks both board-level drawings AND footprint graphics - a copper logo is
+    frequently a footprint fp_poly (e.g. the orangecrab OSHW logo). Footprint text
+    and board text are handled separately by the copper-text mover, so only
+    PCB_SHAPE items are touched here. Returns the number of shapes moved.
+    """
+    import pcbnew
+
+    moved = 0
+
+    def _relocate(item):
+        nonlocal moved
+        # PCB_SHAPE covers gr_line/poly/arc/circle/rect/curve, and footprint
+        # graphics (unified onto PCB_SHAPE in modern KiCad).
+        if not isinstance(item, pcbnew.PCB_SHAPE):
+            return
+        layer = item.GetLayer()
+        if layer == pcbnew.F_Cu:
+            item.SetLayer(pcbnew.F_SilkS)
+            moved += 1
+        elif layer == pcbnew.B_Cu:
+            item.SetLayer(pcbnew.B_SilkS)
+            moved += 1
+
+    for drawing in board.GetDrawings():
+        _relocate(drawing)
+    for footprint in board.GetFootprints():
+        for item in footprint.GraphicalItems():
+            _relocate(item)
+    return moved

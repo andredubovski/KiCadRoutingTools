@@ -1187,6 +1187,15 @@ class PlanesTab(wx.Panel):
         if board is None:
             return
 
+        # Relocate net-less copper logos/graphics to silkscreen (issue #146),
+        # matching the CLI plane writer (plane_io.py): a copper logo is not a
+        # router obstacle, so the pour/repair copper added here would short
+        # against it. The CLI does this unconditionally on plane output.
+        from .gui_utils import move_copper_graphics_to_silkscreen_board
+        gfx_moved = move_copper_graphics_to_silkscreen_board(board)
+        if gfx_moved:
+            print(f"Moved {gfx_moved} copper graphic(s)/logo(s) to silkscreen")
+
         # Delete the tracks/vias of nets that were ripped to clear a blocked pad
         # repair - their re-routed copper is in _new_segments/_new_vias below, so
         # the old (blocking) copper must go first or it would short the repair.

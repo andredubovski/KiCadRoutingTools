@@ -2599,7 +2599,7 @@ class RoutingDialog(wx.Dialog):
                 # Route each net class group with its own parameters
                 total_successful = 0
                 total_failed = 0
-                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
+                all_results = {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': [], 'segments_to_remove': []}
 
                 class_names = list(config['nets_by_class'].keys())
                 total_classes = len(class_names)
@@ -2715,6 +2715,10 @@ class RoutingDialog(wx.Dialog):
                         all_results['all_swap_vias'].extend(results_data.get('all_swap_vias', []))
                         all_results['exclusion_zone_lines'].extend(results_data.get('exclusion_zone_lines', []))
                         all_results['boundary_debug_labels'].extend(results_data.get('boundary_debug_labels', []))
+                        # Original-board loop/dead-end segments flagged for removal
+                        # by cycle-prune (#4c1ac33) / dead-end sweep - must carry to
+                        # the apply step or they're never stripped in the per-class path.
+                        all_results['segments_to_remove'].extend(results_data.get('segments_to_remove', []))
 
                 successful = total_successful
                 failed = total_failed
@@ -2801,10 +2805,17 @@ class RoutingDialog(wx.Dialog):
         # swaps, so skipping them leaves shorts at swapped pads
         apply_swaps_to_board(board, results_data)
 
-        # Move copper text to silkscreen if enabled
+        # Move copper text to silkscreen if enabled. The CLI writer pairs the text
+        # and graphic relocations (kicad_writer), so move copper logos/graphics
+        # too (issue #146) - otherwise a net-less copper logo shorts the routed
+        # copper in the GUI output but not the CLI's.
         text_moved = 0
         if config.get('move_copper_text', True):
             text_moved = self._move_copper_text_to_silkscreen(board)
+            from .gui_utils import move_copper_graphics_to_silkscreen_board
+            gfx_moved = move_copper_graphics_to_silkscreen_board(board)
+            if gfx_moved:
+                print(f"Moved {gfx_moved} copper graphic(s)/logo(s) to silkscreen")
 
         # Track counts for reporting
         tracks_added = 0
