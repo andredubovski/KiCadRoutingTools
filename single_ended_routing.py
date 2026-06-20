@@ -2093,6 +2093,29 @@ def route_multipoint_taps(
         if _v.net_id == net_id:
             through_hole_positions.add(coord.to_grid(_v.x, _v.y))
 
+    # In-progress vias (this net's main + earlier tap edges) are NOT yet in
+    # pcb_data, so the per-net obstacle clone doesn't know about them. Register
+    # each one in the live map so a LATER edge (1) REUSES it as a zero-cost free
+    # via when its path lands on the cell, and (2) cannot drop a SECOND via within
+    # hole-to-hole of it. Without this, a later branch dropped a via a sub-mm away
+    # -- the VTT multipoint junction double-via (hole_to_hole DRC). The ring skips
+    # the via's own cell so reuse stays open.
+    _vv_radius = (config.via_size + config.clearance) * coord.inv_step
+    _vv_rng = int(math.ceil(_vv_radius))
+    _vv_sq = _vv_radius * _vv_radius
+
+    def _register_inprogress_via(v):
+        vgx, vgy = coord.to_grid(v.x, v.y)
+        obstacles.add_free_via(vgx, vgy)
+        for ex in range(-_vv_rng, _vv_rng + 1):
+            for ey in range(-_vv_rng, _vv_rng + 1):
+                d = ex * ex + ey * ey
+                if 0 < d <= _vv_sq:
+                    obstacles.add_blocked_via(vgx + ex, vgy + ey)
+
+    for _v in all_vias:
+        _register_inprogress_via(_v)
+
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
     remaining_edges = mst_edges[1:] if len(mst_edges) > 1 else []
@@ -2338,9 +2361,11 @@ def route_multipoint_taps(
         all_segments.extend(segments)
         all_vias.extend(vias)
         # Make this edge's vias reusable by later edges of the same net, so a
-        # later edge changing layers at one of these cells reuses the via.
+        # later edge changing layers at one of these cells reuses the via, and
+        # block a hole-to-hole ring so a later edge can't drop a via beside it.
         for _v in vias:
             through_hole_positions.add(coord.to_grid(_v.x, _v.y))
+            _register_inprogress_via(_v)
 
         # Note: We don't add segments as obstacles since they're the same net
         # and future tap routes can overlap with our own traces

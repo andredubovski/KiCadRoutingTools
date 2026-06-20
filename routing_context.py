@@ -6,6 +6,7 @@ like building obstacle maps and recording route results.
 """
 
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
+import math
 import numpy as np
 from routing_config import GridCoord, GridRouteConfig
 from obstacle_map import (
@@ -443,14 +444,22 @@ def prepare_obstacles_inplace(
     same_net_via_cells = []
 
     # Via-via clearance
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
-        for ex in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-            for ey in range(-via_via_expansion_grid, via_via_expansion_grid + 1):
-                if ex*ex + ey*ey <= via_via_expansion_grid * via_via_expansion_grid:
+        # Grow by the via's sub-grid offset so an off-grid via-in-pad keeps a NEW
+        # same-net via the full clearance from its TRUE centre (issue #70; mirror of
+        # add_same_net_via_clearance and the via-obstacle rasterizers).
+        off_cells = math.hypot(via.x - gx * coord.grid_step,
+                               via.y - gy * coord.grid_step) / coord.grid_step
+        radius = via_via_expansion_grid + off_cells
+        rng = int(math.ceil(radius))
+        radius_sq = radius * radius
+        for ex in range(-rng, rng + 1):
+            for ey in range(-rng, rng + 1):
+                if ex*ex + ey*ey <= radius_sq:
                     same_net_via_cells.append((gx + ex, gy + ey))
 
     # Pad drill hole clearance

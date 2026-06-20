@@ -7,6 +7,7 @@ dramatically speeding up routing by avoiding redundant obstacle calculations.
 
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
+import math
 import numpy as np
 
 from kicad_parser import PCBData
@@ -118,7 +119,9 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
         via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-    via_via_expansion_grid = max(1, coord.to_grid_dist(config.via_size + config.clearance))
+    # Float via-via radius (no floor) so the disc threshold (radius**2) blocks the
+    # true clearance -- flooring let cross-net vias sit a diagonal cell too close.
+    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
 
     # Process segments
     for seg in pcb_data.segments:
@@ -203,6 +206,15 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
     gx, gy = coord.to_grid(via.x, via.y)
     center = np.array([gx, gy], dtype=np.int32)
 
+    # Sub-grid offset of the real via centre from its quantized cell. An off-grid
+    # via (e.g. a BGA fanout via-in-pad) has its blocked disc centred on the
+    # ROUNDED cell, so foreign copper that clears the rounded centre still grazes
+    # the TRUE centre by up to the offset (issue #70). Grow each blocking radius by
+    # this offset so the disc covers the real via. On-grid (router-placed) vias
+    # have offset ~0 and are unchanged. Mirror of obstacle_map._add_via_obstacle.
+    off_cells = math.hypot(via.x - gx * coord.grid_step,
+                           via.y - gy * coord.grid_step) / coord.grid_step
+
     def add_layer_cells(offs, layer_idx):
         cells = center + offs
         rows = np.empty((len(cells), 3), dtype=np.int32)
@@ -214,18 +226,16 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
     if isinstance(via_track_expansion_grid, list):
         for layer_idx in range(num_layers):
             layer_expansion = via_track_expansion_grid[layer_idx]
-            effective_track_block_sq = (layer_expansion + diagonal_margin) ** 2
-            track_block_range = layer_expansion + 1
-            add_layer_cells(circle_offsets(track_block_range, effective_track_block_sq), layer_idx)
+            radius = layer_expansion + diagonal_margin + off_cells
+            add_layer_cells(circle_offsets(int(math.ceil(radius)), radius ** 2), layer_idx)
     else:
-        effective_track_block_sq = (via_track_expansion_grid + diagonal_margin) ** 2
-        track_block_range = via_track_expansion_grid + 1
-        offs = circle_offsets(track_block_range, effective_track_block_sq)
+        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        offs = circle_offsets(int(math.ceil(radius)), radius ** 2)
         for layer_idx in range(num_layers):
             add_layer_cells(offs, layer_idx)
 
-    via_offs = circle_offsets(via_via_expansion_grid,
-                              via_via_expansion_grid * via_via_expansion_grid)
+    via_radius = via_via_expansion_grid + off_cells
+    via_offs = circle_offsets(int(math.ceil(via_radius)), via_radius * via_radius)
     blocked_vias.append(center + via_offs)
 
 
