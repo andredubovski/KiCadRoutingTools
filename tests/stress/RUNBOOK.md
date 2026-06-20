@@ -42,8 +42,9 @@ stderr, the per-tool `*.log` files update live, and after the run
 
 **State signals** (what the queue and `stress_status.sh` use):
 - DONE: results JSON exists.
-- RUNNING: a process matches the run-dir path, OR the run dir was touched <15 min
-  ago (covers the gap between a worker's commands). Naive checks mislead — pgrep
+- RUNNING: a process matches the run-dir path, OR the run dir was touched <45 min
+  ago (covers the gap between a worker's commands AND a long single signal-route
+  step on a big board that writes no intermediate files). Naive checks mislead — pgrep
   on tool names is noisy and case-sensitive (KiCad's interpreter is `Python`,
   wrapped by run_limited.sh), and run-dir mtimes go quiet during a long route —
   so don't rely on those alone.
@@ -285,8 +286,10 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
     command exceeds the 10-min foreground cap, keep waiting in foreground:
     repeatedly run `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
     sleep 10; done` (each up to 10 min) until the process exits, then read its
-    log and continue. If a command shows no log growth for >15 min, kill it
-    and record it as a hang.
+    log and continue. Big/dense boards (FPGA/USB3-class: daisho, large BGAs)
+    can legitimately spend 30-60+ min in a single signal-route step — that is
+    slow progress, NOT a hang. Only kill a command once it shows no log growth
+    AND no output-file size change for >45 min, and record it as a hang.
 13. If a tool crashes (traceback), capture the full traceback in the JSON
     issues list. A crash is a valuable finding, not a failure of your task —
     continue with remaining steps if possible.
