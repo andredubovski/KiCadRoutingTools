@@ -2299,21 +2299,54 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 bc = getattr(bp, 'local_clearance', 0.0); fc = getattr(fp, 'local_clearance', 0.0)
                 if not close(bc, fc):
                     diffs.append(f"Pad {ref}:{bp.pad_number} local_clearance: board={bc:.3f} file={fc:.3f}")
+                # Roundrect corner ratio - the pad obstacle/DRC geometry rounds the
+                # rectangle corners by this, so a mismatch changes the modelled copper.
+                brr = getattr(bp, 'roundrect_rratio', 0.0); frr = getattr(fp, 'roundrect_rratio', 0.0)
+                if not close(brr, frr):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} roundrect_rratio: board={brr:.3f} file={frr:.3f}")
                 if not close(bp.drill, fp.drill):
                     diffs.append(f"Pad {ref}:{bp.pad_number} drill: board={bp.drill:.3f} file={fp.drill:.3f}")
                 # Compare layers (as sets since order may differ)
                 if set(bp.layers) != set(fp.layers):
                     diffs.append(f"Pad {ref}:{bp.pad_number} layers: board={bp.layers} file={fp.layers}")
 
-    # --- Compare segments ---
-    if len(from_board.segments) != len(from_file.segments):
-        diffs.append(f"Segment count: board={len(from_board.segments)} file={len(from_file.segments)}")
+    # --- Compare segments (geometry, not just count) ---
+    # Existing tracks are routing obstacles, so a position/width/layer/net
+    # divergence changes what the router sees. Match as a multiset of canonical
+    # signatures (endpoint order normalised, coords quantised to ~1um) since the
+    # board and file orderings differ.
+    def _q(v):
+        return round(v, 3)
 
-    # --- Compare vias ---
-    if len(from_board.vias) != len(from_file.vias):
-        diffs.append(f"Via count: board={len(from_board.vias)} file={len(from_file.vias)}")
+    def _seg_sig(s):
+        ends = tuple(sorted([(_q(s.start_x), _q(s.start_y)), (_q(s.end_x), _q(s.end_y))]))
+        return (ends, _q(s.width), s.layer, s.net_id)
 
-    # --- Compare zones ---
+    def _multiset_diff(board_items, file_items, sig, label, fmt):
+        from collections import Counter
+        cb = Counter(sig(x) for x in board_items)
+        cf = Counter(sig(x) for x in file_items)
+        only_board = list((cb - cf).elements())
+        only_file = list((cf - cb).elements())
+        if only_board or only_file:
+            diffs.append(f"{label} count: board={len(board_items)} file={len(file_items)}; "
+                         f"{len(only_board)} only in board, {len(only_file)} only in file")
+            for s in only_board[:5]:
+                diffs.append(f"  {label} only in board: {fmt(s)}")
+            for s in only_file[:5]:
+                diffs.append(f"  {label} only in file: {fmt(s)}")
+
+    _multiset_diff(from_board.segments, from_file.segments, _seg_sig, "Segment",
+                   lambda s: f"ends={s[0]} w={s[1]} layer={s[2]} net={s[3]}")
+
+    # --- Compare vias (geometry, not just count) ---
+    def _via_sig(v):
+        return (_q(v.x), _q(v.y), _q(v.size), _q(v.drill), v.net_id, tuple(sorted(v.layers)))
+
+    _multiset_diff(from_board.vias, from_file.vias, _via_sig, "Via",
+                   lambda v: f"({v[0]},{v[1]}) size={v[2]} drill={v[3]} net={v[4]} layers={list(v[5])}")
+
+    # --- Compare zones (net/layer/vertex count) ---
     if len(from_board.zones) != len(from_file.zones):
         diffs.append(f"Zone count: board={len(from_board.zones)} file={len(from_file.zones)}")
     else:
@@ -2327,6 +2360,28 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 diffs.append(f"Zone layer mismatch: board={bz.layer} file={fz.layer}")
             if len(bz.polygon) != len(fz.polygon):
                 diffs.append(f"Zone net={bz.net_id} layer={bz.layer} vertex count: board={len(bz.polygon)} file={len(fz.polygon)}")
+
+    # --- Compare board outline / cutouts (used for edge & cutout obstacles) ---
+    bo_b = bi_b.board_outline or []
+    bo_f = bi_f.board_outline or []
+    if len(bo_b) != len(bo_f):
+        diffs.append(f"Board outline vertex count: board={len(bo_b)} file={len(bo_f)}")
+    cut_b = bi_b.board_cutouts or []
+    cut_f = bi_f.board_cutouts or []
+    if len(cut_b) != len(cut_f):
+        diffs.append(f"Board cutout count: board={len(cut_b)} file={len(cut_f)}")
+
+    # --- Compare keepout zones (routing obstacles) ---
+    kz_b = from_board.keepout_zones or []
+    kz_f = from_file.keepout_zones or []
+    if len(kz_b) != len(kz_f):
+        diffs.append(f"Keepout zone count: board={len(kz_b)} file={len(kz_f)}")
+
+    # --- Compare guide paths (used by guided routing) ---
+    gp_b = from_board.guide_paths or []
+    gp_f = from_file.guide_paths or []
+    if len(gp_b) != len(gp_f):
+        diffs.append(f"Guide path count: board={len(gp_b)} file={len(gp_f)}")
 
     return diffs
 

@@ -338,7 +338,13 @@ compare_pcb_data(from_board: PCBData, from_file: PCBData,
 
 Compares two parses (e.g. live-board vs file) and returns human-readable
 difference strings; empty list means they match. Useful to validate
-`build_pcb_data_from_board` against `parse_kicad_pcb`.
+`build_pcb_data_from_board` against `parse_kicad_pcb` (this is what the GUI's
+**Validate PCB Data** button runs). Coverage spans the fields the router
+actually consumes: board info (layers, bounds, stackup), nets, footprint and
+per-pad geometry (position, size, `rect_rotation`, `roundrect_rratio`,
+`local_clearance`, drill, layers), track and via geometry (matched as a
+multiset, not just counts), zones, board outline/cutouts, keepout zones, and
+guide paths.
 
 ```python
 save_extracted_data(pcb_data: PCBData, output_path: str)
