@@ -107,25 +107,20 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
-    expansion_grid_by_layer = {}
     expansion_mm_by_layer = {}
     via_block_grid_by_layer = {}
-    via_track_expansion_grid_list = []
+    layer_widths = []  # per-layer future-routing-track width (impedance / power)
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
+        layer_widths.append(layer_width)
         expansion_mm = layer_width / 2 + config.clearance + config.track_width / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
-        expansion_grid_by_layer[layer_name] = max(1, coord.to_grid_dist(expansion_mm))
+        # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
-        via_track_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid_list.append(max(1, coord.to_grid_dist_safe(via_track_mm)))
-    # Float via-via radius (no floor) so the disc threshold (radius**2) blocks the
-    # true clearance -- flooring let cross-net vias sit a diagonal cell too close.
-    via_via_expansion_grid = max(1.0, (config.via_size + config.clearance) * coord.inv_step)
 
     # Process segments
     for seg in pcb_data.segments:
@@ -139,12 +134,23 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
                                     blocked_cells_set, blocked_vias_set)
 
-    # Process vias
+    # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
+    # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-
+    # expanded it by ~half the size difference. At grid 0.1 that was masked by the
+    # off-grid offset (off_cells) of those vias; at grid 0.05 the same vias land
+    # on-grid (off_cells=0), exposing 74 track-via grazes. Matches the non-cache
+    # add_net_vias_as_obstacles, which already uses via.size.
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
-        _collect_via_obstacles(via, coord, num_layers, via_track_expansion_grid_list,
-                                via_via_expansion_grid, diagonal_margin,
+        vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
+        via_track_list = [max(1, coord.to_grid_dist_safe(
+            vs / 2 + lw / 2 + config.clearance + extra_clearance)) for lw in layer_widths]
+        # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
+        # Float radius (no floor) so the disc threshold blocks the true clearance.
+        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * coord.inv_step)
+        _collect_via_obstacles(via, coord, num_layers, via_track_list,
+                                via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set)
 
     # Process pads
