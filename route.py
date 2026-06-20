@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -844,6 +844,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _de_segs or _de_vias:
         print(f"Dead-end sweep: trimmed {_de_segs} dead-end segment(s) and "
               f"{_de_vias} unsupported via(s)")
+
+    # Neck wide power segments that overlap a foreign pad at a fine-pitch terminal
+    # (the router exempts terminals, so a full-width trunk into a via-in-pad can
+    # short the neighbour pad). Centreline unchanged, so connectivity is preserved.
+    _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
+    if _necked:
+        print(f"Width neck: narrowed {_necked} wide segment(s) grazing a foreign pad")
     # Merge any original input-file loop edges into the writer's strip list.
     if cycle_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments

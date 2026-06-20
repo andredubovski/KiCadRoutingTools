@@ -1105,6 +1105,50 @@ def _pt_seg_dist(px: float, py: float, x1: float, y1: float, x2: float, y2: floa
     return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
+def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
+    """Neck any routed segment wider than its layer default that VIOLATES clearance
+    with a foreign-net pad on its layer.
+
+    A wide power trunk that ROUTES SUCCESSFULLY at full width (necked_down=False,
+    so the routing-time neck-down never runs) keeps its full width into a fanout
+    via-in-pad terminal; the router exempts the terminal region, so the wide copper
+    overlaps the neighbouring foreign pad on a fine-pitch part (VSYS->U7.D1 shorting
+    GND pad U7.C1). Necking the offending segment to the layer default restores
+    clearance without moving the centreline, so connectivity is preserved.
+
+    Only segments that (a) violate at full width AND (b) clear at the default width
+    are necked -- a legitimately-clear wide trunk is left alone, and a violation
+    necking can't fix is left for the DRC report. Returns the count necked.
+    """
+    from net_queries import expand_pad_layers
+    from collections import defaultdict
+    pads_by_layer = defaultdict(list)
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            for layer in expand_pad_layers(pad.layers, config.layers):
+                pads_by_layer[layer].append(pad)
+    clr = config.clearance
+    necked = 0
+    for r in results:
+        for seg in r.get('new_segments', []):
+            default_w = config.get_track_width(seg.layer)
+            if seg.width <= default_w + 1e-9:
+                continue
+            for pad in pads_by_layer.get(seg.layer, []):
+                if pad.net_id == seg.net_id or pad.net_id == 0:
+                    continue
+                d = _pt_seg_dist(pad.global_x, pad.global_y,
+                                 seg.start_x, seg.start_y, seg.end_x, seg.end_y)
+                # Bounding-circle pad half (conservative: never misses a violation).
+                pad_half = max(pad.size_x, pad.size_y) / 2.0
+                if (d - pad_half - seg.width / 2.0 < clr
+                        and d - pad_half - default_w / 2.0 >= clr):
+                    seg.width = default_w
+                    necked += 1
+                    break
+    return necked
+
+
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
                       foreign, clearance: float):
     """Reduce one net's routed copper to a spanning tree (forest if split).
