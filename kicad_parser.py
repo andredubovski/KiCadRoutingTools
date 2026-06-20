@@ -1876,14 +1876,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # Custom pads: GetSize() is only the anchor; enclose the real copper
             # via the effective bounding box, centred on the connection point so
             # all copper is covered (mirrors the text-parser path / #70 dig). The
-            # bbox is already board-axis-aligned, so skip the rect rotation.
+            # bbox is already board-axis-aligned, so use it directly: do NOT max
+            # against the anchor GetSize(), which is in the pad's UN-rotated local
+            # frame - for a rotated pad the anchor's long side leaks into the wrong
+            # board axis and over-widens the pad (e.g. U9 QFN: narrow 0.28 -> 0.71).
             if shape == 'custom':
                 try:
                     bb = pad.GetBoundingBox()
                     pos = pad.GetPosition()
                     hx = max(abs(to_mm(bb.GetLeft() - pos.x)), abs(to_mm(bb.GetRight() - pos.x)))
                     hy = max(abs(to_mm(bb.GetTop() - pos.y)), abs(to_mm(bb.GetBottom() - pos.y)))
-                    size_x, size_y, rect_rotation = max(size_x, 2 * hx), max(size_y, 2 * hy), 0.0
+                    size_x, size_y, rect_rotation = 2 * hx, 2 * hy, 0.0
                 except Exception:
                     size_x, size_y, rect_rotation = _resolve_pad_rect(size_x, size_y, pad_rotation)
             else:
@@ -1902,10 +1905,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             except Exception:
                 pintype = ""
 
-            # Drill
+            # Drill. Oval/slot drills have distinct x/y; take max(x, y) to match
+            # the text parser (issue #106) - using only .x under-reports a rotated
+            # slot's hole and risks hole-to-hole DRC.
             try:
                 drill_size = pad.GetDrillSize()
-                drill = to_mm(drill_size.x)
+                drill = to_mm(max(drill_size.x, drill_size.y))
             except Exception:
                 drill = 0.0
 
