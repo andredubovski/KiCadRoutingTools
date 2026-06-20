@@ -192,14 +192,48 @@ def _reroute_ripped_nets_in_memory(input_file, pcb_data, ripped_net_ids, repair_
             sys.setrecursionlimit(old)
         out = parse_kicad_pcb(tout)
         rid = set(ripped_net_ids)
-        segs = [{'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
-                 'width': s.width, 'layer': s.layer, 'net_id': s.net_id}
-                for s in out.segments if s.net_id in rid]
-        vias = [{'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
-                 'layers': ['F.Cu', 'B.Cu'], 'net_id': v.net_id}
-                for v in out.vias if v.net_id in rid]
-        print(f"Re-routed {len(ripped_names)} ripped net(s) in-memory: "
-              f"{len(segs)} segment(s), {len(vias)} via(s)")
+        from check_connected import check_net_connectivity
+        # Re-routed copper (from the temp output) grouped per ripped net.
+        o_seg: Dict[int, List] = {}; o_via: Dict[int, List] = {}; o_zone: Dict[int, List] = {}
+        for s in out.segments:
+            if s.net_id in rid: o_seg.setdefault(s.net_id, []).append(s)
+        for v in out.vias:
+            if v.net_id in rid: o_via.setdefault(v.net_id, []).append(v)
+        for z in out.zones:
+            if z.net_id in rid: o_zone.setdefault(z.net_id, []).append(z)
+        # Original copper from the input, to restore a net that fails to re-route.
+        i_seg: Dict[int, List] = {}; i_via: Dict[int, List] = {}
+        for s in pcb_data.segments:
+            if s.net_id in rid: i_seg.setdefault(s.net_id, []).append(s)
+        for v in pcb_data.vias:
+            if v.net_id in rid: i_via.setdefault(v.net_id, []).append(v)
+
+        segs: List[Dict] = []; vias: List[Dict] = []; restored: List[int] = []
+        for r in ripped_net_ids:
+            res = check_net_connectivity(r, o_seg.get(r, []), o_via.get(r, []),
+                                         out.pads_by_net.get(r, []), o_zone.get(r, []))
+            if res.get('connected', False):
+                src_s, src_v = o_seg.get(r, []), o_via.get(r, [])
+            else:
+                # Issue #88 parity for the GUI/in-memory path: a net that fails to
+                # re-route must NOT be dropped. The caller deletes the net's old
+                # tracks before applying these, so fall back to its ORIGINAL copper
+                # (restoring the pre-rip trace) instead of returning nothing.
+                src_s, src_v = i_seg.get(r, []), i_via.get(r, [])
+                if src_s or src_v:
+                    restored.append(r)
+            for s in src_s:
+                segs.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
+                             'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
+            for v in src_v:
+                vias.append({'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
+                             'layers': ['F.Cu', 'B.Cu'], 'net_id': v.net_id})
+        msg = (f"Re-routed {len(ripped_names)} ripped net(s) in-memory: "
+               f"{len(segs)} segment(s), {len(vias)} via(s)")
+        if restored:
+            names = [pcb_data.nets[r].name if r in pcb_data.nets else f"net_{r}" for r in restored]
+            msg += f"; restored {len(restored)} net(s) that failed to re-route: {', '.join(names)}"
+        print(msg)
         return segs, vias
     finally:
         for f in (tin, tout):
@@ -610,6 +644,28 @@ def route_planes(
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
     kv10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
+
+    # Issue #141: --reroute-ripped-nets should also pick up nets the earlier
+    # route_planes pass ripped (and left unrouted), not just nets we ripped here.
+    # Use the SAME selection route.py/batch_route uses to decide what to route -
+    # filter_already_routed (2+ pads, not fully connected; zone-aware) - so the set
+    # of nets we re-route matches what route.py would route. Plane nets (connected
+    # via their zone) and nets we already ripped this pass are excluded.
+    if reroute_ripped_nets:
+        import io, contextlib
+        from routing_common import filter_already_routed
+        already = plane_net_ids | set(ripped_net_ids)
+        candidates = [(net.name, nid) for nid, net in pcb_data.nets.items()
+                      if nid > 0 and nid not in already]
+        # filter_already_routed prints a line per already-routed net; over a whole
+        # board that is dozens of lines of noise, so swallow its stdout here.
+        with contextlib.redirect_stdout(io.StringIO()):
+            nets_to_route, _ = filter_already_routed(pcb_data, candidates, config)
+        if nets_to_route:
+            names = [n for n, _ in nets_to_route]
+            print(f"\nAlso re-routing {len(nets_to_route)} net(s) left unrouted by the "
+                  f"plane pass (issue #141): {', '.join(names)}")
+            ripped_net_ids.extend(nid for _, nid in nets_to_route)
 
     # GUI (return_results): apply via pcbnew, so re-route the ripped nets IN MEMORY
     # and hand their copper + ids back (the caller deletes the ripped tracks and
