@@ -2286,6 +2286,19 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                     diffs.append(f"Pad {ref}:{bp.pad_number} shape: board={bp.shape} file={fp.shape}")
                 if not close(bp.size_x, fp.size_x) or not close(bp.size_y, fp.size_y):
                     diffs.append(f"Pad {ref}:{bp.pad_number} size: board=({bp.size_x:.3f},{bp.size_y:.3f}) file=({fp.size_x:.3f},{fp.size_y:.3f})")
+                # Residual rect tilt - the obstacle/DRC geometry rotates the pad
+                # rectangle by this, so a board/file mismatch (e.g. a custom or
+                # diagonal pad modelled differently by the two paths) changes the
+                # modelled copper footprint.
+                br = getattr(bp, 'rect_rotation', 0.0); fr = getattr(fp, 'rect_rotation', 0.0)
+                if not close(br, fr):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} rect_rotation: board={br:.2f} file={fr:.2f}")
+                # Per-pad local clearance override (fiducial keep-clear rings etc.).
+                # A pcbnew accessor that silently returns 0 would drop a keep-out the
+                # file parse honors - this surfaces that divergence.
+                bc = getattr(bp, 'local_clearance', 0.0); fc = getattr(fp, 'local_clearance', 0.0)
+                if not close(bc, fc):
+                    diffs.append(f"Pad {ref}:{bp.pad_number} local_clearance: board={bc:.3f} file={fc:.3f}")
                 if not close(bp.drill, fp.drill):
                     diffs.append(f"Pad {ref}:{bp.pad_number} drill: board={bp.drill:.3f} file={fp.drill:.3f}")
                 # Compare layers (as sets since order may differ)
