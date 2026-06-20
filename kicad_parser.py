@@ -1308,8 +1308,11 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     """Extract all track segments from PCB file."""
     segments = []
 
-    # Try KiCad 9 format first: (net <id>)
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # Try KiCad 9 format first: (net <id>). (locked yes) is optional and KiCad
+    # emits it between width/layer or layer/net, so allow it at both spots -
+    # otherwise a locked track parses to nothing, never becomes an obstacle, and
+    # the router lays copper straight through it (issue #150).
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
         segment = Segment(
@@ -1333,7 +1336,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
         # pattern and merge — mixed-style files are legal and each segment
         # matches exactly one pattern (issue #79).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+\(layer\s+"([^"]+)"\)\s+\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             segment = Segment(

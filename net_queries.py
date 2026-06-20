@@ -346,13 +346,15 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     if net_name.endswith('_N'):
         return (net_name[:-2], False, '_P')
 
-    # Try P/N suffix without underscore
+    # Try P/N suffix without underscore. Accept a digit, underscore, OR uppercase
+    # letter before the final P/N so SerDes/PCIe names pair (issue #151: TXP/TXN,
+    # SSRXP/SSRXN, REFCLKP/REFCLKN). A lowercase letter (e.g. WAKEn) is rejected,
+    # and pairing still needs both siblings to exist, so stray names don't pair.
     if net_name.endswith('P') and len(net_name) > 1:
-        # Check it's not just ending in P as part of name
-        if net_name[-2] in '0123456789_':
+        if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], True, 'P')
     if net_name.endswith('N') and len(net_name) > 1:
-        if net_name[-2] in '0123456789_':
+        if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], False, 'P')
 
     # Try +/- suffix
