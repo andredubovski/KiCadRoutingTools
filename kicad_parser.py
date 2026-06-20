@@ -2537,8 +2537,12 @@ def detect_package_type(footprint: Footprint) -> str:
     """
     fp_name = footprint.footprint_name.upper()
 
-    # Check footprint name first
-    if 'BGA' in fp_name or 'FBGA' in fp_name or 'LFBGA' in fp_name:
+    # Check footprint name first. Grid/land-grid/chip-scale arrays all get BGA
+    # treatment (bga_fanout escape + BGA exclusion zone): LGA (land grid), CSP/
+    # WLCSP/WLP (wafer-level chip-scale = micro-BGA), CGA (column grid). Without
+    # this an LGA-12 etc. is too small for the geometric grid gate below and falls
+    # through to OTHER, so its interior lands get routed over (issue #144).
+    if any(k in fp_name for k in ('BGA', 'FBGA', 'LFBGA', 'LGA', 'CSP', 'WLCSP', 'WLP', 'CGA')):
         return 'BGA'
     if 'QFN' in fp_name or 'DFN' in fp_name or 'MLF' in fp_name:
         return 'QFN'

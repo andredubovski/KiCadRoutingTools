@@ -63,26 +63,42 @@ to fix the stackup first.
 
 ## Step 3: Check for Components Needing Fanout
 
-Identify BGA, QFN, QFP, PGA, and other array packages that benefit from escape routing:
+Identify BGA, QFN, QFP, PGA, LGA, and other array packages that benefit from escape routing:
 
 ```python
 for ref, fp in pcb.footprints.items():
     name_upper = fp.footprint_name.upper()
     pad_count = len(fp.pads)
 
-    # Check for array packages
-    needs_fanout = any([
-        'BGA' in name_upper,
-        'PGA' in name_upper,
-        'QFN' in name_upper,
-        'QFP' in name_upper,
-        'LQFP' in name_upper,
-        'TQFP' in name_upper,
-    ])
+    # Check for array / fine-pitch land/no-lead packages by name. Note 'QFP'
+    # already matches LQFP/TQFP/VQFP, 'QFN' matches VQFN/WQFN/HVQFN, and 'BGA'
+    # matches FBGA/UFBGA/TFBGA, so only distinct families need listing.
+    needs_fanout = any(k in name_upper for k in (
+        'BGA',          # ball grid array
+        'PGA',          # pin grid array (through-hole)
+        'LGA',          # land grid array (interior lands, e.g. LGA-12) - issue #144
+        'CSP', 'WLCSP', 'WLP',  # wafer-level / chip-scale = micro-BGA, sub-0.5mm
+        'CGA',          # column grid array
+        'QFN', 'DFN',   # quad / dual no-lead (exposed-pad)
+        'QFP',          # quad flat pack
+    ))
 
-    # Also flag high pin-count components
-    if pad_count > 40:
-        needs_fanout = True
+    # Fine-pitch arrays strand even at low pad count: trigger by PITCH + interior
+    # pads, not just pad_count > 40 (issue #144: LGA-12 at 0.5mm has only 12 pads
+    # but its center lands box in). Compute the min pad-to-pad spacing and whether
+    # any pad is interior (not on the bounding-box edge).
+    if not needs_fanout and pad_count >= 6:
+        xs = sorted({round(p.local_x, 3) for p in fp.pads})
+        ys = sorted({round(p.local_y, 3) for p in fp.pads})
+        def _min_step(v):
+            return min((b - a for a, b in zip(v, v[1:])), default=999)
+        pitch = min(_min_step(xs), _min_step(ys))
+        minx, maxx, miny, maxy = xs[0], xs[-1], ys[0], ys[-1]
+        has_interior = any(minx < round(p.local_x, 3) < maxx and
+                           miny < round(p.local_y, 3) < maxy for p in fp.pads)
+        # Fine pitch (<=0.6mm) with interior pads, OR a large multi-row part.
+        if (pitch <= 0.6 and has_interior) or pad_count > 40:
+            needs_fanout = True
 
     if needs_fanout:
         # Analyze pad arrangement
@@ -101,12 +117,16 @@ for ref, fp in pcb.footprints.items():
 |--------------|------|-------|
 | BGA (SMD grid) | `bga_fanout.py` | Escape routing for ball grid arrays |
 | PGA (through-hole grid) | `bga_fanout.py` | Same tool works for PGA |
-| QFN/QFP (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad flat packages |
+| LGA / WLCSP / CGA (land/chip-scale grid) | `bga_fanout.py` | Grid escape; interior lands strand without it (issue #144) |
+| QFN/QFP/DFN (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad/dual no-lead and flat packages |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 
-### When to Use Fanout for BGA/PGA
+### When to Use Fanout for BGA/PGA/LGA
 
-**Rule: Use fanout for any BGA/PGA with more than 2 pins depth from outside to center.**
+**Rule: Use fanout for any grid array (BGA/PGA/LGA/WLCSP/CGA) with more than 2 pins
+depth from outside to center, OR any fine-pitch (<=0.5mm) array with interior pads
+regardless of pin count** — a small LGA-12/WLCSP at 0.5mm pitch boxes its center
+lands in even though it has well under 40 pads (issue #144).
 
 **Important:** Calculate ACTUAL depth by counting pads from the edge toward center, not grid size.
 Many PGA/BGA packages (especially FPGAs/CPLDs) have hollow centers with only perimeter pins populated.
