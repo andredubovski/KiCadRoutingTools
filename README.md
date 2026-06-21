@@ -456,6 +456,13 @@ python check_orphan_stubs.py kicad_files/output.kicad_pcb
 python check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
 python check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
 python check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
+
+# Flag long non-orthonormal tracks. An on-grid router emits only 0/45/90-degree
+# segments; the only legitimate non-orthonormal segment is a short (<=1 grid cell)
+# terminal connector to an off-grid pad/ball. Anything longer is a routing defect
+# (it can cut diagonally across foreign copper). qfn_fanout escape stubs are
+# excluded automatically; bga_fanout's short stub-end jogs clear the 0.25mm default.
+python check_orthonormal.py kicad_files/output.kicad_pcb
 ```
 
 ### 5. Power Net Analysis

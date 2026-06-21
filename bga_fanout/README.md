@@ -79,6 +79,25 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
 | `--escape-method` | `channel` (default) or `underpad` (dense arrays) | channel |
 
+### Sizing the escape via to the pitch (issue #158)
+
+The channel engine runs one escape track down the **half-pitch** between adjacent
+via columns, so the via, track, and clearance must fit it or **every** escape
+grazes the neighbouring column's via by a few µm (a sub-clearance DRC violation
+the fanout would otherwise report as a clean `failed: 0`). The budget, per array:
+
+```
+via_size  ≤  pitch − track_width − 2·clearance        (one escape track per channel)
+via_size  ≥  via_drill + 2·min_annular_ring           (fab floor)
+```
+
+Example: at 0.8 mm pitch with `--track-width 0.127 --clearance 0.1`, the escape
+via must be ≤ 0.473 mm — **Ø0.5 grazes (every escape ~13 µm short), Ø0.45 is
+clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When handed
+infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
+half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
+computes this automatically.
+
 ## Escape methods
 
 `--escape-method` selects the fanout engine:
