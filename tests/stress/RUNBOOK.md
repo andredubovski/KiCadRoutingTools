@@ -35,7 +35,7 @@ notification stream entirely.
 
 **Monitoring:** `bash tests/stress/stress_status.sh` — prints DONE/RUNNING/TODO
 across all 30 boards plus free slots. (For detail: `QUEUE_STATUS.txt` is the
-manager heartbeat; `runs[_set2]/<board>/worker.log` holds the wrapper markers +
+manager heartbeat; `runs_set<N>/<board>/worker.log` holds the wrapper markers +
 stderr, the per-tool `*.log` files update live, and after the run
 `agent_narrative.md` is the readable routing decision trail derived from
 `transcript.jsonl`.)
@@ -62,17 +62,17 @@ summarization).
 
 ### Clean restart (re-run the whole corpus from scratch)
 
-Don't delete prior results — archive them. Move `results/`, `results_set2/`,
-`runs/`, `runs_set2/` to `*_archive_<timestamp>/`, then recreate the four as
-empty dirs. The originals (`boards/`, `boards_set2/`) and the stripped
-inputs (`boards_unrouted/`, `boards_unrouted_set2/`) are never touched. Also
+Don't delete prior results — archive them. Move `results_set1/`, `results_set2/`,
+`runs_set1/`, `runs_set2/` to `*_archive_<timestamp>/`, then recreate them as
+empty dirs. The originals (`boards_set1/`, `boards_set2/`) and the stripped
+inputs (`boards_unrouted_set1/`, `boards_unrouted_set2/`) are never touched. Also
 sweep stray top-level `runs_*T0*` temp files. After that, the status script
 reports 0/30 DONE and the recipe above drives the rest.
 
 ## Paths
 
 Two corpora share this harness; pick the SET's paths and stay consistent
-within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
+within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for set 2).
 
 
 - Tools repo (READ-ONLY — never write/modify anything here):
@@ -85,8 +85,9 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
 - Original (compare + ground-truth DRC): `~/Documents/kicad_stress_test/boards<SET>/<BOARD>.kicad_pcb`
 - Final results JSON: `~/Documents/kicad_stress_test/results<SET>/<BOARD>.json`
 
-  (set 1 → `boards_unrouted/`, `runs/`, `boards/`, `results/`;
-   set 2 → `boards_unrouted_set2/`, `runs_set2/`, `boards_set2/`, `results_set2/`)
+  (`<SET>` is always `_set<N>`, e.g. set 1 → `boards_unrouted_set1/`, `runs_set1/`,
+   `boards_set1/`, `results_set1/`; set 2 → `boards_unrouted_set2/`, `runs_set2/`,
+   `boards_set2/`, `results_set2/`)
 
 ## Rules
 
@@ -224,7 +225,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
    floor and record the count — real boards have pre-existing pad-to-pad
    proximity that is not the router's fault. Report post-route DRC as total AND delta.
    GROUND-TRUTH BASELINE (do this too): run `check_drc.py
-   ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb --clearance <floor>
+   ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb --clearance <floor>
    --hole-to-hole-clearance <floor>` on the ORIGINAL human-routed board (SAME
    floor flags) and record that count as `drc.original_routed_violations`. That —
    not 0 — is the achievable floor under our DRC model (the originals carry a few
@@ -272,7 +273,7 @@ within a board. `<SET>` below is empty for set 1 and `_set2` for set 2.
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run
     `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/compare_to_original.py
-     --ours <final> --orig ~/Documents/kicad_stress_test/boards/<board>.kicad_pcb
+     --ours <final> --orig ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb
      --json 2>&1 | tee compare.log`
     It contrasts OUR routing with the human-routed original (vias, total copper
     length, track-width strategy, layer balance, nets-with-copper) and prints

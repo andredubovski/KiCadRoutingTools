@@ -12,12 +12,12 @@ All artifacts live outside the repo in `$STRESS_DIR`
 
 ```bash
 # 1. Download .kicad_pcb files from the curated repo list (needs `gh` auth)
-python3 fetch_boards.py                      # -> $STRESS_DIR/sources/github/
+python3 fetch_boards.py                      # -> $STRESS_DIR/sources/github_set1/
 
 # 2. Normalize to current KiCad format via pcbnew round-trip
 #    (uses KiCad's bundled Python; rescues old KiCad 4-7 format boards)
 KIPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
-$KIPY normalize_boards.py                    # -> $STRESS_DIR/boards/
+$KIPY normalize_boards.py                    # -> $STRESS_DIR/boards_set1/
 
 # 3. Strip routing -> unrouted test corpus
 #    Removes tracks/vias/pour zones (keeps rule areas), regenerates Edge.Cuts
@@ -25,9 +25,9 @@ $KIPY normalize_boards.py                    # -> $STRESS_DIR/boards/
 #    copper layers as 'signal'. The last three steps work around known
 #    kicad_parser limitations (see "Parser workarounds" below).
 #    NOTE: run one board per process (pcbnew segfaults on multi-board runs):
-for f in $STRESS_DIR/boards/*.kicad_pcb; do
+for f in $STRESS_DIR/boards_set1/*.kicad_pcb; do
   $KIPY strip_routing.py "$(basename ${f%.kicad_pcb})"
-done                                         # -> $STRESS_DIR/boards_unrouted/
+done                                         # -> $STRESS_DIR/boards_unrouted_set1/
 
 # 4. Sanity-check the corpus parses with the repo parser
 python3 validate_boards.py
@@ -48,7 +48,7 @@ skips finished boards and won't double-launch running ones). Each worker
 (`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`
 (analysis -> fanout -> diff pairs -> signal routing -> power planes -> plane
 repair -> DRC/connectivity/orphan verification -> compare-to-original), writing
-`$STRESS_DIR/results[_set2]/<board>.json` (schema in the runbook) plus a
+`$STRESS_DIR/results_set<N>/<board>.json` (schema in the runbook) plus a
 `FINDINGS.md`, and an `agent_narrative.md` routing decision trail derived from the
 captured `transcript.jsonl` by `extract_narrative.py`. The full mechanism, fresh-machine prereqs (including the one-time
 permission authorization the headless workers need), and a manual fallback are
@@ -96,9 +96,9 @@ python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh
 # --remap (rewrites the original run-dir path prefix so absolute intermediate
 # paths land in the new dir; the source board's own absolute path still resolves):
 python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
-    --remap /…/runs/<board>:/tmp/redo_baseline      # with your change reverted
+    --remap /…/runs_set1/<board>:/tmp/redo_baseline      # with your change reverted
 python3 tests/stress/redo_stress_test.py <run-dir>/redo_commands.sh \
-    --remap /…/runs/<board>:/tmp/redo_change         # with your change applied
+    --remap /…/runs_set1/<board>:/tmp/redo_change         # with your change applied
 # then diff the two final boards (ignore uuid lines) / re-grade DRC + connectivity.
 ```
 
@@ -182,7 +182,7 @@ usage — next to its net-class definitions. Validated findings:
 
 ## Compare-to-original (final step of every board)
 
-`compare_to_original.py --ours <our_final.kicad_pcb> --orig <boards/<board>.kicad_pcb>
+`compare_to_original.py --ours <our_final.kicad_pcb> --orig <boards_setN/<board>.kicad_pcb>
 --json` contrasts our routing with the human-routed original (via count, total
 copper length, distinct track widths, layer balance, nets-with-copper) and emits
 SUGGESTIONS for what to change in our routing or approach. The original is ground
@@ -197,7 +197,7 @@ Each corpus is exactly **15 boards**:
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
   (antmicro/lpddr4-testbed, 6-layer BGA LPDDR4). Boards live in
-  `boards_unrouted/`; results in `results/`; run-1 baseline in `results_baseline/`.
+  `boards_unrouted_set1/`; results in `results_set1/`; run-1 baseline in `results_baseline/`.
 - **Set 2** — 15 newer boards listed in `manifest_set2.json`, downloaded to
   `$STRESS_DIR/sources/github_set2/`. FPGA/BGA (ulx3s, butterstick, cynthion,
   schoko, CPArti), DDR4/DDR5 test beds (antmicro), USB diff-pair boards
@@ -226,7 +226,7 @@ python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
 
 `prep_set2.py <src> <routed_dst> <stripped_dst>` normalizes the routed reference
 and strips routing in a single load. The `lpddr4_testbed` replacement is a SET-1
-board: prep it the same way into `boards/` + `boards_unrouted/`. ulx3s has no net
+board: prep it the same way into `boards_set1/` + `boards_unrouted_set1/`. ulx3s has no net
 classes anywhere, so derive its params via `measure_routing.py` on its routed
 reference.
 

@@ -15,8 +15,8 @@ Usage:
 --remap rewrites a path prefix in every argument, so a run whose intermediates
 were written with absolute paths under one run dir can be replayed into a fresh
 directory (the source board, referenced by its own absolute path, still resolves):
-  redo_stress_test.py run/ottercast/redo_commands.sh \
-      --remap /...kicad_stress_test/runs/ottercast:/tmp/redo_A
+  redo_stress_test.py runs_set1/ottercast/redo_commands.sh \
+      --remap /...kicad_stress_test/runs_set1/ottercast:/tmp/redo_A
 """
 
 import argparse

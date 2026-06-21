@@ -16,12 +16,12 @@ ROOT="${STRESS_ROOT:-$HOME/Documents/kicad_stress_test}"
 REPO="${STRESS_REPO:-$(cd "$SELF/../.." && pwd)}"
 STATUS="$ROOT/QUEUE_STATUS.txt"
 
-# Build "board:set" pairs across set 1 (boards_unrouted/) and every set N
-# (boards_unrouted_setN/) discovered on disk, so new sets need no edit here.
+# Build "board:set" pairs across every set N (boards_unrouted_setN/) discovered
+# on disk, so new sets need no edit here (set 1 = boards_unrouted_set1).
 pairs=""
-for d in "$ROOT"/boards_unrouted "$ROOT"/boards_unrouted_set*; do
+for d in "$ROOT"/boards_unrouted_set*; do
   [ -d "$d" ] || continue
-  case "$d" in *_set*) s="${d##*_set}";; *) s=1;; esac
+  s="${d##*_set}"
   for f in "$d"/*.kicad_pcb; do
     [ -e "$f" ] || continue
     b=$(basename "$f" .kicad_pcb); pairs="$pairs $b:$s"
@@ -29,7 +29,7 @@ for d in "$ROOT"/boards_unrouted "$ROOT"/boards_unrouted_set*; do
 done
 total=$(echo $pairs | wc -w | tr -d ' ')
 
-setdir(){ if [ "$1" = 1 ]; then echo "$2"; else echo "${2}_set$1"; fi; }
+setdir(){ echo "${2}_set$1"; }
 rundir(){ echo "$ROOT/$(setdir "$2" runs)/$1"; }
 resfile(){ echo "$ROOT/$(setdir "$2" results)/$1.json"; }
 is_done(){ [ -f "$(resfile "$1" "$2")" ]; }
