@@ -293,15 +293,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
         ripup_sizer = wx.StaticBoxSizer(ripup_box, wx.VERTICAL)
 
         self.rip_blocker_check = wx.CheckBox(self, label="Rip up blocking nets")
-        self.rip_blocker_check.SetToolTip("Remove nets that block via placement, then retry (uses Max Rip-up from Basic tab)")
+        self.rip_blocker_check.SetToolTip(
+            "Remove nets that block via placement (uses Max Rip-up from Basic tab). "
+            "Ripped nets are left unrouted - run the routing tab afterward to reconnect "
+            "them (it handles rip-up/restore safely).")
         ripup_sizer.Add(self.rip_blocker_check, 0, wx.ALL, 5)
-
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets (deprecated)")
-        self.reroute_ripped_check.SetToolTip(
-            "Deprecated / no-op (issue #141 reverted): ripped nets are left unrouted. "
-            "Run the routing tab afterward to reconnect them (it handles rip-up/restore "
-            "safely, without the shorts the in-step reroute caused).")
-        ripup_sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -360,9 +356,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
         return {
             'zone_clearance': self.zone_clearance.GetValue(),
             'max_search_radius': self.max_search_radius.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
-            'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
-            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
@@ -426,19 +420,14 @@ class RepairPlanesOptionsPanel(wx.Panel):
 
         # Rip blocking nets to connect a pad that can't reach its plane (e.g. a
         # tiny connector GND pin) by tracing to an adjacent same-net pad. Mirrors
-        # the Create tab (CLI --rip-blocker-nets / --reroute-ripped-nets).
+        # the Create tab (CLI --rip-blocker-nets). Ripped nets are left unrouted;
+        # the routing tab reconnects them afterward.
         self.rip_blocker_check = wx.CheckBox(self, label="Rip up blocking nets")
         self.rip_blocker_check.SetToolTip(
             "When a pad can't connect to its plane, trace it to a nearby same-net pad, "
-            "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab).")
+            "ripping the signal net(s) blocking it (uses Max Rip-up from the Basic tab). "
+            "Ripped nets are left unrouted - run the routing tab afterward to reconnect them.")
         sizer.Add(self.rip_blocker_check, 0, wx.LEFT | wx.TOP, 5)
-
-        self.reroute_ripped_check = wx.CheckBox(self, label="Auto-reroute ripped nets (deprecated)")
-        self.reroute_ripped_check.SetToolTip(
-            "Deprecated / no-op (issue #141 reverted): ripped nets are left unrouted. "
-            "Run the routing tab afterward to reconnect them (it handles rip-up/restore "
-            "safely, without the shorts the in-step reroute caused).")
-        sizer.Add(self.reroute_ripped_check, 0, wx.LEFT | wx.TOP, 5)
 
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
@@ -453,9 +442,7 @@ class RepairPlanesOptionsPanel(wx.Panel):
             'max_track_width': self.max_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
-            'reroute_ripped_nets': self.reroute_ripped_check.GetValue(),
-        }
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),        }
 
     def _on_max_track_width_changed(self, event):
         """Validate max track width >= track width from Basic tab."""
@@ -933,9 +920,7 @@ class PlanesTab(wx.Panel):
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
-                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
-                # Re-route a ripped wide power net at its proper width.
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                # Re-route a ripped wide power net at its proper width.
                 power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
@@ -1059,9 +1044,7 @@ class PlanesTab(wx.Panel):
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),
-                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
-                power_nets=config.get('power_nets'),
+                max_rip_nets=config.get('max_ripup', defaults.MAX_RIPUP),                power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # The route tab's "ALL" no-BGA-zones intent, mirrored when
                 # re-routing ripped nets on a BGA board (issue #88).

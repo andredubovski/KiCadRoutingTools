@@ -34,13 +34,12 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
-    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
-    '"reroute_ripped_nets": true|false}} | '
+    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false}} | '
     '{"action": "repair_planes", '
     '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
     '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
     '"analysis_grid_step": <mm>, "repair_pads": true|false, '
-    '"rip_blocker_nets": true|false, "reroute_ripped_nets": true|false}} '
+    '"rip_blocker_nets": true|false}} '
     ']} '
     'List steps in execution order: fanout first, then route_diff, then route, '
     'then route_planes, then repair_planes - signals route before planes because '
@@ -54,8 +53,7 @@ PLAN_RESULT_SCHEMA = (
     'whenever rip_blocker_nets is set, add ONE more route step AFTER repair_planes '
     '(nets "*" minus the plane net names) to reconnect the ripped blockers - route '
     'handles rip-up/restore safely against the live obstacle map and reuses the '
-    'route step\'s power_nets/power_nets_widths. Leave reroute_ripped_nets false '
-    '(it is a deprecated no-op). '
+    'route step\'s power_nets/power_nets_widths. '
     'The route step\'s "nets" globs support '
     '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
     'e.g. ["*", "!GND", "!VCC"]. '
@@ -173,8 +171,6 @@ def apply_step_params(step, dialog):
             opts.gnd_via_net.SetValue(str(params["gnd_via_net"]))
         if "rip_blocker_nets" in params:
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
-        if "reroute_ripped_nets" in params:
-            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     elif action == "repair_planes":
         # via size/drill come from the shared Basic-tab controls (same as route);
         # the repair-specific knobs live on the Repair options panel.
@@ -196,8 +192,6 @@ def apply_step_params(step, dialog):
             opts.repair_pads.SetValue(bool(params["repair_pads"]))
         if "rip_blocker_nets" in params:
             opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
-        if "reroute_ripped_nets" in params:
-            opts.reroute_ripped_check.SetValue(bool(params["reroute_ripped_nets"]))
     elif action == "fanout":
         kind = (step.get("kind") or "bga").lower()
         if kind == "bga":
