@@ -93,6 +93,14 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
+    # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
+    # before this) collapses collinear runs, so the terminal segment can be long;
+    # moving its far end to an off-grid point would tilt the whole run into a long
+    # diagonal that cuts across cells reserved for other copper (keks #158). When the
+    # terminal segment is longer than ~1 grid cell, keep the grid endpoint and let the
+    # caller's short connecting stub run out to the exact point instead.
+    if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
+        return False  # long terminal segment -> keep grid end + short stub
     if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
