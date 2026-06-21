@@ -1573,6 +1573,24 @@ def generate_bga_fanout(footprint: Footprint,
     print(f"  Center: ({grid.center_x:.2f}, {grid.center_y:.2f})")
     print(f"  Boundary: X[{grid.min_x:.2f}, {grid.max_x:.2f}], Y[{grid.min_y:.2f}, {grid.max_y:.2f}]")
 
+    # Escape-budget guard (issue #158). The channel engine runs one escape track down
+    # the half-pitch between adjacent via columns, so via/2 + track/2 + clearance must
+    # fit the half-pitch or EVERY escape grazes the neighbouring column's via by the
+    # deficit -- and the run still reports failed:0, since the success metric ignores
+    # sub-clearance grazes. We have all four numbers here, so warn (don't silently
+    # ship the graze). Doesn't apply to underpad, which routes under the pad field.
+    if escape_method != 'underpad':
+        half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
+        need = via_size / 2.0 + track_width / 2.0 + clearance
+        if need > half_pitch + 1e-6:
+            via_max = 2.0 * (half_pitch - track_width / 2.0 - clearance)
+            print(f"  WARNING: escape via {via_size:.3f}mm busts the half-pitch budget "
+                  f"(need {need:.4f} > half-pitch {half_pitch:.4f}mm) -> every escape "
+                  f"track grazes an adjacent via by ~{(need - half_pitch) * 1000:.0f}um "
+                  f"at clearance {clearance:.3f}. Use --via-size <= {via_max:.3f} "
+                  f"(>= drill {via_drill:.3f} + annular ring), a narrower track, or more "
+                  f"escape layers. See issue #158.")
+
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
     if escape_method == 'underpad':
         from bga_fanout.underpad import generate_underpad_escape

@@ -157,6 +157,28 @@ only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
 doesn't take escape layers.
 
+**Size the escape via/track to the pitch BEFORE running fanout (issue #158).**
+`bga_fanout.py` escapes one track down the channel between adjacent via columns —
+at the **half-pitch**. So the via, track, and clearance must fit that half-pitch
+or *every* escape grazes the neighbouring column's via by a few µm, and the fanout
+still reports `failed: 0` (its success metric ignores sub-clearance grazes). The
+budget, per array (measure each component's own pitch — they differ):
+
+```
+via_size ≤ pitch − track_width − 2·clearance        (one escape track per channel)
+          and  via_size ≥ via_drill + 2·min_annular_ring   (fab floor)
+```
+
+So: read the array's ball pitch (`list_nets.py --design-rules` gives clearance;
+the pitch is the min ball spacing), compute `via_max = pitch − track − 2·clearance`,
+and pass `--via-size min(chosen, via_max)` clamped to the fab annular-ring floor.
+Worked example (keks U1, pitch 0.8, track 0.127, clearance 0.1):
+`via_max = 0.8 − 0.127 − 0.2 = 0.473` → **Ø0.5 grazes (163 DRC), Ø0.45 is clean (0),
+both escape all 129 balls.** If the interval is empty (even the min via won't fit),
+narrow the track, shrink the drill, or add escape layers — don't ship the graze.
+`bga_fanout.py` itself warns `WARNING: escape via ... busts the half-pitch budget`
+when handed infeasible params, but choose feasible ones here so it never fires.
+
 **Always check the fanout escaped all requested balls.** `bga_fanout.py` ends with
 `JSON_SUMMARY: {"component", "requested", "escaped", "failed", "unescaped_nets", ...}`.
 A dropped ball is **removed from the output** and later fails signal routing as "no
