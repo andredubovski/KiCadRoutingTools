@@ -58,6 +58,23 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--width`, `-w` | Track width (mm) | 0.1 |
 | `--extension` | Extension past pad edge before bend (mm) | 0.1 |
 | `--nets`, `-n` | Net patterns to include | All nets |
+| `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop) | stub |
+| `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
+| `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
+
+### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
+
+The default `stub` fan spreads each pad laterally at 45°, so on a **crowded
+fine-pitch edge** (a neighbour pair on one side, a foreign track on the other)
+it runs into them and the stub is dropped. `--escape-method underpad` instead
+drops a **through-via just past each pad** and lets signal routing pick the net
+up on an inner/back layer — going *straight out* past the lateral congestion
+rather than fanning into it. Adjacent vias are **staggered radially** so two
+neighbours one pitch apart still clear (e.g. 0.45 mm vias on 0.5 mm pitch escape
+with centres ~0.56 mm apart). Each via and its stub are obstacle-checked against
+foreign tracks/vias/pads; a via that can't find a clear offset is dropped and
+reported. Pair the via with `--via-drill` to keep a sane annular ring (e.g.
+`--via-size 0.45 --via-drill 0.25`).
 
 ## Module Structure
 

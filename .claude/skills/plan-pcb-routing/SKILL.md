@@ -157,6 +157,14 @@ only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
 doesn't take escape layers.
 
+**Crowded fine-pitch QFN edge (surface fan has no room):** if a `qfn_fanout`
+stub (especially a diff pair) is boxed in by a neighbour pair and a foreign
+track and the surface 45° fan drops it, use `qfn_fanout.py --escape-method
+underpad --via-size 0.45 --via-drill 0.25` (#164). It drops a through-via just
+past each pad and escapes on an inner/back layer — straight out past the lateral
+congestion instead of fanning into it (adjacent vias are staggered to clear).
+Match `--via-size`/`--via-drill` to the board's fine-pitch via rule.
+
 **Size the escape via/track to the pitch BEFORE running fanout (issue #158).**
 `bga_fanout.py` escapes one track down the channel between adjacent via columns —
 at the **half-pitch**. So the via, track, and clearance must fit that half-pitch
