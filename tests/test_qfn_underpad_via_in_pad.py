@@ -9,6 +9,12 @@ FOREIGN track crossing that lane. The neighbour copper is on the chip's OWN othe
 nets, which is exactly what let the old via-drop place a via on a neighbour's
 track and short it.
 
+The board is a synthetic, DRC-clean reduction of the reporter's setup (built
+once with KiCad's pcbnew + the HVQFN-32-1EP_5x5mm_P0.5mm_EP3.1x3.1mm footprint);
+it is checked in, so this test needs no pcbnew. To regenerate/tweak it, see the
+build recipe in issue #161 (edgehero's repro) -- DP1 outer pair, DP2 neighbour
+pair routed, FOREIGN track in DP1's escape lane but clear of all pads.
+
 Two scenarios, both must be DRC-clean at the routed clearance:
   A) plain under-pad escape: the outward via is boxed in by the neighbour
      track/pad, so it is DROPPED (fail cleanly) rather than shorted.
