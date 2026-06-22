@@ -873,6 +873,15 @@ class QFNOptionsPanel(wx.Panel):
             "the Basic-tab via settings.")
         main_sizer.Add(self.underpad_escape, 0, wx.ALL, 8)
 
+        self.allow_via_in_pad = wx.CheckBox(self, label="Allow via-in-pad (stagger inward)")
+        self.allow_via_in_pad.SetToolTip(
+            "Under-pad escape only: let the escape via overlap its OWN pad "
+            "(via-in-pad), so a leg boxed in on the outward side (a neighbour "
+            "pad/track a pitch away) staggers inward toward the chip instead of "
+            "being dropped (#161). The via still must clear other-net pads, vias "
+            "and tracks.")
+        main_sizer.Add(self.allow_via_in_pad, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
         self.SetSizer(main_sizer)
 
     def get_config(self):
@@ -880,6 +889,7 @@ class QFNOptionsPanel(wx.Panel):
         return {
             'extension': self.extension.GetValue(),
             'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'stub',
+            'allow_via_in_pad': self.allow_via_in_pad.GetValue(),
         }
 
 
@@ -1162,6 +1172,7 @@ class FanoutTab(wx.Panel):
         extension = config.get('extension', defaults.QFN_EXTENSION)
         # Under-pad (via-drop) escape uses the Basic-tab via settings (#164)
         escape_method = config.get('escape_method', 'stub')
+        allow_via_in_pad = config.get('allow_via_in_pad', False)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
@@ -1183,6 +1194,7 @@ class FanoutTab(wx.Panel):
                 escape_method=escape_method,
                 via_size=via_size,
                 via_drill=via_drill,
+                allow_via_in_pad=allow_via_in_pad,
             )
 
             self._apply_fanout_results(

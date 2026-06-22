@@ -53,48 +53,81 @@ def check_endpoint_spacing(stubs: List[FanoutStub], min_spacing: float) -> List[
 
 
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
-                         track_width, clearance, via_size, via_drill, grid_step):
+                         track_width, clearance, via_size, via_drill, grid_step,
+                         allow_via_in_pad=False):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
     crowded fine-pitch edge where the *surface* is full (a neighbour pair on one
     side, a foreign track on the other) -- the case the surface fan cannot solve.
 
-    Adjacent vias are staggered radially (alternating escape distance) so two
-    neighbours one pitch apart still clear each other; a stub or via that would
-    graze foreign copper is pushed further out, and dropped only if no offset
-    clears. Returns (tracks, vias, dropped_net_names)."""
-    from obstacle_map import build_base_obstacle_map, build_layer_map, check_line_clearance
+    "Foreign" copper is anything NOT on a net we're escaping right now, even if
+    it sits on the SAME component (issue #161 reopen): a routed neighbour pair
+    and a crossing track are usually on the chip's own other nets, so they must
+    block the via even though they share the footprint. Each candidate via is
+    obstacle-checked against foreign vias, foreign PADS and foreign TRACKS (the
+    track check was the gap that let a via land on a neighbour's trace and short
+    it -- issue #161); only the via's own net is exempt.
+
+    Adjacent vias are staggered along the escape axis so two neighbours one pitch
+    apart still clear each other. With `allow_via_in_pad` the via may sit on its
+    own pad, so the search sweeps both outward AND inward from the pad centre,
+    nearest-first -- a via boxed in on the outward side (by the neighbour pair)
+    staggers inward toward the chip instead of being pushed into the neighbour.
+    Without it the via stays clear of the pad body and only moves outward.
+    A stub or via with no clear offset is dropped. Returns
+    (tracks, vias, dropped_net_names)."""
+    from obstacle_map import (build_base_obstacle_map, build_layer_map,
+                              check_line_clearance, point_to_segment_distance)
+    from bga_fanout.reroute import _seg_hits_pad
     from routing_config import GridRouteConfig
 
+    # Only the nets we're escaping right now are exempt from the obstacle map --
+    # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
+    # block, so we don't exclude all of the footprint's nets (issue #161).
+    fanned_nets = {pi.pad.net_id for pi in pad_infos}
     cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
                           track_width=track_width, clearance=clearance)
     layer_map = build_layer_map(cfg.layers)
-    own_nets = [p.net_id for p in footprint.pads if p.net_id]
-    obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=own_nets,
+    obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=list(fanned_nets),
                                         extra_clearance=track_width / 2)
     obs_layer_idx = layer_map.get(layer)
 
-    foreign_vias = [(v.x, v.y, v.size) for v in pcb_data.vias if v.net_id not in own_nets]
-    foreign_pads = [(p.global_x, p.global_y, max(p.size_x, p.size_y), p.net_id)
-                    for plist in pcb_data.pads_by_net.values() for p in plist
-                    if p.component_ref != footprint.reference]
+    # Foreign obstacles, keyed by net so the via's OWN net is exempt at check
+    # time. A through-via spans every copper layer, so foreign tracks on ANY
+    # layer matter -- don't filter tracks by layer.
+    foreign_vias = [(v.x, v.y, v.size, v.net_id) for v in pcb_data.vias]
+    foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist]
+    foreign_tracks = [(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.net_id)
+                      for s in pcb_data.segments]
 
     pitch = layout.pad_pitch or 0.5
     need_cc = via_size + clearance              # min centre-to-centre, different nets
     stagger = (math.sqrt(max(0.0, need_cc * need_cc - pitch * pitch)) + 0.05
                if need_cc > pitch else 0.0)
+    step = max(stagger, grid_step, 0.05)        # offset increment along the escape axis
 
     placed = []                                 # (x, y, net_id) of vias we drop
 
     def via_clears(vx, vy, net_id):
-        for fx, fy, fs in foreign_vias:
+        for fx, fy, fs, fn in foreign_vias:
+            if fn == net_id:
+                continue
             if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
                 return False
-        for px, py, ps, pn in foreign_pads:
-            if pn == net_id:
+        for pad in foreign_pads:
+            if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
                 continue
-            if math.hypot(vx - px, vy - py) < via_size / 2 + ps / 2 + clearance - 1e-6:
+            # Rotation-exact rectangle clearance (the disc test over-rejected an
+            # elongated neighbour pad a pitch away). The via is through-all-layers,
+            # so an SMD pad on any single layer still conflicts.
+            if _seg_hits_pad(vx, vy, vx, vy, pad, margin=via_size / 2 + clearance - 1e-6):
+                return False
+        for sx0, sy0, sx1, sy1, sw, sn in foreign_tracks:
+            if sn == net_id:
+                continue
+            if point_to_segment_distance(vx, vy, sx0, sy0, sx1, sy1) \
+                    < via_size / 2 + sw / 2 + clearance - 1e-6:
                 return False
         for qx, qy, qn in placed:
             floor = (via_size + clearance) if qn != net_id else (via_size * 0.5)
@@ -104,6 +137,19 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
+
+    # Candidate escape distances along the pad's outward axis. With via-in-pad
+    # the via may overlap its own pad, so start at the pad centre and sweep
+    # outward/inward nearest-first; otherwise keep the via off the pad body and
+    # only move outward.
+    def offsets_for(pad_width):
+        if allow_via_in_pad:
+            ds = [0.0]
+            for k in range(1, 9):
+                ds += [k * step, -k * step]
+            return ds
+        base = pad_width / 2 + via_size / 2 + clearance
+        return [base + k * step for k in range(0, 9)]
 
     tracks, vias, dropped = [], [], []
     by_side = defaultdict(list)
@@ -115,18 +161,18 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         for i, pi in enumerate(pis):
             ex, ey = pi.escape_direction
             px, py = pi.pad.global_x, pi.pad.global_y
-            base = pi.pad_width / 2 + via_size / 2 + clearance   # clear the pad body
             placed_ok = False
-            for extra in (0.0, stagger, 2 * stagger, 3 * stagger):
-                d = base + (i % 2) * stagger + extra
+            for d in offsets_for(pi.pad_width):
                 vx, vy = snap(px + ex * d), snap(py + ey * d)
                 stub_ok = (obs_layer_idx is None or
                            check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
                 if stub_ok and via_clears(vx, vy, pi.pad.net_id):
                     placed.append((vx, vy, pi.pad.net_id))
-                    tracks.append({'start': (px, py), 'end': (vx, vy),
-                                   'width': track_width, 'layer': layer,
-                                   'net_id': pi.pad.net_id})
+                    # Zero-length stub (via centred on the pad) needs no track.
+                    if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                        tracks.append({'start': (px, py), 'end': (vx, vy),
+                                       'width': track_width, 'layer': layer,
+                                       'net_id': pi.pad.net_id})
                     vias.append({'x': vx, 'y': vy, 'size': via_size, 'drill': via_drill,
                                  'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
                     placed_ok = True
@@ -135,7 +181,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 dropped.append(pi.pad.net_name)
 
     print(f"  Underpad via-drop: {len(vias)} vias placed, {len(dropped)} dropped "
-          f"(pitch {pitch:.2f}, via {via_size:.2f}, radial stagger {stagger:.3f} mm)")
+          f"(pitch {pitch:.2f}, via {via_size:.2f}, stagger {stagger:.3f} mm"
+          f"{', via-in-pad' if allow_via_in_pad else ''})")
     if dropped:
         print(f"    dropped (no clear via offset): {dropped}")
     return tracks, vias, dropped
@@ -151,7 +198,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         grid_step: float = 0.0,
                         escape_method: str = "stub",
                         via_size: float = 0.45,
-                        via_drill: float = 0.25) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        via_drill: float = 0.25,
+                        allow_via_in_pad: bool = False) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -240,9 +288,11 @@ def generate_qfn_fanout(footprint: Footprint,
     # pad and let signal routing pick the net up on an inner layer, for crowded
     # fine-pitch edges where the surface fan has no room.
     if escape_method == "underpad":
-        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm")
+        print(f"  Escape method: underpad (via-drop), via {via_size:.2f}/{via_drill:.2f} mm"
+              f"{', allow via-in-pad' if allow_via_in_pad else ''}")
         return _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
-                                    track_width, clearance, via_size, via_drill, grid_step)
+                                    track_width, clearance, via_size, via_drill, grid_step,
+                                    allow_via_in_pad=allow_via_in_pad)
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -455,6 +505,11 @@ def main():
                         help='Underpad escape via outer diameter (mm, default 0.45)')
     parser.add_argument('--via-drill', type=float, default=0.25,
                         help='Underpad escape via drill diameter (mm, default 0.25)')
+    parser.add_argument('--allow-via-in-pad', action='store_true',
+                        help='Underpad escape: let the escape via overlap its OWN pad '
+                             '(via-in-pad), so a via boxed in on the outward side can '
+                             'stagger inward toward the chip instead of being dropped. '
+                             'The via still must clear other-net pads, vias and tracks.')
 
     args = parser.parse_args()
 
@@ -510,7 +565,8 @@ def main():
         grid_step=args.grid_step,
         escape_method=args.escape_method,
         via_size=args.via_size,
-        via_drill=args.via_drill
+        via_drill=args.via_drill,
+        allow_via_in_pad=args.allow_via_in_pad
     )
 
     if tracks:

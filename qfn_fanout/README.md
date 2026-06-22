@@ -61,6 +61,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--escape-method` | `stub` (surface 45° fan) or `underpad` (via-drop) | stub |
 | `--via-size` | Underpad escape via outer diameter (mm) | 0.45 |
 | `--via-drill` | Underpad escape via drill diameter (mm) | 0.25 |
+| `--allow-via-in-pad` | Underpad escape: let the via overlap its **own** pad so it can stagger *inward* (via-in-pad) | off |
 
 ### Under-pad (via-drop) escape — `--escape-method underpad` (issue #164)
 
@@ -69,12 +70,33 @@ fine-pitch edge** (a neighbour pair on one side, a foreign track on the other)
 it runs into them and the stub is dropped. `--escape-method underpad` instead
 drops a **through-via just past each pad** and lets signal routing pick the net
 up on an inner/back layer — going *straight out* past the lateral congestion
-rather than fanning into it. Adjacent vias are **staggered radially** so two
-neighbours one pitch apart still clear (e.g. 0.45 mm vias on 0.5 mm pitch escape
-with centres ~0.56 mm apart). Each via and its stub are obstacle-checked against
-foreign tracks/vias/pads; a via that can't find a clear offset is dropped and
-reported. Pair the via with `--via-drill` to keep a sane annular ring (e.g.
+rather than fanning into it. Adjacent vias are **staggered** along the escape
+axis so two neighbours one pitch apart still clear (e.g. 0.45 mm vias on 0.5 mm
+pitch escape with centres ~0.56 mm apart). Each via **and its stub** are
+obstacle-checked against foreign tracks/vias/pads — and "foreign" means *any net
+other than the one being escaped, even on the same chip* (a routed neighbour
+pair, a crossing track), so the via can't land on a neighbour's copper and short
+it (issue #161). A via that can't find a clear offset is dropped and reported.
+Pair the via with `--via-drill` to keep a sane annular ring (e.g.
 `--via-size 0.45 --via-drill 0.25`).
+
+#### `--allow-via-in-pad` (issue #161)
+
+On a genuinely boxed-in pair (the outer leg has a neighbour pad one pitch away
+*and* the neighbour's diagonal escape sweeping through the only outward room) the
+via has nowhere to go outward, so the plain escape **drops** it. With
+`--allow-via-in-pad` the escape via may sit on its **own** pad (via-in-pad), so
+the search sweeps both outward **and inward**, nearest-first: the boxed-in leg
+staggers *inward toward the chip*, away from the neighbour, instead of being
+pushed into it. The via still must clear every other-net pad, via and track — it
+only gains permission to overlap its own pad. Name and behaviour match the
+"Allow via-in-pad" option elsewhere in the tools. Example:
+
+```bash
+python3 qfn_fanout.py board.kicad_pcb --component U1 --nets 'DP1*' \
+    --escape-method underpad --allow-via-in-pad \
+    --via-size 0.45 --via-drill 0.2 --clearance 0.15 --grid-step 0.05
+```
 
 ## Module Structure
 

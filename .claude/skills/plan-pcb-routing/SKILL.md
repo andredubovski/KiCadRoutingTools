@@ -163,7 +163,14 @@ track and the surface 45° fan drops it, use `qfn_fanout.py --escape-method
 underpad --via-size 0.45 --via-drill 0.25` (#164). It drops a through-via just
 past each pad and escapes on an inner/back layer — straight out past the lateral
 congestion instead of fanning into it (adjacent vias are staggered to clear).
-Match `--via-size`/`--via-drill` to the board's fine-pitch via rule.
+Match `--via-size`/`--via-drill` to the board's fine-pitch via rule. If the
+underpad run still **drops** a leg ("N dropped") because the via has no clear
+room *outward* (a neighbour pad/track exactly one pitch away), add
+`--allow-via-in-pad` (#161): the escape via may then sit on its own pad and
+stagger *inward toward the chip*, away from the neighbour, instead of being
+dropped. It still clears every other-net pad/via/track — it only gains
+permission to overlap its own pad — so reach for it specifically when underpad
+reports drops on a boxed-in fine-pitch pair.
 
 **Size the escape via/track to the pitch BEFORE running fanout (issue #158).**
 `bga_fanout.py` escapes one track down the channel between adjacent via columns —
@@ -799,7 +806,11 @@ python3 qfn_fanout.py board.kicad_pcb \
     --output board_qfn.kicad_pcb
 ```
 
-Creates two-segment stubs (straight + 45° fan) for each pad.
+Creates two-segment stubs (straight + 45° fan) for each pad. On a crowded
+fine-pitch edge where the surface fan has no room, add `--escape-method underpad`
+(drop a through-via past each pad) and, if a boxed-in leg still drops,
+`--allow-via-in-pad` so the via can sit on its own pad and stagger inward — see
+"Crowded fine-pitch QFN edge" above.
 
 ### Power Net Width Options
 
