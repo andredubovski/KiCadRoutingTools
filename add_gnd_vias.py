@@ -85,7 +85,9 @@ def add_gnd_vias_near_signal_vias(
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.
     # We only need to check cells within via_drill/2 (the actual hole).
-    via_check_radius_grid = max(1, coord.to_grid_dist(config.via_drill / 2))
+    # Ceil (not floor) the hole radius so this circular clear-check doesn't miss the
+    # outermost ring and let the GND-via hole land ~1 cell into a keep-out (#154 class).
+    via_check_radius_grid = max(1, coord.to_grid_dist_safe(config.via_drill / 2))
 
     def is_via_position_clear(x_mm: float, y_mm: float, skip_via_x: float, skip_via_y: float) -> bool:
         """Check if a via can be placed at the given position.
@@ -274,7 +276,9 @@ def add_gnd_vias_to_existing_board(
     # The obstacle map already expands tracks by track_width/2 + clearance.
     # We only need to check cells within via_drill/2 (the actual hole), not the full
     # via pad, since the obstacle map expansion already accounts for clearance.
-    via_check_radius_grid = max(1, coord.to_grid_dist(config.via_drill / 2))
+    # Ceil (not floor) the hole radius so this circular clear-check doesn't miss the
+    # outermost ring and let the GND-via hole land ~1 cell into a keep-out (#154 class).
+    via_check_radius_grid = max(1, coord.to_grid_dist_safe(config.via_drill / 2))
 
     def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
         """Check if a via can be placed at the given position.

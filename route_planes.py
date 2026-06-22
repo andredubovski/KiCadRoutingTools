@@ -609,8 +609,11 @@ def build_plane_base_obstacles(
     layer_idx = 0
     obstacles = GridObstacleMap(1)
 
-    # Block other nets' vias as hard obstacles using batched numpy operations
-    via_radius = coord.to_grid_dist(track_via_clearance)
+    # Block other nets' vias as hard obstacles using batched numpy operations.
+    # Ceil the center-to-center radius (matches build_base_obstacles): flooring a
+    # circular keep-out under-reserves by ~1 cell, letting tap traces graze
+    # foreign vias (#155 follow-up).
+    via_radius = max(1, coord.to_grid_dist_safe(track_via_clearance))
     radius_sq = via_radius * via_radius
     # Pre-compute circle template
     circle_offsets = []
