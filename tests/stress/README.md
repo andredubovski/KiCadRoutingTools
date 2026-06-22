@@ -132,6 +132,22 @@ python3 tests/stress/ab_replay_grade.py --compare ab/old/summary.json ab/new/sum
 The two waves must be sequential (they share the live repo's git state), but the
 boards within a wave run in parallel (`--jobs`, default 4).
 
+**Grade at the routed clearance.** Each board is graded at the **minimum**
+`--clearance` across its manifest's routing steps — the copper was built to that
+tightest value, and a looser retry/fanout step's copper still satisfies it.
+Grading at a *looser* clearance invents hundreds of phantom violations (e.g.
+tigard routes at 0.1 but has one 0.15 signal retry; graded at 0.15 it shows ~640
+"violations", at its real 0.1 it is clean). The A/B *delta* is unaffected (same
+clearance both waves), but absolute counts are only meaningful at the routed
+clearance, so trust the min that `route_clearance()` picks (or pass the board's
+real clearance when grading a single board with `check_drc.py -c`).
+
+To re-grade an existing wave's boards in place after a grading fix (no
+re-routing), or to reuse a prior wave as a baseline:
+```bash
+python3 tests/stress/ab_replay_grade.py --regrade ab/old --set ~/…/runs_set3
+```
+
 ### Per-command timing (#132)
 
 Both the original run and a replay record per-command wall-clock so routing

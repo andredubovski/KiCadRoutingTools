@@ -46,9 +46,13 @@ REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo ro
 
 
 def route_clearance(manifest_txt, default="0.1"):
-    """The route.py step's --clearance: DRC must be graded at the routed value."""
-    m = re.search(r"route\.py\b.*?--clearance\s+(\S+)", manifest_txt)
-    return m.group(1) if m else default
+    """DRC must be graded at the routed clearance. A board may route different
+    steps at different --clearance (e.g. a signal retry at 0.15 over a 0.1 base,
+    plus planes at 0.1); grade at the MINIMUM so copper laid at the tightest
+    clearance isn't phantom-flagged at a looser one (see grade-drc-at-routed-
+    clearance: grading tigard at 0.15 vs its real 0.1 invents ~600 violations)."""
+    vals = [float(v) for v in re.findall(r"--clearance\s+(\d[\d.]*)", manifest_txt)]
+    return str(min(vals)) if vals else default
 
 
 def final_output_name(manifest_txt):
@@ -130,6 +134,33 @@ def run_wave(set_dir, out_dir, label, jobs):
     return results
 
 
+def regrade(out_dir, set_dir):
+    """Re-grade an existing wave's final boards (no re-routing) and rewrite its
+    summary.json -- e.g. after a grading fix like the route_clearance change, or
+    to reuse a prior wave as a baseline."""
+    out_dir = Path(out_dir); set_dir = Path(set_dir)
+    results = []
+    for bdir in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+        b = bdir.name
+        man = set_dir / b / "redo_commands.sh"
+        if not man.exists():
+            continue
+        txt = man.read_text(); clr = route_clearance(txt)
+        fname = final_output_name(txt)
+        final = bdir / fname if fname else None
+        done = bool(final) and final.exists()
+        res = {"board": b, "clearance": clr, "replay_rc": 0,
+               "final": fname if done else None, "chain_complete": done,
+               "drc": None, "conn": None}
+        if done:
+            res["drc"], res["conn"] = grade(str(final), clr)
+        print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} conn={res['conn']}")
+        results.append(res)
+    (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
+    print(f"[regrade] rewrote {out_dir/'summary.json'}")
+    return results
+
+
 def compare(old_json, new_json):
     old = {r["board"]: r for r in json.loads(Path(old_json).read_text())}
     new = {r["board"]: r for r in json.loads(Path(new_json).read_text())}
@@ -170,13 +201,20 @@ def main():
     ap.add_argument("--jobs", type=int, default=4, help="Boards in parallel (default 4)")
     ap.add_argument("--compare", nargs=2, metavar=("OLD.json", "NEW.json"),
                     help="Compare two wave summaries and print a regression table")
+    ap.add_argument("--regrade", metavar="WAVE_DIR",
+                    help="Re-grade an existing wave's finals (no re-routing) and rewrite its summary.json")
     args = ap.parse_args()
 
     if args.compare:
         ok = compare(*args.compare)
         return 0 if ok else 1
+    if args.regrade:
+        if not args.set:
+            ap.error("--regrade needs --set (for per-board manifests)")
+        regrade(args.regrade, Path(args.set).expanduser())
+        return 0
     if not args.set or not args.out:
-        ap.error("--set and --out are required (or use --compare)")
+        ap.error("--set and --out are required (or use --compare/--regrade)")
     run_wave(Path(args.set).expanduser(), Path(args.out).expanduser(), args.label, args.jobs)
     return 0
 
