@@ -111,6 +111,27 @@ Recording is opt-in: set `REDO_MANIFEST=<path>` to capture a manual run (only th
 board-mutating tools record; re-run `check_*` separately for grading), or leave it
 unset / `=/dev/null` to disable.
 
+### Whole-set A/B (`ab_replay_grade.py`)
+
+`ab_replay_grade.py` is the set-level layer on top of `redo_stress_test.py`: it
+replays every board in a set in parallel, auto-detects each board's final board
+and the route step's actual `--clearance`, grades DRC + connectivity, and writes
+a `summary.json`. Run it once per code version ("wave"), then `--compare` the two
+summaries for a per-board regression table (chains broken in either wave are
+excluded). DRC is graded at each board's routed clearance, not a guessed one.
+
+```bash
+# the engine change is uncommitted in the working tree:
+git stash push file1.py file2.py            # baseline = HEAD
+python3 tests/stress/ab_replay_grade.py --set ~/…/runs_set3 --out ab/old --label old
+git stash pop                               # candidate = HEAD + change
+python3 tests/stress/ab_replay_grade.py --set ~/…/runs_set3 --out ab/new --label new
+python3 tests/stress/ab_replay_grade.py --compare ab/old/summary.json ab/new/summary.json
+```
+
+The two waves must be sequential (they share the live repo's git state), but the
+boards within a wave run in parallel (`--jobs`, default 4).
+
 ### Per-command timing (#132)
 
 Both the original run and a replay record per-command wall-clock so routing
