@@ -603,7 +603,7 @@ KiCadRoutingTools/
 ├── check_connected.py        # Connectivity checker (with T-junction detection)
 ├── check_orphan_stubs.py     # Orphan stub detector
 ├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
-├── fix_kicad_drc_settings.py # Fix .kicad_pro DRC rules/severities (hole clearance, courtyard/mask noise)
+├── fix_kicad_drc_settings.py # Make .kicad_pro DRC constraints consistent with the routed floors (clearance, track/via/drill, hole, edge; courtyard/mask/footprint noise)
 ├── bga_fanout.py             # BGA fanout CLI wrapper
 ├── bga_fanout/               # BGA fanout package
 │   ├── __init__.py           # Main fanout logic and public API

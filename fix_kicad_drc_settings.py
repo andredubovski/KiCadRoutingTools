@@ -1,39 +1,51 @@
 #!/usr/bin/env python3
-"""Fix the DRC settings of a KiCad output board so a manual DRC shows only the
-relevant (routing) errors, not stock-default noise.
+"""Make a routed board's KiCad DRC settings consistent with the clearances and
+sizes it was actually routed to, so an interactive DRC in KiCad shows only the
+relevant (routing) errors instead of stock-default noise (issue #160).
 
 KiCad stores DRC *design rules* and *violation severities* in the PROJECT file
 (``.kicad_pro``), NOT in the board (``.kicad_pcb``). A freshly written board gets
-a project with KiCad's stock defaults, which produce two kinds of noise:
+a project with KiCad's stock defaults, which produce noise in two ways:
 
-  1. ``min_hole_clearance`` defaults to 0.25 mm -- far stricter than the copper
-     clearance the board was routed to -- so every fanout via drill near another
-     net's copper fires a "Hole clearance" violation (hundreds of them). They are
-     spurious at the real manufacturing floor; ``check_drc`` never reports them.
-  2. Placement / fabrication categories (courtyard overlaps, solder-mask bridges)
-     fire as errors even though they are not routing problems.
+  1. Constraint floors stricter than the board was routed to -- e.g. the stock
+     ``min_clearance`` 0.2 mm, ``min_via_diameter`` 0.45 mm, ``min_track_width``
+     0.2 mm or ``min_hole_clearance`` 0.25 mm -- fire on every track/via/drill
+     the router placed below them (hundreds of spurious markers). They are not
+     real problems at the manufacturing floor the board was routed to;
+     ``check_drc.py`` never reports them.
+  2. Placement / fabrication categories (courtyard overlaps, solder-mask bridges,
+     footprint-library annular/mismatch) fire even though the router neither
+     creates nor fixes them.
 
-This script rewrites the sibling ``.kicad_pro`` to:
-  * set ``min_hole_clearance`` to the board's copper-clearance floor (so only
-    genuinely-too-close drills remain), and
-  * set the courtyard / solder-mask severities to ``ignore``.
+This script rewrites the sibling ``.kicad_pro`` so KiCad's enforced
+**Board Setup -> Constraints / Net Classes** match the per-object minima the
+board actually uses:
 
-Clearance, shorting_items and unconnected_items are left untouched (KiCad shows
-unconnected items in their own tab).
+  * copper **clearance** (``min_clearance`` + Default net-class clearance)
+  * **hole-to-hole** clearance (``min_hole_to_hole``)
+  * **hole/copper** clearance (``min_hole_clearance``)
+  * **copper-to-edge** clearance (``min_copper_edge_clearance``)
+  * **min track width / via diameter / via drill / annular ring** -- lowered to
+    the smallest such object actually placed on the board
+  * non-routing severities (courtyard, solder-mask, footprint/library) -> ignore
+
+**Only loosen, never tighten.** Every constraint is set to ``min(current, target)``
+-- it is only *lowered* toward the real fab floor, never raised. So this can
+never introduce a NEW violation or silently strengthen a rule; it only stops
+KiCad flagging copper the router legitimately placed. A constraint the user
+already set looser than the routed floor is left as-is.
+
+Targets come from the routing parameters when you pass them (``--clearance``,
+``--hole-to-hole``, ``--edge-clearance``, ``--track-width``, ``--via-size``,
+``--via-drill`` -- match what you gave ``route.py``); track/via/drill/annular also
+fall back to the smallest object found on the board, and clearance falls back to
+the project's Default net-class clearance.
 
 IMPORTANT: close the board in KiCad before running this. KiCad keeps the project
 in memory and will overwrite an externally-edited ``.kicad_pro`` on save/close.
 
 Usage:
     python3 fix_kicad_drc_settings.py board.kicad_pcb [options]
-
-Options:
-    --hole-clearance MM   Hole-clearance floor (default: the project's copper
-                          clearance -- net Default class, else rules.min_clearance).
-    --keep-courtyards     Do not ignore courtyard categories.
-    --keep-mask           Do not ignore solder-mask bridge.
-    --ignore CAT [CAT...] Additional severity categories to set to "ignore".
-    --dry-run             Print what would change without writing.
 """
 import argparse
 import json
@@ -73,11 +85,104 @@ def project_copper_clearance(proj: dict):
     return mc if mc else None
 
 
+def scan_board_minima(pcb_path: str):
+    """Smallest track width / via diameter / via drill / via annular ring / hole
+    diameter actually present on the board. These are floors KiCad's min-size
+    rules must sit at or below, or it flags the board's own copper. Returns a
+    dict of floats (missing keys absent). Best-effort -- returns {} if the board
+    can't be parsed."""
+    if not os.path.isfile(pcb_path):
+        return {}
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(pcb_path)
+    except Exception as e:  # pragma: no cover - parser is robust, but stay safe
+        print(f"warning: could not scan board minima ({e})", file=sys.stderr)
+        return {}
+
+    out = {}
+    widths = [s.width for s in pcb.segments if s.width and s.width > 0]
+    if widths:
+        out["min_track_width"] = min(widths)
+    via_drills = [v.drill for v in pcb.vias if v.drill]
+    if pcb.vias:
+        sizes = [v.size for v in pcb.vias if v.size]
+        if sizes:
+            out["min_via_diameter"] = min(sizes)
+        if via_drills:
+            out["min_via_drill"] = min(via_drills)
+        annular = [(v.size - v.drill) / 2.0 for v in pcb.vias
+                   if v.size and v.drill and v.size > v.drill]
+        if annular:
+            out["min_via_annular_width"] = min(annular)
+    # Through-hole pad / via drills set the smallest hole diameter on the board.
+    hole = list(via_drills)
+    for fp in pcb.footprints.values():
+        for pad in fp.pads:
+            if getattr(pad, "drill", 0):
+                hole.append(pad.drill)
+    if hole:
+        out["min_through_hole_diameter"] = min(hole)
+    return out
+
+
+def compute_constraint_targets(args, proj: dict, minima: dict):
+    """Map KiCad rule keys -> target floor (mm). Routing params win; otherwise
+    fall back to the board's smallest object (sizes) or the project's Default
+    net-class clearance (copper clearance). Keys absent => leave that rule alone.
+    """
+    targets = {}
+
+    clearance = args.clearance if args.clearance is not None else project_copper_clearance(proj)
+    if clearance is not None:
+        targets["min_clearance"] = clearance
+    # Hole/copper clearance: explicit flag, else the copper-clearance floor.
+    hole_clr = args.hole_clearance if args.hole_clearance is not None else clearance
+    if hole_clr is not None:
+        targets["min_hole_clearance"] = hole_clr
+    if args.hole_to_hole is not None:
+        targets["min_hole_to_hole"] = args.hole_to_hole
+    if args.edge_clearance is not None:
+        targets["min_copper_edge_clearance"] = args.edge_clearance
+
+    # Size minima: routing param if given, else smallest object on the board.
+    if args.track_width is not None:
+        targets["min_track_width"] = args.track_width
+    elif "min_track_width" in minima:
+        targets["min_track_width"] = minima["min_track_width"]
+    if args.via_size is not None:
+        targets["min_via_diameter"] = args.via_size
+    elif "min_via_diameter" in minima:
+        targets["min_via_diameter"] = minima["min_via_diameter"]
+    if args.via_drill is not None:
+        targets["min_through_hole_diameter"] = args.via_drill
+    elif "min_through_hole_diameter" in minima:
+        targets["min_through_hole_diameter"] = minima["min_through_hole_diameter"]
+    if "min_via_annular_width" in minima:
+        targets["min_via_annular_width"] = minima["min_via_annular_width"]
+    return targets
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Fix KiCad DRC settings on an output board's project file.")
+    ap = argparse.ArgumentParser(
+        description="Make a routed board's KiCad DRC settings consistent with the routed floors.")
     ap.add_argument("board", help="Path to the .kicad_pcb (or .kicad_pro) file")
+    # Routing parameters (match what you passed route.py); each defaults to the
+    # board's own minimum / the project clearance when omitted.
+    ap.add_argument("--clearance", type=float, default=None,
+                    help="Copper clearance floor in mm (default: project Default net-class clearance)")
     ap.add_argument("--hole-clearance", type=float, default=None,
-                    help="Hole-clearance floor in mm (default: copper clearance)")
+                    help="Hole/copper clearance floor in mm (default: copper clearance)")
+    ap.add_argument("--hole-to-hole", type=float, default=None,
+                    help="Hole-to-hole clearance floor in mm (routing --hole-to-hole-clearance)")
+    ap.add_argument("--edge-clearance", type=float, default=None,
+                    help="Copper-to-edge clearance floor in mm (routing --board-edge-clearance)")
+    ap.add_argument("--track-width", type=float, default=None,
+                    help="Min track width in mm (default: smallest track on the board)")
+    ap.add_argument("--via-size", type=float, default=None,
+                    help="Min via diameter in mm (default: smallest via on the board)")
+    ap.add_argument("--via-drill", type=float, default=None,
+                    help="Min hole/drill diameter in mm (default: smallest drill on the board)")
     ap.add_argument("--keep-courtyards", action="store_true", help="Do not ignore courtyard categories")
     ap.add_argument("--keep-mask", action="store_true", help="Do not ignore solder-mask bridge")
     ap.add_argument("--keep-footprint", action="store_true",
@@ -102,21 +207,53 @@ def main():
     rules = ds.setdefault("rules", {})
     sev = ds.setdefault("rule_severities", {})
 
+    # Compute target floors and apply them with "only loosen" semantics: a
+    # constraint is lowered toward the routed floor but never raised, so we can
+    # never introduce a new violation.
+    pcb_path = args.board if args.board.endswith(".kicad_pcb") else os.path.splitext(args.board)[0] + ".kicad_pcb"
+    minima = scan_board_minima(pcb_path)
+    targets = compute_constraint_targets(args, proj, minima)
+
     changes = []
+    EPS = 1e-9
+    for key, target in targets.items():
+        if target is None:
+            continue
+        target = round(float(target), 6)
+        cur = rules.get(key)
+        # Lower to the target only if the current floor is stricter (higher) or
+        # unset; never raise.
+        if cur is None or cur > target + EPS:
+            changes.append(f"rules.{key}: {cur} -> {target} mm")
+            rules[key] = target
 
-    # 1) Hole clearance -> copper-clearance floor.
-    floor = args.hole_clearance
-    if floor is None:
-        floor = project_copper_clearance(proj)
-    if floor is None:
-        print("warning: could not determine copper clearance; pass --hole-clearance MM", file=sys.stderr)
-    else:
-        old = rules.get("min_hole_clearance")
-        if old != floor:
-            changes.append(f"min_hole_clearance: {old} -> {floor} mm")
-            rules["min_hole_clearance"] = floor
+    # Keep the Default net class consistent with the copper-clearance floor (and
+    # the placed track/via/drill), again only loosening. KiCad enforces the COPPER
+    # CLEARANCE per net class (the rules.min_clearance floor alone does not relax
+    # it), so leaving the Default class stricter than the board re-introduces the
+    # same clearance noise the rules fix removes. Create the Default class if the
+    # project has none (a stock template), so the floor actually takes effect.
+    nc_map = {"clearance": targets.get("min_clearance"),
+              "track_width": targets.get("min_track_width"),
+              "via_diameter": targets.get("min_via_diameter"),
+              "via_drill": targets.get("min_through_hole_diameter")}
+    classes = proj.setdefault("net_settings", {}).setdefault("classes", [])
+    default_cls = next((c for c in classes if c.get("name") == "Default"), None)
+    if default_cls is None and any(v is not None for v in nc_map.values()):
+        default_cls = {"name": "Default"}
+        classes.insert(0, default_cls)
+        changes.append("net_class[Default]: created (project had none)")
+    if default_cls is not None:
+        for field, target in nc_map.items():
+            if target is None:
+                continue
+            target = round(float(target), 6)
+            cur = default_cls.get(field)
+            if cur is None or cur > target + EPS:
+                changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
+                default_cls[field] = target
 
-    # 2) Severities -> ignore for non-routing categories.
+    # Severities -> ignore for non-routing categories.
     to_ignore = list(args.ignore)
     if not args.keep_courtyards:
         to_ignore += COURTYARD_CATS
@@ -132,7 +269,7 @@ def main():
             sev[cat] = "ignore"
 
     if not changes:
-        print(f"{pro}: already up to date, nothing to change.")
+        print(f"{pro}: already consistent, nothing to change.")
         return
 
     print(f"{pro}:")
@@ -146,7 +283,8 @@ def main():
     with open(pro, "w") as f:
         json.dump(proj, f, indent=2)
         f.write("\n")
-    print(f"\nWrote {pro}. Clearance / shorts / unconnected are unchanged.")
+    print(f"\nWrote {pro}. Constraints only loosened toward the routed floor; "
+          f"shorts / unconnected are unchanged.")
     print("NOTE: if the board is open in KiCad, close it first and reopen -- "
           "KiCad overwrites the project file on save.")
 
