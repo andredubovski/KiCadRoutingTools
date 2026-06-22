@@ -338,7 +338,10 @@ QFN-64 FT2232H + USB-C connector) — the board that drove the #165 work. The US
 0.5mm-pitch DP/DN pads; U3.7/U3.8 sit on the congested QFN edge). Asserts that
 `route_diff` **coupled-routes** the pair (not defers/floats/grazes it) DRC-clean,
 then a single-ended `route.py` follow-up connects the redundant J1 row, leaving
-**all USB pads fully connected with no DRC errors**.
+**all USB pads fully connected with no DRC errors**. Runs the full pipeline under
+three fan-out setups: **bare** (no fanout), **underpad-scoped** (`qfn_fanout` USB
+pair only, `--escape-method underpad`), and **stub-non-scoped** (`qfn_fanout` all
+U3 nets, default surface-stub escape).
 
 ```bash
 python3 tests/test_tigard_usb_diff.py
