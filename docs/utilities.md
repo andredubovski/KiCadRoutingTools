@@ -760,11 +760,19 @@ minima the board uses — copper `min_clearance` (+ Default net-class clearance)
 min track / via / drill / annular sizes — sets the courtyard / solder-mask /
 footprint severities to `ignore`, and demotes `starved_thermal` (thermal-relief
 spoke shortfall) from error to a **warning** (`--keep-thermal` keeps it an error).
-Size minima default to the smallest such object found on the board; clearance
-defaults to the project's Default net-class clearance. Pass the routing
-parameters (`--clearance`, `--hole-to-hole`, `--edge-clearance`, `--track-width`,
-`--via-size`, `--via-drill` — the same values you gave `route.py`) to pin them
-exactly.
+For the **size** floors (track / via / drill) it uses the **smaller** of the
+routing param you pass and the smallest such object actually on the board, so a
+later coarse step (say a 0.3 mm repair pass) can't raise the floor above 0.127 mm
+tracks that earlier steps left — the floor always sits at or below the smallest
+object physically present. **Clearance / hole-to-hole / edge** can't be read back
+from the board (a spacing isn't stored per object, and the *achieved* spacing may
+dip below the intended value at real violations, which we must not mask), so they
+come from the routing param; across a chain they accumulate the **minimum** used
+in any step via the only-loosen rule as each step threads its `.kicad_pro` to the
+next. Clearance defaults to the project's Default net-class clearance when not
+passed. Pass the routing parameters (`--clearance`, `--hole-to-hole`,
+`--edge-clearance`, `--track-width`, `--via-size`, `--via-drill` — the same values
+you gave `route.py`) to pin them exactly.
 
 If the project has **no** Default net class (a bare/stub project), the script
 seeds a *complete* one before lowering its clearance — KiCad silently ignores a

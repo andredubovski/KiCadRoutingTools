@@ -81,6 +81,36 @@ def main():
             if d2 is None or abs(d2.get("clearance", -1) - 0.15) > 1e-9:
                 fails.append("copy: Default class clearance not loosened to 0.15")
 
+        # (3) Multi-step size floor: when this step's track-width param is COARSER
+        # than copper already on the board (e.g. a 0.3 repair pass over a board
+        # that still has 0.2 tracks from earlier steps), the min-track floor must
+        # drop to the board's actual minimum, not the step's param -- otherwise
+        # KiCad flags the earlier thinner copper.
+        coarse = os.path.join(tmp, "coarse.kicad_pcb")
+        shutil.copyfile(BOARD, coarse)  # qfn_underpad_coupling has 0.2mm tracks
+        fix_project_for_output(coarse, input_pcb=None, verbose=False,
+                               clearance=0.1, track_width=0.3, via_diameter=0.6, via_drill=0.4)
+        rc = json.load(open(os.path.join(tmp, "coarse.kicad_pro")))["board"]["design_settings"]["rules"]
+        if abs(rc.get("min_track_width", -1) - 0.2) > 1e-9:
+            fails.append(f"size floor used the 0.3 param, not the board's 0.2 min "
+                         f"(min_track_width={rc.get('min_track_width')})")
+
+        # (4) Clearance threading: a later COARSER step keeps the earlier tighter
+        # clearance (only-loosen across steps), so the floor is the MINIMUM used
+        # across the chain, not just the last step.
+        a = os.path.join(tmp, "stepA.kicad_pcb")
+        shutil.copyfile(BOARD, a)
+        fix_project_for_output(a, input_pcb=None, verbose=False, clearance=0.1, track_width=0.2)
+        b_pcb = os.path.join(tmp, "stepB.kicad_pcb")
+        shutil.copyfile(BOARD, b_pcb)
+        fix_project_for_output(b_pcb, input_pcb=a, verbose=False, clearance=0.2, track_width=0.2)
+        bcl = next((c.get("clearance") for c in
+                    json.load(open(os.path.join(tmp, "stepB.kicad_pro")))["net_settings"]["classes"]
+                    if c.get("name") == "Default"), None)
+        if bcl is None or abs(bcl - 0.1) > 1e-9:
+            fails.append(f"clearance not threaded: a 0.2 step after a 0.1 step gave "
+                         f"clearance {bcl} (should keep the 0.1 minimum)")
+
     if fails:
         print("FAIL: " + "; ".join(fails))
         return 1
