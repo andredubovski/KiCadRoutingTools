@@ -825,16 +825,24 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             skip_routing=skip_routing,
             add_teardrops=add_teardrops
         )
-        # When every pair was deferred to single-ended (electrically short),
-        # there is no coupled copper to write - but the deferred nets still need
-        # the downstream single-ended pass, so pass the board through unchanged so
-        # the pipeline can continue (otherwise no output file is produced at all).
-        if not wrote and output_file and state.diff_pair_single_ended_nets:
+        # When no coupled copper was written -- every pair was deferred to
+        # single-ended (electrically short), OR a pair could not be routed at all
+        # (terminal/launch escape exhausted, issue #167) -- still pass the board
+        # through unchanged so the pipeline never loses its output file. The
+        # unrouted nets are picked up by the downstream single-ended route.py pass
+        # (the chains route '*' from the diff step's output); without this the
+        # whole chain FileNotFoundErrors on the missing board (issues #90, #167).
+        if not wrote and output_file:
             import shutil
             shutil.copy(input_file, output_file)
-            print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
-                  f"added); wrote board through to {output_file} for the "
-                  f"single-ended pass")
+            if state.diff_pair_single_ended_nets:
+                print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
+                      f"added); wrote board through to {output_file} for the "
+                      f"single-ended pass")
+            else:
+                print(f"\nNo diff pair could be coupled-routed; wrote board through "
+                      f"unchanged to {output_file} so the pipeline can continue "
+                      f"(route the pair single-ended next)")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and (target_swap_info or pad_swaps):

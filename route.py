@@ -1033,7 +1033,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         }
     else:
         # Write output file using extracted output_writer module
-        write_routed_output(
+        wrote = write_routed_output(
             input_file=input_file,
             output_file=output_file,
             results=results,
@@ -1050,6 +1050,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             add_teardrops=add_teardrops,
             segments_to_remove=dead_end_input_segments
         )
+        # When nothing could be routed (every net failed) there is no copper to
+        # write, so write_routed_output produces no file. Pass the board through
+        # unchanged so the pipeline never loses its board and a later step (a
+        # finer-grid retry, planes, repair) can still run on it (issues #90, #167)
+        # -- otherwise the whole chain FileNotFoundErrors on the missing output.
+        if not wrote and output_file:
+            _write_passthrough_output(input_file, output_file)
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:
