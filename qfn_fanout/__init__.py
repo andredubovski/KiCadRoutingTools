@@ -71,12 +71,18 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
 
     Adjacent vias are staggered along the escape axis so two neighbours one pitch
     apart still clear each other. With `allow_via_in_pad` the via may sit on its
-    own pad, so the search sweeps both outward AND inward from the pad centre,
-    nearest-first -- a via boxed in on the outward side (by the neighbour pair)
-    staggers inward toward the chip instead of being pushed into the neighbour.
-    Without it the via stays clear of the pad body and only moves outward.
-    A stub or via with no clear offset is dropped. Returns
-    (tracks, vias, dropped_net_names)."""
+    own pad, so its candidate offsets are a MIX: on-pad positions (centre, then
+    inward toward the chip) *and* off-pad positions (outward past the pad) -- a
+    pad that can't escape one way may still escape the other. Without it the via
+    stays clear of the pad body and only moves outward.
+
+    Placement is greedy per side, but if the default stagger drops a pad the side
+    is re-tried under alternative configurations -- reversed order, and per-pad
+    direction biases (e.g. one leg back/inward, its neighbour forward/outward) --
+    keeping whichever escapes the most pads (issue #161 follow-up). The default
+    (forward, nearest-offset-first) is tried first, so when it already escapes
+    every pad nothing changes. A pad with no clear offset under any configuration
+    is dropped. Returns (tracks, vias, dropped_net_names)."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               check_line_clearance, point_to_segment_distance)
     from bga_fanout.reroute import _seg_hits_pad
@@ -107,9 +113,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                if need_cc > pitch else 0.0)
     step = max(stagger, grid_step, 0.05)        # offset increment along the escape axis
 
-    placed = []                                 # (x, y, net_id) of vias we drop
-
-    def via_clears(vx, vy, net_id):
+    def via_clears(vx, vy, net_id, placed):
         for fx, fy, fs, fn in foreign_vias:
             if fn == net_id:
                 continue
@@ -138,51 +142,116 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
-    # Candidate escape distances along the pad's outward axis. With via-in-pad
-    # the via may overlap its own pad, so start at the pad centre and sweep
-    # outward/inward nearest-first; otherwise keep the via off the pad body and
-    # only move outward.
-    def offsets_for(pad_width):
-        if allow_via_in_pad:
-            ds = [0.0]
+    def _onpad(mode):
+        # On-pad (via-in-pad) offsets along the escape axis, ordered by `mode`:
+        # 'in' sweeps inward (toward the chip) first; 'near' alternates nearest
+        # first. 0 == via centred on the pad.
+        seq = [0.0]
+        if mode == 'in':
+            seq += [-k * step for k in range(1, 9)] + [k * step for k in range(1, 9)]
+        else:                                   # 'near'
             for k in range(1, 9):
-                ds += [k * step, -k * step]
-            return ds
+                seq += [k * step, -k * step]
+        return seq
+
+    def candidate_offsets(pad_width, mode):
+        # Off-pad outward offsets always clear the pad body. With via-in-pad we
+        # ALSO offer on-pad offsets and mix the two: 'out' prefers off-pad
+        # outward then falls back to on-pad; 'near'/'in' prefer on-pad then fall
+        # back to off-pad outward.
         base = pad_width / 2 + via_size / 2 + clearance
-        return [base + k * step for k in range(0, 9)]
+        outward = [base + k * step for k in range(0, 9)]
+        if not allow_via_in_pad:
+            return outward
+        if mode == 'out':
+            return outward + _onpad('near')
+        return _onpad(mode) + outward
+
+    def place_pin(pi, mode, placed):
+        ex, ey = pi.escape_direction
+        px, py = pi.pad.global_x, pi.pad.global_y
+        for d in candidate_offsets(pi.pad_width, mode):
+            vx, vy = snap(px + ex * d), snap(py + ey * d)
+            stub_ok = (obs_layer_idx is None or
+                       check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
+            if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed):
+                return (vx, vy)
+        return None
+
+    def trial(pis, order, mode_fn, committed):
+        # Greedily place a side under one configuration; return idx->pos|None.
+        placed = list(committed)
+        results = {}
+        for idx in order:
+            pos = place_pin(pis[idx], mode_fn(idx), placed)
+            results[idx] = pos
+            if pos is not None:
+                placed.append((pos[0], pos[1], pis[idx].pad.net_id))
+        return results
+
+    # Stagger configurations, tried in order; the most-escaped wins, ties keep
+    # the earliest. The default (forward, nearest-offset-first) is first, so a
+    # side every pad already escapes is unchanged. Alternatives only matter when
+    # a pad failed: reversed order, and per-pad direction biases that stagger one
+    # leg back/inward while its neighbour goes forward/outward. Direction biases
+    # only do anything with via-in-pad (otherwise every mode is the outward
+    # ladder), so skip them then.
+    configs = [('fwd', lambda i: 'near'), ('rev', lambda i: 'near')]
+    if allow_via_in_pad:
+        configs += [
+            ('fwd', lambda i: 'out' if i % 2 == 0 else 'in'),
+            ('fwd', lambda i: 'in' if i % 2 == 0 else 'out'),
+            ('fwd', lambda i: 'in'),
+            ('fwd', lambda i: 'out'),
+        ]
+    # Test/debug hook: pin the search to the default config to measure how many
+    # pads the alternative-stagger search rescues. Not a user-facing option.
+    if os.environ.get("QFN_UNDERPAD_NO_ALT_STAGGER"):
+        configs = configs[:1]
 
     tracks, vias, dropped = [], [], []
+    placed_global = []
     by_side = defaultdict(list)
     for pi in pad_infos:
         by_side[pi.side].append(pi)
 
+    n_alt = 0
     for side, pis in by_side.items():
         pis.sort(key=lambda pi: (pi.pad.global_x, pi.pad.global_y))
-        for i, pi in enumerate(pis):
-            ex, ey = pi.escape_direction
-            px, py = pi.pad.global_x, pi.pad.global_y
-            placed_ok = False
-            for d in offsets_for(pi.pad_width):
-                vx, vy = snap(px + ex * d), snap(py + ey * d)
-                stub_ok = (obs_layer_idx is None or
-                           check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
-                if stub_ok and via_clears(vx, vy, pi.pad.net_id):
-                    placed.append((vx, vy, pi.pad.net_id))
-                    # Zero-length stub (via centred on the pad) needs no track.
-                    if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
-                        tracks.append({'start': (px, py), 'end': (vx, vy),
-                                       'width': track_width, 'layer': layer,
-                                       'net_id': pi.pad.net_id})
-                    vias.append({'x': vx, 'y': vy, 'size': via_size, 'drill': via_drill,
-                                 'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
-                    placed_ok = True
-                    break
-            if not placed_ok:
+        order_fwd = list(range(len(pis)))
+        best, best_n, best_ci = None, -1, 0
+        for ci, (order_name, mode_fn) in enumerate(configs):
+            order = order_fwd if order_name == 'fwd' else order_fwd[::-1]
+            results = trial(pis, order, mode_fn, placed_global)
+            n_placed = sum(1 for v in results.values() if v is not None)
+            if n_placed > best_n:
+                best, best_n, best_ci = results, n_placed, ci
+            if best_n == len(pis):
+                break
+        if best_ci != 0:
+            n_alt += 1
+        # Commit the winning configuration.
+        for idx in order_fwd:
+            pi = pis[idx]
+            pos = best.get(idx)
+            if pos is None:
                 dropped.append(pi.pad.net_name)
+                continue
+            vx, vy = pos
+            placed_global.append((vx, vy, pi.pad.net_id))
+            px, py = pi.pad.global_x, pi.pad.global_y
+            # Zero-length stub (via centred on the pad) needs no track.
+            if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                tracks.append({'start': (px, py), 'end': (vx, vy),
+                               'width': track_width, 'layer': layer,
+                               'net_id': pi.pad.net_id})
+            vias.append({'x': vx, 'y': vy, 'size': via_size, 'drill': via_drill,
+                         'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
 
     print(f"  Underpad via-drop: {len(vias)} vias placed, {len(dropped)} dropped "
           f"(pitch {pitch:.2f}, via {via_size:.2f}, stagger {stagger:.3f} mm"
-          f"{', via-in-pad' if allow_via_in_pad else ''})")
+          f"{', via-in-pad' if allow_via_in_pad else ''}"
+          f"{f', {n_alt} side(s) used an alternative stagger' if n_alt else ''})")
     if dropped:
         print(f"    dropped (no clear via offset): {dropped}")
     return tracks, vias, dropped

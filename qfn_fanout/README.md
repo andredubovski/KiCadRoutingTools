@@ -80,16 +80,25 @@ it (issue #161). A via that can't find a clear offset is dropped and reported.
 Pair the via with `--via-drill` to keep a sane annular ring (e.g.
 `--via-size 0.45 --via-drill 0.25`).
 
+Placement is greedy per edge, but if the default nearest-first stagger **drops**
+a leg the edge is re-tried under alternative stagger configurations — reversed
+order, and per-leg direction biases that send one leg back while its neighbour
+goes forward — keeping whichever escapes the most legs (issue #161 follow-up).
+The default is tried first, so an edge that already escapes fully is unchanged;
+the alternatives only kick in to rescue an otherwise-dropped leg.
+
 #### `--allow-via-in-pad` (issue #161)
 
 On a genuinely boxed-in pair (the outer leg has a neighbour pad one pitch away
 *and* the neighbour's diagonal escape sweeping through the only outward room) the
 via has nowhere to go outward, so the plain escape **drops** it. With
-`--allow-via-in-pad` the escape via may sit on its **own** pad (via-in-pad), so
-the search sweeps both outward **and inward**, nearest-first: the boxed-in leg
-staggers *inward toward the chip*, away from the neighbour, instead of being
-pushed into it. The via still must clear every other-net pad, via and track — it
-only gains permission to overlap its own pad. Name and behaviour match the
+`--allow-via-in-pad` the escape via may sit on its **own** pad (via-in-pad). Its
+candidate offsets then become a **mix**: on-pad positions (centre, then inward
+toward the chip) *and* off-pad positions (outward past the pad), so each leg
+independently takes whichever escapes — a boxed-in leg staggers *inward*, away
+from the neighbour, instead of being dropped, while a leg with outward room still
+goes out. The via still must clear every other-net pad, via and track — it only
+gains permission to overlap its own pad. Name and behaviour match the
 "Allow via-in-pad" option elsewhere in the tools. Example:
 
 ```bash
