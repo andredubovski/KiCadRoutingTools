@@ -1868,6 +1868,57 @@ def _pn_tracks_cross_full(new_segments, pcb_data, p_net_id, n_net_id,
     return False
 
 
+# Tolerance fraction matching check_drc's default --clearance-margin, so a graze
+# reject here is consistent with the DRC checker (won't false-reject a route that
+# DRC passes, won't pass one DRC would flag). See issue #165.
+_DRC_CLEARANCE_MARGIN = 0.05
+
+
+def _connector_grazes_foreign_pad(new_segments, pcb_data, p_net_id, n_net_id, config):
+    """Issue #165: the pair's connector/setback segments are clearance-checked
+    during routing against an obstacle map that excludes BOTH halves of the pair,
+    so a connector can graze the PARTNER net's pad (or other foreign copper)
+    completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad).
+
+    Re-validate the final P/N geometry against every foreign pad (any pad NOT on
+    this pair's own nets, which includes the partner net's pads) using the SAME
+    geometry and tolerance as check_drc, so a graze reported here is one check_drc
+    would also flag - not a tight-but-legal packing sitting exactly at clearance.
+
+    Returns (pad, segment, overlap_mm) for the first real graze, or None.
+    """
+    from check_drc import check_pad_segment_overlap
+
+    own = (p_net_id, n_net_id)
+    pair_segs = [s for s in new_segments if s.net_id in own]
+    if not pair_segs:
+        return None
+
+    routing_layers = list({s.layer for s in pcb_data.segments if s.layer.endswith('.Cu')})
+    routing_layers = list(set(routing_layers) | set(config.layers))
+    clearance = config.clearance
+    pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+
+    for seg in pair_segs:
+        sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
+        symin, symax = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
+        seg_margin = clearance + seg.width / 2
+        for pad_net, pads in pads_by_net.items():
+            if pad_net == seg.net_id:
+                continue  # the connector legitimately lands on its own-net pad
+            for pad in pads:
+                # Coarse bounding-box reject before the exact rect-distance test.
+                pm = seg_margin + max(pad.size_x, pad.size_y) / 2
+                if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or
+                        pad.global_y < symin - pm or pad.global_y > symax + pm):
+                    continue
+                hit, overlap, _ = check_pad_segment_overlap(
+                    pad, seg, clearance, routing_layers, _DRC_CLEARANCE_MARGIN)
+                if hit:
+                    return (pad, seg, overlap)
+    return None
+
+
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
@@ -2624,6 +2675,28 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
+        }
+
+    # Issue #165: the connector/setback segments are clearance-checked during
+    # routing against an obstacle map that excludes BOTH halves of the pair, so a
+    # connector can graze the PARTNER net's pad (or other foreign copper) unseen.
+    # Validate the final geometry against foreign pads with the SAME geometry and
+    # tolerance as check_drc, so a reject here is a graze check_drc would also flag
+    # (not tight-but-legal packing). Honest minimum: don't emit a known short.
+    graze = _connector_grazes_foreign_pad(result.get('new_segments', []),
+                                          pcb_data, p_net_id, n_net_id, config)
+    if graze:
+        pad, seg, overlap = graze
+        print(f"  Connector grazes foreign pad {pad.component_ref}.{pad.pad_number} "
+              f"(net {pad.net_name}) by {overlap:.3f}mm on {seg.layer} - "
+              f"rejecting pair route (issue #165)")
+        print("  (a connector/setback segment violates clearance to the partner or "
+              "a foreign pad; needs a cleaner connector route or a different "
+              "terminal join)")
+        return {
+            'failed': True,
+            'iterations': result.get('iterations', 0),
+            'connector_graze': True,
         }
 
     return result

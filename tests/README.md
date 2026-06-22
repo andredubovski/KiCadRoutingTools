@@ -255,6 +255,21 @@ python3 tests/test_multipoint_diff_route.py
 python3 tests/test_multipoint_diff_route.py -v
 ```
 
+### test_diff_connector_graze.py - Connector/Partner-Pad Graze Reject (issue #165)
+
+Unit test for the diff-pair final-geometry guard `_connector_grazes_foreign_pad`.
+The connector/setback segments are clearance-checked during routing against an
+obstacle map that excludes **both** halves of the pair, so a connector can graze
+the **partner** net's pad (USB-C, fine-pitch) unseen. The guard re-validates the
+final geometry against foreign pads using the **same** geometry and tolerance as
+`check_drc`, so it rejects a real graze (the tigard 0.164 mm `/USB_DP`↔`J1.A7`
+short) without false-rejecting tight-but-legal packing that sits exactly at
+clearance. Pure-geometry, no Rust router or board file needed.
+
+```bash
+python3 tests/test_diff_connector_graze.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub
