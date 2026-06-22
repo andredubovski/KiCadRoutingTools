@@ -330,6 +330,21 @@ escape points outward whether called with the pad position or the stub free end.
 python3 tests/test_diff_multipoint_escape_dir.py
 ```
 
+### test_tigard_usb_diff.py - Real-World USB Diff Pair (issue #165)
+
+End-to-end test on the **Tigard** board (`kicad_files/tigard.kicad_pcb`, a
+QFN-64 FT2232H + USB-C connector) — the board that drove the #165 work. The USB
+2.0 pair `/USB_DP`+`/USB_DN` is a fine-pitch connector fan-out (J1 has redundant
+0.5mm-pitch DP/DN pads; U3.7/U3.8 sit on the congested QFN edge). Asserts that
+`route_diff` **coupled-routes** the pair (not defers/floats/grazes it) DRC-clean,
+then a single-ended `route.py` follow-up connects the redundant J1 row, leaving
+**all USB pads fully connected with no DRC errors**.
+
+```bash
+python3 tests/test_tigard_usb_diff.py
+python3 tests/test_tigard_usb_diff.py -v
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub
