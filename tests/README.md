@@ -285,6 +285,20 @@ brute-force code paths (KiCad's bundled Python has no scipy).
 python3 tests/test_diff_terminal_pairing.py
 ```
 
+### test_diff_pad_end_launch.py - Connector Pad-Edge Launch (issue #165)
+
+Unit test for `_pad_edge_launch`. Diff-pair connectors used to launch from the
+pad **center**; on a long (1.45mm USB-C) pad that makes the connector cut back
+across the pad field and graze a neighbour. `_pad_edge_launch` shifts the launch
+to the pad **edge facing the route**. The test asserts it shifts toward the route
+edge, stays inside the pad copper (so the track still attaches), never overshoots
+a near route start, leaves non-pad (stub) launch points untouched, and handles
+diagonal (`rect_rotation`) pads.
+
+```bash
+python3 tests/test_diff_pad_end_launch.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub

@@ -565,6 +565,61 @@ def _calculate_parallel_extension(p_stub, n_stub, p_route, n_route, stub_dir, p_
     return 0.0, 0.0
 
 
+def _rect_ray_exit(hx: float, hy: float, dx: float, dy: float) -> float:
+    """Distance from an axis-aligned rectangle's center to its boundary along the
+    unit direction (dx, dy). hx, hy are the half-extents."""
+    tx = hx / abs(dx) if abs(dx) > 1e-9 else float('inf')
+    ty = hy / abs(dy) if abs(dy) > 1e-9 else float('inf')
+    return min(tx, ty)
+
+
+def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.05):
+    """Issue #165 (tier-2 root-cause 2): move a bare-pad connector launch point
+    from the pad CENTER to the pad edge facing the route, so the connector leaves
+    the pad toward the route instead of cutting back across the (long) pad field
+    - e.g. a 1.45mm USB-C pad whose center-launched connector grazes a neighbour.
+
+    Only fires when (cx, cy) actually sits on a pad of net_id (a bare-pad
+    endpoint - its coords ARE the pad center); a stub-tip launch point is away
+    from any pad center, so no pad is found and the launch is left untouched
+    (the connector must stay attached to the existing stub). Returns the shifted
+    (x, y), clamped to stay inside the pad copper and never past the route start.
+    """
+    pad, best = None, tol
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        d = math.hypot(p.global_x - cx, p.global_y - cy)
+        if d <= best:
+            best, pad = d, p
+    if pad is None:
+        return cx, cy
+
+    dx, dy = route_x - cx, route_y - cy
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        return cx, cy
+    dx, dy = dx / norm, dy / norm
+
+    # Rotate the direction into the pad's local frame for diagonal pads, matching
+    # check_drc's R(-rect_rotation) convention, so the axis-aligned exit applies.
+    ldx, ldy = dx, dy
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        cr, sr = math.cos(rad), math.sin(rad)
+        ldx, ldy = dx * cr + dy * sr, -dx * sr + dy * cr
+
+    reach = _rect_ray_exit(pad.size_x / 2, pad.size_y / 2, ldx, ldy)
+    if not math.isfinite(reach) or reach <= 0:
+        return cx, cy
+
+    # Stay just inside the pad edge so the track endpoint lands on pad copper,
+    # and never launch past the route's first point (very short connectors).
+    margin = min(config.track_width / 2, reach * 0.25)
+    shift = min(reach - margin, max(0.0, norm - config.track_width / 2))
+    if shift <= 1e-6:
+        return cx, cy
+    return cx + dx * shift, cy + dy * shift
+
+
 def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
     """Create GND vias at layer changes in the centerline path.
 
@@ -2450,27 +2505,41 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     if polarity_fixed:
         p_end = (n_tgt_x, n_tgt_y)  # P route goes to original N position (will be P after swap)
         n_end = (p_tgt_x, p_tgt_y)  # N route goes to original P position (will be N after swap)
+        p_end_net, n_end_net = n_net_id, p_net_id  # net of the PAD physically at p_end/n_end
     else:
         p_end = (p_tgt_x, p_tgt_y)
         n_end = (n_tgt_x, n_tgt_y)
+        p_end_net, n_end_net = p_net_id, n_net_id
 
     # Prepare stub direction tuples for extension calculation
     src_stub_dir_tuple = (src_dir_x, src_dir_y)
     tgt_stub_dir_tuple = (tgt_dir_x, tgt_dir_y)
 
-    # Pre-calculate extensions for source and target connectors
-    # These ensure P and N connector segments are parallel
-    # Source end
+    # Route's first/last points - the setback positions the connectors run to.
     p_src_route = p_float_path[0][:2] if p_float_path else p_start
     n_src_route = n_float_path[0][:2] if n_float_path else n_start
+    p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
+    n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
+
+    # Issue #165 (tier-2 root-cause 2): launch each connector from the pad EDGE
+    # facing the route, not the pad center, so it leaves the pad toward the route
+    # instead of cutting back across a long pad's field (USB-C, fine-pitch). No-op
+    # for stub endpoints (their launch point is not a pad center).
+    p_start = _pad_edge_launch(pcb_data, p_net_id, p_start[0], p_start[1],
+                               p_src_route[0], p_src_route[1], config)
+    n_start = _pad_edge_launch(pcb_data, n_net_id, n_start[0], n_start[1],
+                               n_src_route[0], n_src_route[1], config)
+    p_end = _pad_edge_launch(pcb_data, p_end_net, p_end[0], p_end[1],
+                             p_tgt_route[0], p_tgt_route[1], config)
+    n_end = _pad_edge_launch(pcb_data, n_end_net, n_end[0], n_end[1],
+                             n_tgt_route[0], n_tgt_route[1], config)
+
+    # Pre-calculate extensions for source and target connectors (from the shifted
+    # launch points) - these ensure P and N connector segments are parallel.
     src_p_ext, src_n_ext = _calculate_parallel_extension(
         p_start, n_start, p_src_route, n_src_route,
         src_stub_dir_tuple, p_sign
     )
-
-    # Target end
-    p_tgt_route = p_float_path[-1][:2] if p_float_path else p_end
-    n_tgt_route = n_float_path[-1][:2] if n_float_path else n_end
     tgt_p_ext, tgt_n_ext = _calculate_parallel_extension(
         p_end, n_end, p_tgt_route, n_tgt_route,
         tgt_stub_dir_tuple, p_sign
