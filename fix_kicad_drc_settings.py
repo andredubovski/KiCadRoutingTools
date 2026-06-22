@@ -173,14 +173,22 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     if edge_clearance is not None:
         targets["min_copper_edge_clearance"] = edge_clearance
 
-    # Size minima: routing param if given, else smallest object on the board.
-    tw = track_width if track_width is not None else minima.get("min_track_width")
+    # Size minima: take the SMALLER of the routing param and the smallest such
+    # object already on the board. A multi-step chain leaves thinner tracks /
+    # smaller vias from earlier steps than the current step's param (e.g. a 0.25
+    # VREF-repair pass over a board that already has 0.127 USB tracks), so a floor
+    # set to just this step's param flags that earlier copper. The DRC floor must
+    # sit at or below the smallest object physically present.
+    def _floor(param, scanned):
+        vals = [v for v in (param, scanned) if v is not None]
+        return min(vals) if vals else None
+    tw = _floor(track_width, minima.get("min_track_width"))
     if tw is not None:
         targets["min_track_width"] = tw
-    vd = via_diameter if via_diameter is not None else minima.get("min_via_diameter")
+    vd = _floor(via_diameter, minima.get("min_via_diameter"))
     if vd is not None:
         targets["min_via_diameter"] = vd
-    dr = via_drill if via_drill is not None else minima.get("min_through_hole_diameter")
+    dr = _floor(via_drill, minima.get("min_through_hole_diameter"))
     if dr is not None:
         targets["min_through_hole_diameter"] = dr
     if "min_via_annular_width" in minima:
