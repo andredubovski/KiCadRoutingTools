@@ -31,6 +31,20 @@ def is_kicad_10(content: str) -> bool:
     return detect_kicad_version(content) >= KICAD_10_MIN_VERSION
 
 
+def board_uses_name_nets(content: str) -> bool:
+    """True if the board references nets by NAME (KiCad 10 style) rather than by
+    numeric id (KiCad 9). Detected from the ACTUAL content, not just the version
+    header: a KiCad 10+ header, OR name-only refs ``(net "name")`` already present
+    (a pre-2025 board a previous pass may have round-tripped). KiCad 9 numeric
+    boards only have ``(net <id> "name")`` declarations and ``(net <id>)`` refs,
+    neither of which matches ``(net "``.
+
+    Writers use this to keep the output's net-token format consistent with the
+    input - never emitting KiCad-10 name nets into a KiCad-9 numeric board (which
+    KiCad 9 reads as net-less), nor numeric ids into a name-net board."""
+    return is_kicad_10(content) or bool(re.search(r'\(net\s+"', content))
+
+
 @dataclass
 class Pad:
     """Represents a component pad with global board coordinates."""

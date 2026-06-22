@@ -348,6 +348,20 @@ python3 tests/test_tigard_usb_diff.py
 python3 tests/test_tigard_usb_diff.py -v
 ```
 
+### test_net_format_roundtrip.py - KiCad 9/10 net-format preservation
+
+Unit test that the writers keep the output's net-token format consistent with the
+**input** board: a KiCad-9 numeric board gets `(net <id>)` refs and a KiCad-10
+board gets name-only `(net "name")` refs — even when the caller passes a
+`net_id_to_name` map (the fanout tools always do). Guards against the regression
+where fanout injected KiCad-10 name nets into a KiCad-9 board, producing a hybrid
+file KiCad 9 reads as net-less. Covers `board_uses_name_nets` detection (v9 /
+v10 / hybrid) and `add_tracks_and_vias_to_pcb` / `add_tracks_to_pcb` output.
+
+```bash
+python3 tests/test_net_format_roundtrip.py
+```
+
 ### stress/ - Real-World Board Stress Test
 
 Stress-tests the router against open-source boards downloaded from GitHub

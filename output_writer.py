@@ -9,9 +9,8 @@ This module handles writing the routed PCB output file, including:
 - Debug visualization paths
 """
 
-import re
 from typing import List, Dict, Optional
-from kicad_parser import is_kicad_10, KICAD_10_MIN_VERSION
+from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
@@ -94,7 +93,7 @@ def write_routed_output(
     # the swapped pair's stubs on the pre-swap net -> reported disconnected even
     # though the copper is fully connected).
     net_id_to_name = getattr(pcb_data, 'net_id_to_name', {}) if pcb_data else {}
-    kicad_v10 = is_kicad_10(content) or bool(re.search(r'\(net\s+"', content))
+    kicad_v10 = board_uses_name_nets(content)
 
     # Strip original-file segments the dead-end sweep flagged (issue #84). Done
     # before swaps so matching uses the net the input file carries.
