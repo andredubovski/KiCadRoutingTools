@@ -757,12 +757,19 @@ defaults, which produce noise in two ways:
 The script sets the relevant **Constraints / Net Classes** to the per-object
 minima the board uses — copper `min_clearance` (+ Default net-class clearance),
 `min_hole_to_hole`, `min_hole_clearance`, `min_copper_edge_clearance`, and the
-min track / via / drill / annular sizes — and sets the courtyard / solder-mask /
-footprint severities to `ignore`. Size minima default to the smallest such object
-found on the board; clearance defaults to the project's Default net-class
-clearance. Pass the routing parameters (`--clearance`, `--hole-to-hole`,
-`--edge-clearance`, `--track-width`, `--via-size`, `--via-drill` — the same
-values you gave `route.py`) to pin them exactly.
+min track / via / drill / annular sizes — sets the courtyard / solder-mask /
+footprint severities to `ignore`, and demotes `starved_thermal` (thermal-relief
+spoke shortfall) from error to a **warning** (`--keep-thermal` keeps it an error).
+Size minima default to the smallest such object found on the board; clearance
+defaults to the project's Default net-class clearance. Pass the routing
+parameters (`--clearance`, `--hole-to-hole`, `--edge-clearance`, `--track-width`,
+`--via-size`, `--via-drill` — the same values you gave `route.py`) to pin them
+exactly.
+
+If the project has **no** Default net class (a bare/stub project), the script
+seeds a *complete* one before lowering its clearance — KiCad silently ignores a
+sparse net class and falls back to the stock 0.2 mm clearance, so an incomplete
+class would leave the board flagging 0.2 mm clearance everywhere.
 
 **Only loosen, never tighten.** Every constraint is set to `min(current, target)`
 — lowered toward the fab floor but never raised — so the fix can never introduce
@@ -799,6 +806,7 @@ Options:
   --keep-mask           Do not ignore solder_mask_bridge
   --keep-footprint      Do not ignore footprint/library categories
                         (annular_width, lib_footprint_issues, lib_footprint_mismatch)
+  --keep-thermal        Keep starved_thermal an error (default: demote to warning)
   --ignore CAT [CAT...] Additional severity categories to set to "ignore"
   --ignore-warnings     Set EVERY category currently at "warning" severity to
                         "ignore" (hides all warning markers; errors untouched)

@@ -63,6 +63,28 @@ MASK_CATS = ["solder_mask_bridge"]
 # lib_footprint markers on orangecrab). Ignored by default; --keep-footprint
 # restores them.
 FOOTPRINT_CATS = ["annular_width", "lib_footprint_issues", "lib_footprint_mismatch"]
+# Thermal-relief spoke shortfalls (a zone connects a pad with fewer spokes than
+# the zone's min). It is a real-but-minor fab detail, not a routing short, so
+# demote it from error to a WARNING (still visible, not blocking) rather than
+# hiding it. --keep-thermal leaves it an error.
+WARNING_CATS = ["starved_thermal"]
+
+# Severity rank for "only loosen" comparisons (higher = stricter).
+_SEV_RANK = {"error": 2, "warning": 1, "ignore": 0}
+
+# A complete KiCad "Default" net class. KiCad only honours a net class it
+# considers well-formed; a sparse {name, clearance, ...} stub is silently
+# dropped and the board falls back to the stock 0.2 mm default (issue #160
+# v9 demo). Used only when the project has NO Default class (a bare/stub
+# project); a real KiCad-written project already has a complete one we just edit.
+_DEFAULT_NETCLASS = {
+    "bus_width": 12, "clearance": 0.2, "diff_pair_gap": 0.25,
+    "diff_pair_via_gap": 0.25, "diff_pair_width": 0.2, "line_style": 0,
+    "microvia_diameter": 0.3, "microvia_drill": 0.2, "name": "Default",
+    "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 2147483647,
+    "schematic_color": "rgba(0, 0, 0, 0.000)", "track_width": 0.2,
+    "via_diameter": 0.6, "via_drill": 0.3, "wire_width": 6,
+}
 
 
 def find_project(path: str) -> str:
@@ -187,6 +209,8 @@ def main():
     ap.add_argument("--keep-mask", action="store_true", help="Do not ignore solder-mask bridge")
     ap.add_argument("--keep-footprint", action="store_true",
                     help="Do not ignore footprint/library categories (annular_width, lib_footprint_*)")
+    ap.add_argument("--keep-thermal", action="store_true",
+                    help="Keep starved_thermal as an error (default: demote to a warning)")
     ap.add_argument("--ignore", nargs="+", default=[], metavar="CAT",
                     help="Extra severity categories to set to ignore")
     ap.add_argument("--ignore-warnings", action="store_true",
@@ -237,10 +261,15 @@ def main():
               "track_width": targets.get("min_track_width"),
               "via_diameter": targets.get("min_via_diameter"),
               "via_drill": targets.get("min_through_hole_diameter")}
-    classes = proj.setdefault("net_settings", {}).setdefault("classes", [])
+    net_settings = proj.setdefault("net_settings", {})
+    net_settings.setdefault("meta", {"version": 0})  # KiCad needs this to read classes
+    classes = net_settings.setdefault("classes", [])
     default_cls = next((c for c in classes if c.get("name") == "Default"), None)
     if default_cls is None and any(v is not None for v in nc_map.values()):
-        default_cls = {"name": "Default"}
+        # Seed a COMPLETE class (a sparse stub is ignored by KiCad, which then
+        # falls back to the stock 0.2 mm default); the loop below lowers its
+        # fields to the routed floor.
+        default_cls = dict(_DEFAULT_NETCLASS)
         classes.insert(0, default_cls)
         changes.append("net_class[Default]: created (project had none)")
     if default_cls is not None:
@@ -253,7 +282,17 @@ def main():
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
 
-    # Severities -> ignore for non-routing categories.
+    # Severities. Only ever LOOSEN (lower the rank error>warning>ignore): a
+    # category's severity is changed only if the new level is less strict than
+    # the current one (default unset == error), so we never start flagging
+    # something the user had silenced.
+    def loosen_severity(cat, level):
+        cur = sev.get(cat, "error")  # KiCad default severity is "error"
+        if _SEV_RANK.get(level, 2) < _SEV_RANK.get(cur, 2):
+            changes.append(f"severity[{cat}]: {sev.get(cat)} -> {level}")
+            sev[cat] = level
+
+    # -> ignore for non-routing categories.
     to_ignore = list(args.ignore)
     if not args.keep_courtyards:
         to_ignore += COURTYARD_CATS
@@ -264,9 +303,11 @@ def main():
     if args.ignore_warnings:
         to_ignore += [cat for cat, s in sev.items() if s == "warning"]
     for cat in to_ignore:
-        if sev.get(cat) != "ignore":
-            changes.append(f"severity[{cat}]: {sev.get(cat)} -> ignore")
-            sev[cat] = "ignore"
+        loosen_severity(cat, "ignore")
+    # -> warning (demote, still visible) for thermal-relief spoke shortfalls.
+    if not args.keep_thermal:
+        for cat in WARNING_CATS:
+            loosen_severity(cat, "warning")
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

@@ -33,13 +33,16 @@ def main():
         pro = os.path.join(tmp, "board.kicad_pro")
         shutil.copyfile(BOARD, pcb)
         # Stock-stricter project, plus one rule already LOOSER than the routed
-        # floor (min_track_width 0.05) to prove we never tighten.
+        # floor (min_track_width 0.05) to prove we never tighten, and one
+        # severity already at 'ignore' (courtyards_overlap) to prove we never
+        # RAISE a severity back up.
         json.dump({
             "board": {"design_settings": {
                 "rules": {"min_clearance": 0.2, "min_track_width": 0.05,
                           "min_via_diameter": 0.6, "min_hole_clearance": 0.25,
                           "min_through_hole_diameter": 0.3, "min_copper_edge_clearance": 0.5},
-                "rule_severities": {"solder_mask_bridge": "error"}}},
+                "rule_severities": {"solder_mask_bridge": "error",
+                                    "courtyards_overlap": "ignore"}}},
             "net_settings": {"classes": []},
             "meta": {"version": 1},
         }, open(pro, "w"), indent=2)
@@ -71,16 +74,27 @@ def main():
         if abs(rules.get("min_track_width", -1) - 0.05) > 1e-9:
             fails.append(f"min_track_width was raised to {rules.get('min_track_width')} "
                          f"(should stay 0.05 -- only loosen)")
-        # Default net class created and set to the clearance floor.
+        # Default net class created COMPLETE (a sparse stub is ignored by KiCad,
+        # which then falls back to the stock 0.2 mm default -- issue #160 v9), and
+        # set to the clearance floor; net_settings.meta present.
         if default is None:
             fails.append("Default net class was not created")
-        elif abs(default.get("clearance", -1) - 0.15) > 1e-9:
-            fails.append(f"net_class[Default].clearance = {default.get('clearance')}, expected 0.15")
+        else:
+            if abs(default.get("clearance", -1) - 0.15) > 1e-9:
+                fails.append(f"net_class[Default].clearance = {default.get('clearance')}, expected 0.15")
+            for required in ("priority", "microvia_diameter", "diff_pair_gap", "wire_width"):
+                if required not in default:
+                    fails.append(f"created Default class missing '{required}' (KiCad won't honour a sparse class)")
+        if "meta" not in proj["net_settings"]:
+            fails.append("net_settings.meta missing (KiCad needs it to read classes)")
         # Non-routing severities ignored.
         for cat in ("solder_mask_bridge", "lib_footprint_mismatch", "courtyards_overlap",
                     "annular_width"):
             if sev.get(cat) != "ignore":
                 fails.append(f"severity[{cat}] = {sev.get(cat)}, expected ignore")
+        # Thermal-relief shortfall demoted error -> warning (still visible).
+        if sev.get("starved_thermal") != "warning":
+            fails.append(f"severity[starved_thermal] = {sev.get('starved_thermal')}, expected warning")
         # The board file must be byte-for-byte unchanged (version preserved).
         if _md5(pcb) != md5_before:
             fails.append("the .kicad_pcb was modified (must only edit the .kicad_pro)")
