@@ -659,13 +659,13 @@ def build_plane_base_obstacles(
         if seg.layer != plane_layer:
             continue
         seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist(seg_expansion_mm))
+        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
 
     # Block previous routes from other nets
     if previous_routes:
         route_expansion_mm = config.track_width + config.clearance
-        route_expansion_grid = max(1, coord.to_grid_dist(route_expansion_mm))
+        route_expansion_grid = max(1, coord.to_grid_dist_safe(route_expansion_mm))
         for route_path in previous_routes:
             _block_route_as_obstacle(obstacles, route_path, coord, layer_idx, route_expansion_grid)
 
@@ -2549,6 +2549,9 @@ Examples:
     # Board edge clearance
     parser.add_argument("--board-edge-clearance", type=float, default=0.5,
                         help="Clearance from board edge for zones in mm (default: 0.5)")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not adjust the output's .kicad_pro DRC constraints to match the "
+                             "routed clearances/sizes afterwards (issue #160).")
 
     # Same-net pad clearance (avoid via-in-pad)
     parser.add_argument("--same-net-pad-clearance", type=float,
@@ -2730,6 +2733,20 @@ Examples:
         _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # Make the output project's KiCad DRC constraints consistent with the routed
+    # clearances/sizes (issue #160); only edits the .kicad_pro, never the board.
+    if not args.no_fix_drc_settings and not args.dry_run \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")
 
 
 if __name__ == "__main__":

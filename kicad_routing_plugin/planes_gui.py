@@ -854,6 +854,9 @@ class PlanesTab(wx.Panel):
         # The pour doesn't delete ripped tracks via pcbnew; clear any stale set
         # from a prior repair run so the apply step doesn't remove copper.
         self._ripped_net_ids = []
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160).
+        self._plane_drc_config = dict(config)
         from route_planes import create_plane
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from routing_config import GridRouteConfig, GridCoord
@@ -1334,6 +1337,26 @@ class PlanesTab(wx.Panel):
             except Exception as e:
                 print(f"Warning: could not auto-fill new zones ({e}). "
                       "Press B in pcbnew to fill manually.")
+
+        # Make the live board's DRC constraints consistent with the plane routing
+        # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
+        cfg = getattr(self, "_plane_drc_config", None)
+        if cfg and cfg.get('fix_drc_settings', True):
+            try:
+                from fix_kicad_drc_settings import (compute_targets, severity_plan,
+                                                    apply_targets_to_board)
+                targets = compute_targets(
+                    clearance=cfg.get('clearance'),
+                    hole_to_hole=cfg.get('hole_to_hole_clearance'),
+                    edge_clearance=cfg.get('board_edge_clearance'),
+                    track_width=cfg.get('track_width'),
+                    via_diameter=cfg.get('via_size'),
+                    via_drill=cfg.get('via_drill'))
+                if apply_targets_to_board(board, targets, severity_plan()):
+                    board.SetModified()
+                    print("DRC settings: loosened Board Setup floors to the plane routing values")
+            except Exception as e:
+                print(f"(skipped DRC-settings write-back: {e})")
 
         pcbnew.Refresh()
 

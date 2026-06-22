@@ -148,41 +148,274 @@ def scan_board_minima(pcb_path: str):
     return out
 
 
-def compute_constraint_targets(args, proj: dict, minima: dict):
-    """Map KiCad rule keys -> target floor (mm). Routing params win; otherwise
-    fall back to the board's smallest object (sizes) or the project's Default
-    net-class clearance (copper clearance). Keys absent => leave that rule alone.
-    """
-    targets = {}
+# --- Shared logic (front-end-agnostic) ------------------------------------
+# Both the CLI file-edit path and the GUI pcbnew-API path call these, so the two
+# front-ends compute the same DRC floors and differ only in how they apply them
+# (issue #160 CLI/GUI-parity rule).
 
-    clearance = args.clearance if args.clearance is not None else project_copper_clearance(proj)
+def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
+                    edge_clearance=None, track_width=None, via_diameter=None,
+                    via_drill=None, minima=None):
+    """Map KiCad rule keys -> target floor (mm) from the routing parameters.
+    Each value, when given, becomes a floor; sizes fall back to the board's
+    smallest such object (``minima`` from :func:`scan_board_minima`) when the
+    param is None. Keys absent from the result => leave that rule alone."""
+    minima = minima or {}
+    targets = {}
     if clearance is not None:
         targets["min_clearance"] = clearance
-    # Hole/copper clearance: explicit flag, else the copper-clearance floor.
-    hole_clr = args.hole_clearance if args.hole_clearance is not None else clearance
+    # Hole/copper clearance: explicit value, else the copper-clearance floor.
+    hole_clr = hole_clearance if hole_clearance is not None else clearance
     if hole_clr is not None:
         targets["min_hole_clearance"] = hole_clr
-    if args.hole_to_hole is not None:
-        targets["min_hole_to_hole"] = args.hole_to_hole
-    if args.edge_clearance is not None:
-        targets["min_copper_edge_clearance"] = args.edge_clearance
+    if hole_to_hole is not None:
+        targets["min_hole_to_hole"] = hole_to_hole
+    if edge_clearance is not None:
+        targets["min_copper_edge_clearance"] = edge_clearance
 
     # Size minima: routing param if given, else smallest object on the board.
-    if args.track_width is not None:
-        targets["min_track_width"] = args.track_width
-    elif "min_track_width" in minima:
-        targets["min_track_width"] = minima["min_track_width"]
-    if args.via_size is not None:
-        targets["min_via_diameter"] = args.via_size
-    elif "min_via_diameter" in minima:
-        targets["min_via_diameter"] = minima["min_via_diameter"]
-    if args.via_drill is not None:
-        targets["min_through_hole_diameter"] = args.via_drill
-    elif "min_through_hole_diameter" in minima:
-        targets["min_through_hole_diameter"] = minima["min_through_hole_diameter"]
+    tw = track_width if track_width is not None else minima.get("min_track_width")
+    if tw is not None:
+        targets["min_track_width"] = tw
+    vd = via_diameter if via_diameter is not None else minima.get("min_via_diameter")
+    if vd is not None:
+        targets["min_via_diameter"] = vd
+    dr = via_drill if via_drill is not None else minima.get("min_through_hole_diameter")
+    if dr is not None:
+        targets["min_through_hole_diameter"] = dr
     if "min_via_annular_width" in minima:
         targets["min_via_annular_width"] = minima["min_via_annular_width"]
     return targets
+
+
+def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
+                  keep_thermal=False, extra_ignore=()):
+    """Desired severity per DRC category: {category -> 'ignore' | 'warning'}.
+    Applied with only-loosen semantics by the apply_* functions."""
+    plan = {}
+    for cat in extra_ignore:
+        plan[cat] = "ignore"
+    if not keep_courtyards:
+        for cat in COURTYARD_CATS:
+            plan[cat] = "ignore"
+    if not keep_mask:
+        for cat in MASK_CATS:
+            plan[cat] = "ignore"
+    if not keep_footprint:
+        for cat in FOOTPRINT_CATS:
+            plan[cat] = "ignore"
+    if not keep_thermal:
+        for cat in WARNING_CATS:
+            plan[cat] = "warning"
+    return plan
+
+
+def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
+                             ignore_current_warnings=False):
+    """Apply the floors + severity plan to a parsed ``.kicad_pro`` dict, only
+    ever loosening (lowering a constraint / lowering a severity rank), never
+    tightening. Returns a list of human-readable change strings."""
+    EPS = 1e-9
+    ds = proj.setdefault("board", {}).setdefault("design_settings", {})
+    rules = ds.setdefault("rules", {})
+    sev = ds.setdefault("rule_severities", {})
+    changes = []
+
+    for key, target in targets.items():
+        if target is None:
+            continue
+        target = round(float(target), 6)
+        cur = rules.get(key)
+        if cur is None or cur > target + EPS:        # lower only; never raise
+            changes.append(f"rules.{key}: {cur} -> {target} mm")
+            rules[key] = target
+
+    # KiCad enforces copper clearance PER NET CLASS (rules.min_clearance alone
+    # does not relax it), so keep the Default class at the floor too -- creating
+    # a COMPLETE one if the project has none (a sparse class is ignored by KiCad,
+    # which then falls back to the stock 0.2 mm default).
+    nc_map = {"clearance": targets.get("min_clearance"),
+              "track_width": targets.get("min_track_width"),
+              "via_diameter": targets.get("min_via_diameter"),
+              "via_drill": targets.get("min_through_hole_diameter")}
+    net_settings = proj.setdefault("net_settings", {})
+    net_settings.setdefault("meta", {"version": 0})  # KiCad needs this to read classes
+    classes = net_settings.setdefault("classes", [])
+    default_cls = next((c for c in classes if c.get("name") == "Default"), None)
+    if default_cls is None and any(v is not None for v in nc_map.values()):
+        default_cls = dict(_DEFAULT_NETCLASS)
+        classes.insert(0, default_cls)
+        changes.append("net_class[Default]: created (project had none)")
+    if default_cls is not None:
+        for field, target in nc_map.items():
+            if target is None:
+                continue
+            target = round(float(target), 6)
+            cur = default_cls.get(field)
+            if cur is None or cur > target + EPS:
+                changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
+                default_cls[field] = target
+
+    def loosen_severity(cat, level):
+        cur = sev.get(cat, "error")  # KiCad's default severity is "error"
+        if _SEV_RANK.get(level, 2) < _SEV_RANK.get(cur, 2):
+            changes.append(f"severity[{cat}]: {sev.get(cat)} -> {level}")
+            sev[cat] = level
+
+    if ignore_current_warnings:
+        for cat, s in list(sev.items()):
+            if s == "warning":
+                loosen_severity(cat, "ignore")
+    for cat, level in sev_plan.items():
+        loosen_severity(cat, level)
+    return changes
+
+
+def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
+                           hole_clearance=None, hole_to_hole=None, edge_clearance=None,
+                           track_width=None, via_diameter=None, via_drill=None,
+                           keep_courtyards=False, keep_mask=False, keep_footprint=False,
+                           keep_thermal=False, extra_ignore=(), verbose=True):
+    """Make the DRC settings of a freshly written board consistent with the
+    routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
+    ``.kicad_pro`` -- copying the input board's project if the output is a new
+    file, or seeding a minimal complete one if the input has none -- then applies
+    the floors and severity plan. Only edits the ``.kicad_pro`` (never the
+    ``.kicad_pcb``), so the board's KiCad-version format is preserved. Returns the
+    ``.kicad_pro`` path, or None if nothing was done."""
+    import shutil
+    out_pro = find_project(output_pcb)
+    if not os.path.isfile(out_pro):
+        in_pro = find_project(input_pcb) if input_pcb else None
+        if in_pro and os.path.isfile(in_pro) and os.path.abspath(in_pro) != os.path.abspath(out_pro):
+            shutil.copyfile(in_pro, out_pro)              # carry the user's real project over
+        else:
+            with open(out_pro, "w") as f:                 # seed a minimal valid project
+                json.dump({"board": {"design_settings": {"rules": {}, "rule_severities": {}}},
+                           "meta": {"filename": os.path.basename(out_pro), "version": 1},
+                           "net_settings": {"classes": [], "meta": {"version": 0}}},
+                          f, indent=2)
+
+    with open(out_pro) as f:
+        proj = json.load(f)
+    minima = scan_board_minima(output_pcb)
+    clr = clearance if clearance is not None else project_copper_clearance(proj)
+    targets = compute_targets(clearance=clr, hole_clearance=hole_clearance,
+                              hole_to_hole=hole_to_hole, edge_clearance=edge_clearance,
+                              track_width=track_width, via_diameter=via_diameter,
+                              via_drill=via_drill, minima=minima)
+    plan = severity_plan(keep_courtyards=keep_courtyards, keep_mask=keep_mask,
+                         keep_footprint=keep_footprint, keep_thermal=keep_thermal,
+                         extra_ignore=extra_ignore)
+    changes = apply_targets_to_project(proj, targets, plan)
+    if not changes:
+        if verbose:
+            print(f"  DRC settings already consistent ({out_pro})")
+        return out_pro
+    with open(out_pro, "w") as f:
+        json.dump(proj, f, indent=2)
+        f.write("\n")
+    if verbose:
+        print(f"  DRC settings: updated {len(changes)} value(s) in {out_pro} "
+              f"to match the routed floors (close+reopen in KiCad if it is open)")
+    return out_pro
+
+
+def apply_targets_to_board(board, targets: dict, sev_plan: dict):
+    """GUI path: apply the same floors + severity plan to a live pcbnew BOARD
+    via BOARD_DESIGN_SETTINGS (issue #160). Best-effort and defensive -- the
+    pcbnew API field/severity names vary across KiCad versions, so each step is
+    guarded. Returns a list of change strings. Caller should mark the board
+    modified so the user's next save persists the change."""
+    import pcbnew
+    MM = 1e6  # mm -> internal nm
+    EPS = 1.0  # nm
+    bds = board.GetDesignSettings()
+    changes = []
+
+    # rule key -> BOARD_DESIGN_SETTINGS attribute (units: nm). Only loosen.
+    attr = {
+        "min_clearance": "m_MinClearance",
+        "min_track_width": "m_TrackMinWidth",
+        "min_via_diameter": "m_ViasMinSize",
+        "min_through_hole_diameter": "m_MinThroughDrill",
+        "min_hole_to_hole": "m_HoleToHoleMin",
+        "min_copper_edge_clearance": "m_CopperEdgeClearance",
+        "min_hole_clearance": "m_HoleClearance",
+    }
+    for key, target in targets.items():
+        a = attr.get(key)
+        if a is None or target is None or not hasattr(bds, a):
+            continue
+        tgt_nm = round(float(target) * MM)
+        cur = getattr(bds, a)
+        if cur is None or cur > tgt_nm + EPS:
+            try:
+                setattr(bds, a, tgt_nm)
+                changes.append(f"{a}: {cur/MM:.4g} -> {target:.4g} mm")
+            except Exception:
+                pass
+
+    # Default net class clearance/track/via/drill (governs the clearance check).
+    nc_map = {"SetClearance": targets.get("min_clearance"),
+              "SetTrackWidth": targets.get("min_track_width"),
+              "SetViaDiameter": targets.get("min_via_diameter"),
+              "SetViaDrill": targets.get("min_through_hole_diameter")}
+    default_nc = None
+    for getter in ("GetDefaultNetclass",):           # KiCad 8+: NET_SETTINGS
+        ns = getattr(bds, "m_NetSettings", None)
+        if ns is not None and hasattr(ns, getter):
+            try:
+                default_nc = getattr(ns, getter)()
+            except Exception:
+                default_nc = None
+            break
+    if default_nc is None and hasattr(bds, "GetNetClasses"):  # older KiCad
+        try:
+            default_nc = bds.GetNetClasses().GetDefault()
+        except Exception:
+            default_nc = None
+    if default_nc is not None:
+        for setter, target in nc_map.items():
+            if target is None or not hasattr(default_nc, setter):
+                continue
+            try:
+                getattr(default_nc, setter)(round(float(target) * MM))
+                changes.append(f"net_class[Default].{setter} -> {target:.4g} mm")
+            except Exception:
+                pass
+
+    # Severities. Map our category strings to pcbnew DRCE_* codes (best-effort).
+    sev_const = {"ignore": getattr(pcbnew, "RPT_SEVERITY_IGNORE", 0),
+                 "warning": getattr(pcbnew, "RPT_SEVERITY_WARNING", 2),
+                 "error": getattr(pcbnew, "RPT_SEVERITY_ERROR", 3)}
+    rank = {sev_const["ignore"]: 0, sev_const["warning"]: 1, sev_const["error"]: 2}
+    code = {
+        "courtyards_overlap": "DRCE_OVERLAPPING_FOOTPRINTS",
+        "malformed_courtyard": "DRCE_MALFORMED_COURTYARD",
+        "npth_inside_courtyard": "DRCE_NPTH_IN_COURTYARD",
+        "pth_inside_courtyard": "DRCE_PTH_IN_COURTYARD",
+        "solder_mask_bridge": "DRCE_SOLDERMASK_BRIDGE",
+        "annular_width": "DRCE_ANNULAR_WIDTH",
+        "lib_footprint_issues": "DRCE_LIBRARY_FOOTPRINT_ISSUES",
+        "lib_footprint_mismatch": "DRCE_LIBRARY_FOOTPRINT_MISMATCH",
+        "starved_thermal": "DRCE_STARVED_THERMAL",
+    }
+    if hasattr(bds, "SetSeverity") and hasattr(bds, "GetSeverity"):
+        for cat, level in sev_plan.items():
+            cname = code.get(cat)
+            drce = getattr(pcbnew, cname, None) if cname else None
+            if drce is None:
+                continue
+            tgt = sev_const[level]
+            try:
+                cur = bds.GetSeverity(drce)
+                if rank.get(tgt, 2) < rank.get(cur, 2):   # only loosen
+                    bds.SetSeverity(drce, tgt)
+                    changes.append(f"severity[{cat}] -> {level}")
+            except Exception:
+                pass
+    return changes
 
 
 def main():
@@ -227,87 +460,22 @@ def main():
     with open(pro) as f:
         proj = json.load(f)
 
-    ds = proj.setdefault("board", {}).setdefault("design_settings", {})
-    rules = ds.setdefault("rules", {})
-    sev = ds.setdefault("rule_severities", {})
-
-    # Compute target floors and apply them with "only loosen" semantics: a
-    # constraint is lowered toward the routed floor but never raised, so we can
-    # never introduce a new violation.
+    # Compute the floors (routing params; sizes fall back to the board minima,
+    # clearance to the project's Default net-class clearance) and the severity
+    # plan, then apply with only-loosen semantics via the shared logic.
     pcb_path = args.board if args.board.endswith(".kicad_pcb") else os.path.splitext(args.board)[0] + ".kicad_pcb"
     minima = scan_board_minima(pcb_path)
-    targets = compute_constraint_targets(args, proj, minima)
-
-    changes = []
-    EPS = 1e-9
-    for key, target in targets.items():
-        if target is None:
-            continue
-        target = round(float(target), 6)
-        cur = rules.get(key)
-        # Lower to the target only if the current floor is stricter (higher) or
-        # unset; never raise.
-        if cur is None or cur > target + EPS:
-            changes.append(f"rules.{key}: {cur} -> {target} mm")
-            rules[key] = target
-
-    # Keep the Default net class consistent with the copper-clearance floor (and
-    # the placed track/via/drill), again only loosening. KiCad enforces the COPPER
-    # CLEARANCE per net class (the rules.min_clearance floor alone does not relax
-    # it), so leaving the Default class stricter than the board re-introduces the
-    # same clearance noise the rules fix removes. Create the Default class if the
-    # project has none (a stock template), so the floor actually takes effect.
-    nc_map = {"clearance": targets.get("min_clearance"),
-              "track_width": targets.get("min_track_width"),
-              "via_diameter": targets.get("min_via_diameter"),
-              "via_drill": targets.get("min_through_hole_diameter")}
-    net_settings = proj.setdefault("net_settings", {})
-    net_settings.setdefault("meta", {"version": 0})  # KiCad needs this to read classes
-    classes = net_settings.setdefault("classes", [])
-    default_cls = next((c for c in classes if c.get("name") == "Default"), None)
-    if default_cls is None and any(v is not None for v in nc_map.values()):
-        # Seed a COMPLETE class (a sparse stub is ignored by KiCad, which then
-        # falls back to the stock 0.2 mm default); the loop below lowers its
-        # fields to the routed floor.
-        default_cls = dict(_DEFAULT_NETCLASS)
-        classes.insert(0, default_cls)
-        changes.append("net_class[Default]: created (project had none)")
-    if default_cls is not None:
-        for field, target in nc_map.items():
-            if target is None:
-                continue
-            target = round(float(target), 6)
-            cur = default_cls.get(field)
-            if cur is None or cur > target + EPS:
-                changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
-                default_cls[field] = target
-
-    # Severities. Only ever LOOSEN (lower the rank error>warning>ignore): a
-    # category's severity is changed only if the new level is less strict than
-    # the current one (default unset == error), so we never start flagging
-    # something the user had silenced.
-    def loosen_severity(cat, level):
-        cur = sev.get(cat, "error")  # KiCad default severity is "error"
-        if _SEV_RANK.get(level, 2) < _SEV_RANK.get(cur, 2):
-            changes.append(f"severity[{cat}]: {sev.get(cat)} -> {level}")
-            sev[cat] = level
-
-    # -> ignore for non-routing categories.
-    to_ignore = list(args.ignore)
-    if not args.keep_courtyards:
-        to_ignore += COURTYARD_CATS
-    if not args.keep_mask:
-        to_ignore += MASK_CATS
-    if not args.keep_footprint:
-        to_ignore += FOOTPRINT_CATS
-    if args.ignore_warnings:
-        to_ignore += [cat for cat, s in sev.items() if s == "warning"]
-    for cat in to_ignore:
-        loosen_severity(cat, "ignore")
-    # -> warning (demote, still visible) for thermal-relief spoke shortfalls.
-    if not args.keep_thermal:
-        for cat in WARNING_CATS:
-            loosen_severity(cat, "warning")
+    clearance = args.clearance if args.clearance is not None else project_copper_clearance(proj)
+    targets = compute_targets(
+        clearance=clearance, hole_clearance=args.hole_clearance,
+        hole_to_hole=args.hole_to_hole, edge_clearance=args.edge_clearance,
+        track_width=args.track_width, via_diameter=args.via_size,
+        via_drill=args.via_drill, minima=minima)
+    plan = severity_plan(keep_courtyards=args.keep_courtyards, keep_mask=args.keep_mask,
+                         keep_footprint=args.keep_footprint, keep_thermal=args.keep_thermal,
+                         extra_ignore=args.ignore)
+    changes = apply_targets_to_project(proj, targets, plan,
+                                       ignore_current_warnings=args.ignore_warnings)
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

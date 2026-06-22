@@ -1274,6 +1274,11 @@ For differential pair routing, use route_diff.py:
                         help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE})")
     parser.add_argument("--board-edge-clearance", type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help=f"Clearance from board edge in mm (default: {defaults.BOARD_EDGE_CLEARANCE} = use track clearance)")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not adjust the output's .kicad_pro DRC constraints to match the "
+                             "routed clearances/sizes afterwards (issue #160). By default the "
+                             "written project's Board Setup floors are loosened to the routed "
+                             "values so KiCad's DRC only flags genuine problems.")
 
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
@@ -1481,3 +1486,19 @@ For differential pair routing, use route_diff.py:
                 layer_costs=args.layer_costs,
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
+
+    # Make the written project's KiCad DRC constraints consistent with the
+    # clearances/sizes we just routed to, so a manual DRC only flags genuine
+    # problems instead of stock-default noise (issue #160). Only edits the
+    # .kicad_pro, never the .kicad_pcb, so the board's KiCad version is preserved.
+    if not args.no_fix_drc_settings and not args.skip_routing \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")

@@ -2906,6 +2906,32 @@ class RoutingDialog(wx.Dialog):
         # Build connectivity to register new items properly
         board.BuildConnectivity()
 
+        # Make the live board's DRC constraints consistent with what we just
+        # routed to (issue #160), the GUI counterpart of the CLI's
+        # fix_kicad_drc_settings: loosen the Board Setup floors + Default net
+        # class + non-routing severities to the routed values via the pcbnew API,
+        # so the user's manual DRC only flags genuine problems. Best-effort and
+        # guarded -- never block applying the routes. The user's next save
+        # persists it (mark the board modified).
+        if successful > 0 and config.get('fix_drc_settings', True):
+            try:
+                from fix_kicad_drc_settings import (compute_targets, severity_plan,
+                                                    apply_targets_to_board)
+                targets = compute_targets(
+                    clearance=config.get('clearance'),
+                    hole_to_hole=config.get('hole_to_hole_clearance'),
+                    edge_clearance=config.get('board_edge_clearance'),
+                    track_width=config.get('track_width'),
+                    via_diameter=config.get('via_size'),
+                    via_drill=config.get('via_drill'))
+                drc_changes = apply_targets_to_board(board, targets, severity_plan())
+                if drc_changes:
+                    board.SetModified()
+                    print(f"DRC settings: loosened {len(drc_changes)} Board Setup "
+                          f"value(s) to the routed floors (save to persist)")
+            except Exception as e:
+                print(f"(skipped DRC-settings write-back: {e})")
+
         # Refresh the view
         pcbnew.Refresh()
 

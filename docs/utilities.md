@@ -818,6 +818,20 @@ KiCad has one). If it is missing, open the board in KiCad once to generate it,
 then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
 `.kicad_pro` path.
 
+### Runs automatically after routing
+
+You normally don't run this by hand: **`route.py` and `route_planes.py` invoke it
+as their final step** (issue #160), pinning the floors to the clearances/sizes
+they just routed with, so the written project is DRC-consistent by default. If
+the output is a new file with no project yet, they copy the input board's
+`.kicad_pro` (or seed a complete one when the input has none). Pass
+`--no-fix-drc-settings` to skip it. The **GUI plugin** does the equivalent on the
+live board via the pcbnew API (`BOARD_DESIGN_SETTINGS` + the Default net class +
+severities) after routing, and marks the board modified so your next save keeps
+it. Both front-ends share the same target-computing logic
+(`compute_targets` / `severity_plan` in `fix_kicad_drc_settings.py`) and differ
+only in how they apply it (`.kicad_pro` file vs. pcbnew API).
+
 ### Examples
 
 ```bash
