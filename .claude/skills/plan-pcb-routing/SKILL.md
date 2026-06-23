@@ -847,13 +847,45 @@ leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
-- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC)
-- More fanout options available
-- Use `--layer-costs` to prefer certain layers:
-  ```bash
-  --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 5.0 5.0 1.0
-  ```
-  Higher cost = layer is avoided (used only when necessary)
+- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). **Roughly half
+  the copper layers should be planes** — on a 4-layer board that's In1+In2 as
+  planes, F.Cu+B.Cu for signals.
+- More fanout options available.
+
+**Derive `--layer-costs` from the plane plan — penalize the plane-reserved
+layers (issue #185).** The 4-layer default is **all 1.0**, so the router has no
+idea which inner layers are about to become planes and freely routes signals
+across them. Once you've decided the plane→layer map (via
+`/recommend-plane-mappings` or the `route_planes` call you're about to make),
+pass `--layer-costs` to the **signal** `route.py` step (and the later reconnect
+passes) that makes each plane-reserved layer expensive, so signals prefer the
+signal layers and leave the inner layers clean for the pour:
+```bash
+# GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
+route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
+```
+- **~3× is the sweet spot.** Any value ≥2× keeps signals off the planes and
+  doesn't hurt completion; ≥5× just adds vias/copper for negligible further gain.
+  Order matches `--layers`; keep the real signal layers (F.Cu/B.Cu) at 1.0.
+- **Why it matters — it's a cascade, not just tidiness.** Signals crossing a
+  plane layer fragment the pour into islands; `route_disconnected_planes` then
+  carpets the layer with island-stitching tracks. Keep signals off the plane
+  layers and the planes stay whole, so the repair has almost nothing to stitch.
+- **Measured on castor_pollux** (4-layer, In1=GND, In2=+3.3V/+3.3VA), full chain,
+  default `1.0 1.0 1.0 1.0` vs smart `1.0 3.0 3.0 1.0`, both fully connected and
+  DRC-clean:
+
+  | | default | smart 3× |
+  |---|---|---|
+  | total segments | 4857 | **2966 (−39%)** |
+  | signal copper on plane layers | 307 mm | **44 mm (−86%)** |
+  | vias | 309 | 318 (+9) |
+
+  The 39% segment drop is the carpet disappearing because the planes stayed whole.
+
+This is the 4-layer analogue of the 2-layer rebalance in best-practice #8 / #178:
+in both cases derive the costs from how the layers will actually be used, rather
+than taking the blunt default.
 
 ### Differential Pairs Present
 
@@ -1081,7 +1113,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
 7. **Stub layer switching is on by default** - The router automatically moves stubs to eliminate vias when beneficial; disable with `--no-stub-layer-swap`
-8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all. On **dense** 2-layer boards this 3× back-side penalty can over-bias routing onto F.Cu (top channel exhausted, B.Cu empty, excess vias, stranded pads); if completion is low or the layer balance is badly skewed, **retry with more balanced `--layer-costs` (e.g. `1.0 1.5`, down toward `1.0 1.0`)** — see "Dense 2-layer boards: rebalance layer costs" under Diagnose and Retry (issue #178)
+8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all. On **dense** 2-layer boards this 3× back-side penalty can over-bias routing onto F.Cu (top channel exhausted, B.Cu empty, excess vias, stranded pads); if completion is low or the layer balance is badly skewed, **retry with more balanced `--layer-costs` (e.g. `1.0 1.5`, down toward `1.0 1.0`)** — see "Dense 2-layer boards: rebalance layer costs" under Diagnose and Retry (issue #178). On **4+ layer** boards the all-1.0 default is plane-blind: **derive `--layer-costs` from the plane→layer map and penalize the plane-reserved inner layers (~3×)** so signals stay on F.Cu/B.Cu and the planes stay whole — see "Multi-Layer Boards (4+ layers)" (issue #185).
 9. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 10. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
