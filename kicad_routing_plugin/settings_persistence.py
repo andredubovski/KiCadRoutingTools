@@ -163,6 +163,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_bga_underpad': dialog.fanout_tab.bga_options.underpad_escape.GetValue(),
+        'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_qfn_extension': dialog.fanout_tab.qfn_options.extension.GetValue(),
         'fanout_qfn_underpad': dialog.fanout_tab.qfn_options.underpad_escape.GetValue(),
         'fanout_qfn_allow_via_in_pad': dialog.fanout_tab.qfn_options.allow_via_in_pad.GetValue(),
@@ -504,6 +505,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
     if 'fanout_bga_underpad' in settings:
         dialog.fanout_tab.bga_options.underpad_escape.SetValue(settings['fanout_bga_underpad'])
+    if 'fanout_bga_optimize_caps' in settings:
+        dialog.fanout_tab.bga_options.optimize_caps.SetValue(settings['fanout_bga_optimize_caps'])
     if 'fanout_qfn_extension' in settings:
         dialog.fanout_tab.qfn_options.extension.SetValue(settings['fanout_qfn_extension'])
     if 'fanout_qfn_underpad' in settings:

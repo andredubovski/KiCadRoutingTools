@@ -796,6 +796,18 @@ class BGAOptionsPanel(wx.Panel):
             "Use a small via/track for dense pitch (e.g. via 0.35, track 0.12).")
         options_sizer.Add(self.underpad_escape, 0, wx.LEFT | wx.BOTTOM, 5)
 
+        self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
+        self.optimize_caps.SetValue(False)
+        self.optimize_caps.SetToolTip(
+            "After fanout, nudge decoupling caps near the BGA so their pads "
+            "clear every foreign-net fanout via (and any foreign track on the "
+            "cap's side), and pull each pad toward the nearest same-net ball so "
+            "a power/GND via dropped there later also lands on the cap (#130). "
+            "Caps move as little as possible, never overlap each other, and a "
+            "cap that can't clear is reported. Uses the Basic-tab clearance/via "
+            "settings. Off by default.")
+        options_sizer.Add(self.optimize_caps, 0, wx.LEFT | wx.BOTTOM, 5)
+
         main_sizer.Add(options_sizer, 0, wx.EXPAND)
 
         self.SetSizer(main_sizer)
@@ -820,6 +832,7 @@ class BGAOptionsPanel(wx.Panel):
             'check_for_previous': self.check_previous.GetValue(),
             'no_inner_top_layer': self.no_inner_top.GetValue(),
             'escape_method': 'underpad' if self.underpad_escape.GetValue() else 'channel',
+            'optimize_caps': self.optimize_caps.GetValue(),
         }
 
 
@@ -1142,7 +1155,9 @@ class FanoutTab(wx.Panel):
                     'track_width': track_width, 'clearance': clearance,
                     'via_size': via_size, 'via_drill': via_drill,
                     'exit_margin': config.get('exit_margin'),
-                })
+                    'grid_step': shared.get('grid_step', defaults.GRID_STEP),
+                },
+                optimize_caps=config.get('optimize_caps', False))
 
         except Exception as e:
             import traceback
@@ -1219,7 +1234,8 @@ class FanoutTab(wx.Panel):
             self.progress_bar.SetValue(0)
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
-                              fanout_config=None, fanout_kind='bga'):
+                              fanout_config=None, fanout_kind='bga',
+                              optimize_caps=False):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -1289,6 +1305,13 @@ class FanoutTab(wx.Panel):
         # Build connectivity to register new items properly
         board.BuildConnectivity()
 
+        # Optionally tidy decoupling caps around the fresh fanout vias (#130)
+        cap_summary = None
+        if optimize_caps and fanout_kind == 'bga':
+            cap_summary = self._optimize_decoupling_caps(
+                board, pcbnew, fanout_config or {})
+            board.BuildConnectivity()
+
         # Refresh the view
         pcbnew.Refresh()
 
@@ -1301,6 +1324,8 @@ class FanoutTab(wx.Panel):
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} tracks\n"
         msg += f"  {vias_added} vias\n"
+        if cap_summary:
+            msg += "\n" + cap_summary + "\n"
         if failed_nets:
             if fanout_kind == 'qfn':
                 msg += f"\nNets whose stubs are too close to neighbours ({len(failed_nets)}):\n"
@@ -1336,3 +1361,48 @@ class FanoutTab(wx.Panel):
         # Callback
         if self.on_fanout_complete:
             self.on_fanout_complete()
+
+    def _optimize_decoupling_caps(self, board, pcbnew, fanout_config):
+        """Run the fanout-clearance cap repair on the live board (#130).
+
+        Rebuilds PCBData from the just-fanned board (so the new vias are
+        present), runs the shared engine, and applies the resulting footprint
+        moves directly to pcbnew. Courtyards/locked refs come from the saved
+        file (position-independent, unchanged by fanout). Returns a one-line
+        summary for the completion dialog, or None on no-op/error.
+        """
+        try:
+            from kicad_parser import build_pcb_data_from_board
+            from placement.fanout_clearance import repair_fanout_clearance
+
+            self.status_text.SetLabel("Optimizing decoupling cap placement...")
+            wx.Yield()
+
+            pcb_data = build_pcb_data_from_board(board)
+            result = repair_fanout_clearance(
+                pcb_data,
+                pcb_file=self.board_filename,
+                clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
+                grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
+                default_via_size=fanout_config.get('via_size', defaults.BGA_VIA_SIZE),
+            )
+
+            for p in result.get('placements', []):
+                fp = board.FindFootprintByReference(p['reference'])
+                if fp is None:
+                    continue
+                fp.SetOrientationDegrees(p['new_rotation'])
+                fp.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(p['new_x']), pcbnew.FromMM(p['new_y'])))
+
+            moved = len(result.get('placements', []))
+            unresolved = result.get('unresolved', [])
+            summary = f"Decoupling caps optimized: {moved} moved"
+            if unresolved:
+                summary += (f"; {len(unresolved)} could not clear a foreign via "
+                            f"(manual: {', '.join(sorted(unresolved))})")
+            return summary
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return f"Cap optimization skipped (error: {e})"
