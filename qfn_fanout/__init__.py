@@ -655,6 +655,58 @@ def main():
             shutil.copyfile(args.pcb, args.output)
             print(f"Wrote board through to {args.output} (unchanged)")
 
+    # Structured summary + post-fanout DRC so downstream tooling (plan-pcb-routing
+    # skill, stress harness) can detect when the escape left sub-clearance grazes
+    # behind even though every pad escaped -- e.g. the 45-degree escape stubs of two
+    # adjacent pads of a 0.4mm-pitch diff pair clipping at the wrist (issue #179).
+    # The planner uses drc_grazes to retry the fanout with a thinner --width (and,
+    # for the underpad method, a smaller via) toward the fab floor until it's clean.
+    # Mirrors bga_fanout (#130/#122). Best-effort: a DRC hiccup must never fail the
+    # fanout. drc_grazes is graded at --clearance.
+    import json as _json
+    escaped_net_ids = {t['net_id'] for t in tracks if t.get('net_id') is not None}
+    unescaped = sorted(set(_failed_nets))
+    escaped = len(escaped_net_ids)
+    requested = escaped + len(unescaped)
+    drc_grazes = {}
+    out_path = getattr(args, 'output', None)
+    if out_path:
+        try:
+            import io as _io, contextlib as _cl
+            from check_drc import run_drc as _run_drc
+            with _cl.redirect_stdout(_io.StringIO()):  # keep JSON_SUMMARY output clean
+                _viols = _run_drc(out_path, clearance=args.clearance,
+                                  quiet=True, max_print=0, check_sizes=False)
+            _by = {}
+            for _v in _viols:
+                _by[_v['type']] = _by.get(_v['type'], 0) + 1
+            drc_grazes = {
+                'pad_via': _by.get('pad-via', 0),
+                'via_segment': _by.get('via-segment', 0),
+                'pad_segment': _by.get('pad-segment', 0),
+                'segment_segment': _by.get('segment-segment', 0),
+                'total': len(_viols),
+            }
+        except Exception as _e:
+            drc_grazes = {'error': str(_e)}
+    summary = {
+        'component': args.component,
+        'requested': requested,
+        'escaped': escaped,
+        'failed': len(unescaped),
+        'unescaped_nets': unescaped,
+        'clearance': args.clearance,
+        'track_width': args.width,
+        'escape_method': args.escape_method,
+        'via_size': args.via_size,
+        'via_drill': args.via_drill,
+        'layer': layer,
+        # grazes graded at --clearance; 'total' counts ALL DRC violations on the
+        # output, the segment_segment/via_*/pad_* keys are the fanout-relevant classes.
+        'drc_grazes': drc_grazes,
+    }
+    print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+
     return 0
 
 

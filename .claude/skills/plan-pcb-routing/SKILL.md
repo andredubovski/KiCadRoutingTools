@@ -311,8 +311,8 @@ Use the printed flags as-is:
   at `--clearance 0.2` (the ~0.45 mm gap between 0.35 mm balls can't fit a 0.2 mm
   track at 0.2 mm clearance) — the same board escapes **all** balls at the 0.1 mm
   floor. So don't gate on pitch: gate on whether balls actually dropped.
-  `bga_fanout.py` ends with a `JSON_SUMMARY: {...}` line giving
-  `requested`/`escaped`/`failed`/`unescaped_nets`. **After every fanout, parse it;
+  `bga_fanout.py` and `qfn_fanout.py` both end with a `JSON_SUMMARY: {...}` line
+  giving `requested`/`escaped`/`failed`/`unescaped_nets`. **After every fanout, parse it;
   if `failed > 0` (escaped < requested), re-run the fanout with `--clearance` at
   the manufacturing floor** (never below it — the floor is the rule the human
   board passes DRC against, so tightening board-wide is manufacturable and needs
@@ -323,16 +323,26 @@ Use the printed flags as-is:
 - **Also check `drc_grazes` (even when `failed == 0`).** The summary's
   `drc_grazes` (graded at the fanout `--clearance`) reports sub-clearance grazes the
   escape left in the output: `via_segment` / `pad_via` are the #130 classes (an
-  escape via too close to a foreign track or pad), `total` is all DRC violations.
-  A *successful* fanout (every ball escaped) can still leave many of these — they're
-  not caught by `failed`. **If `drc_grazes.via_segment` or `.pad_via` > 0 and there
-  is headroom above the fab floor, re-run the fanout with a smaller `--via-size` /
-  `--via-drill` (and/or a thinner `--track-width`), stepping toward — never below —
-  the floor.** These grazes are typically a uniform ~1-grid-cell shortfall, so even
-  one size step down (e.g. via 0.5→0.45) usually clears them all; shrinking the via
-  also relieves escape congestion. (For *via-over-pad* grazes where a decoupling
-  cap/resistor sits on a via, `place_fanout_clearance.py` (Step 1b) is the better
-  fix — it moves the part; smaller vias help the *via-over-track* class.)
+  escape via too close to a foreign track or pad), `segment_segment` is the #179
+  class (two escape **stubs** grazing — typically the 45° fans of two adjacent pads
+  of a tight-pitch diff pair, e.g. 0.4 mm-pitch QFN, clipping at the wrist),
+  `total` is all DRC violations. A *successful* fanout (every ball/pad escaped) can
+  still leave many of these — they're not caught by `failed`. **If any
+  `drc_grazes` class > 0 and there is headroom above the fab floor, re-run the
+  fanout stepping toward — never below — the floor:**
+  - `via_segment` / `pad_via` (#130): smaller **`--via-size` / `--via-drill`**
+    (and/or a thinner `--track-width`).
+  - `segment_segment` (#179): thinner **`--width`** — the escape stubs carry the
+    track width, so narrowing them widens the gap between the two converging
+    diagonals. Step down toward the fab-floor track (e.g. 0.15 → 0.13 → 0.10 mm)
+    until `segment_segment == 0`; all pads still escape (`failed` stays 0).
+    (Measured on hackrf_one U17: 3 grazes at `--width 0.15`/`0.13`, 0 at `0.10`.)
+
+  These grazes are typically a uniform ~1-grid-cell shortfall, so even one size step
+  down usually clears them all; shrinking the via also relieves escape congestion.
+  (For *via-over-pad* grazes where a decoupling cap/resistor sits on a via,
+  `place_fanout_clearance.py` (Step 1b) is the better fix — it moves the part;
+  smaller vias/thinner tracks help the via-over-track and stub-over-stub classes.)
 - **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
   via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
   smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch
@@ -887,6 +897,13 @@ fine-pitch edge where the surface fan has no room, add `--escape-method underpad
 (drop a through-via past each pad) and, if a boxed-in leg still drops,
 `--allow-via-in-pad` so the via can sit on its own pad and stagger inward — see
 "Crowded fine-pitch QFN edge" above.
+
+Like `bga_fanout.py`, `qfn_fanout.py` ends with a `JSON_SUMMARY` carrying
+`drc_grazes` (graded at `--clearance`). **Parse it after the fanout:** if
+`drc_grazes.segment_segment > 0` the 45° escape stubs of two adjacent tight-pitch
+pads (often a diff pair) are grazing at the wrist — re-run with a thinner
+`--width` toward the fab floor until it's 0 (issue #179; see the `drc_grazes`
+bullet under Step 1). All pads keep escaping (`failed` stays 0).
 
 ### Power Net Width Options
 
