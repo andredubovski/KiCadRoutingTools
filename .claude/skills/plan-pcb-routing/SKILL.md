@@ -1064,7 +1064,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
 7. **Stub layer switching is on by default** - The router automatically moves stubs to eliminate vias when beneficial; disable with `--no-stub-layer-swap`
-8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all
+8. **Default layer costs** - 2-layer boards default to F.Cu=1.0, B.Cu=3.0 to prefer top layer; 4+ layer boards use 1.0 for all. On **dense** 2-layer boards this 3× back-side penalty can over-bias routing onto F.Cu (top channel exhausted, B.Cu empty, excess vias, stranded pads); if completion is low or the layer balance is badly skewed, **retry with more balanced `--layer-costs` (e.g. `1.0 1.5`, down toward `1.0 1.0`)** — see "Dense 2-layer boards: rebalance layer costs" under Diagnose and Retry (issue #178)
 9. **Schematic sync is disabled by default** - After routing with swaps, offer to re-run with `--schematic-dir` if the user wants to update their schematic
 10. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
@@ -1143,6 +1143,7 @@ After running routing commands:
 | "Re-route FAILED: no path found" | Ripped net couldn't find new path | Increase `--max-iterations` |
 | Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher; shrink geometry toward the fab floor (see below) |
 | Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the failed nets at smaller track/via/clearance down to the fab floor (see below) |
+| 2-layer board: low completion, via count far above a hand layout, or copper badly skewed to F.Cu while B.Cu sits empty | Default B.Cu cost (3.0×) over-penalizes the back layer | Retry with balanced `--layer-costs 1.0 1.5` (down toward `1.0 1.0`) — see "Dense 2-layer boards: rebalance layer costs" below |
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
 
 ```bash
@@ -1159,6 +1160,55 @@ python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
    - `--max-ripup 10` (default 3) - More rip-up attempts to resolve conflicts
    - `--max-iterations 1000000` (default 200000) - 5x more search iterations
    - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs (optional, for aesthetics)
+
+#### Dense 2-layer boards: rebalance layer costs (issue #178)
+
+On 2-layer boards the router defaults to per-layer costs **F.Cu=1.0, B.Cu=3.0**
+(best practice #8) to keep most signal copper on top. But with a GND/power plane
+already filling B.Cu, that 3× back-side penalty can over-bias routing onto F.Cu:
+the top channel fills up while B.Cu sits nearly empty, the router takes long F.Cu
+detours that then need a via to reach a B.Cu pad, and on congested boards the
+exhausted F.Cu channel strands pads that B.Cu could have carried. This is the
+dominant route-quality gap on tight 2-layer keyboard/peripheral boards.
+
+**When to suspect it** (check the route `JSON_SUMMARY` / `comparison` block, or
+measure per-layer copper length and via count against a reference):
+- Strong F.Cu skew — e.g. >80% of signal copper on F.Cu while B.Cu is sparse.
+- Via count far above a hand layout (the F.Cu-detour-then-via pattern).
+- Low completion with failed pads clustered where F.Cu is full but B.Cu is free.
+
+**Retry with more balanced layer costs** so the router crosses to B.Cu for short
+diagonal runs instead of detouring on F.Cu (order matches `--layers`: F.Cu first,
+B.Cu second):
+```bash
+python3 -X utf8 route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
+    --nets "*" "!GND" "!VCC" \
+    --track-width 0.127 --clearance 0.1 \
+    --layer-costs 1.0 1.5 \
+    --no-bga-zone --max-ripup 10 --max-iterations 1000000 \
+    2>&1 | tee /tmp/route_balanced.txt
+```
+Start around **`1.0 1.5`** (down from the `1.0 3.0` default); if F.Cu is still
+saturated, step to **`1.0 1.2`** or fully balanced **`1.0 1.0`** (fine when a
+plane fills B.Cu — signals carve the pour and it reflows around them). This is
+**complementary to**, not a replacement for, routing at the fab floor (below): a
+balanced layer that's still too fat won't fit the channel either, so keep
+`--track-width` thin. Re-route the **whole** signal step, not just the failures (a
+victim is blocked by the successful F.Cu tracks already in its channel). Then
+compare completion, via count, and F.Cu:B.Cu balance, and keep whichever connects
+more pads with fewer vias.
+
+Measured at `--track-width 0.127` (B/F = B.Cu:F.Cu copper-length ratio; both
+boards stay 100% connected at every setting — the win is via count and balance):
+
+| board | default `1.0 3.0` | `1.0 1.5` |
+|-------|-------------------|-----------|
+| urchin  | B/F 0.17, 177 vias | **B/F 1.01, 98 vias** |
+| piantor | B/F 0.19, 102 vias | **B/F 1.85, 59 vias** |
+
+`1.0 1.5` roughly **halves the via count** and pulls the layer balance from a
+~6:1 F.Cu skew to near parity (the human urchin layout sits around B/F 0.89).
+`1.0 1.0` lands in the same neighbourhood — pick the one with fewer vias.
 
 #### Route signals at the FAB floor by default (thin is faster AND more complete)
 

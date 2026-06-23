@@ -632,6 +632,38 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
     return False, 0.0, ""
 
 
+def check_track_width(seg: Segment, min_track_width: float,
+                      size_margin: float = 0.0) -> Tuple[bool, float]:
+    """Check if a segment is thinner than the minimum manufacturable track width.
+
+    Args:
+        seg: Segment to check
+        min_track_width: Minimum allowed track width in mm
+        size_margin: Absolute tolerance in mm; widths within this of the floor pass
+
+    Returns:
+        (is_too_thin, shortfall_mm)
+    """
+    shortfall = min_track_width - seg.width
+    if shortfall > size_margin:
+        return True, shortfall
+    return False, 0.0
+
+
+def check_via_size(via: Via, min_via_diameter: float, min_via_drill: float,
+                   size_margin: float = 0.0) -> Tuple[bool, bool, float, float]:
+    """Check if a via's outer diameter or drill is below the fab floor.
+
+    Returns:
+        (diameter_too_small, drill_too_small, dia_shortfall_mm, drill_shortfall_mm)
+    """
+    dia_short = min_via_diameter - via.size
+    drill_short = min_via_drill - via.drill
+    dia_bad = dia_short > size_margin
+    drill_bad = drill_short > size_margin
+    return dia_bad, drill_bad, dia_short, drill_short
+
+
 def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, layer: str = "User.7"):
     """Write debug lines to PCB file showing violation locations.
 
@@ -687,7 +719,11 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
             hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0,
-            clearance_margin: float = 0.05, max_print: int = 20):
+            clearance_margin: float = 0.05, max_print: int = 20,
+            min_track_width: Optional[float] = None,
+            min_via_diameter: Optional[float] = None,
+            min_via_drill: Optional[float] = None,
+            check_sizes: bool = True, size_margin: float = 0.0):
     """Run DRC checks on the PCB file.
 
     Args:
@@ -699,6 +735,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         quiet: If True, only print a summary line unless there are violations
         hole_to_hole_clearance: Minimum clearance between drill hole edges in mm (default: 0.2)
         board_edge_clearance: Minimum clearance from board edge in mm (0 = use clearance)
+        min_track_width: Minimum manufacturable track width in mm. None = derive the
+            JLC fab floor from the board's copper-layer count (issue #176).
+        min_via_diameter: Minimum via outer diameter in mm. None = fab floor.
+        min_via_drill: Minimum via drill in mm. None = fab floor.
+        check_sizes: If True, flag tracks/vias below the fab floor (track-width and
+            via/hole size checks). These catch sub-fab copper that the clearance-only
+            checks miss (a board's own min_track_width DRC rule can be lowered to match
+            undersized copper, so it never trips -- the fab floor is the real limit).
+        size_margin: Absolute tolerance in mm for the size checks; a width/diameter
+            within this of the floor is not flagged (default 0 = exact floor).
     """
     # Use track clearance for board edge if not specified
     effective_board_edge_clearance = board_edge_clearance if board_edge_clearance > 0 else clearance
@@ -712,6 +758,20 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
     if not quiet:
         print(f"Found {len(pcb_data.segments)} segments and {len(pcb_data.vias)} vias")
+
+    # Resolve the fab-floor minimums for the track-width / via-size checks. Default
+    # to the JLC manufacturing floor for the board's copper-layer count (issue #176).
+    if check_sizes:
+        from list_nets import fab_floors
+        copper_layers = getattr(pcb_data.board_info, 'copper_layers', None) or []
+        copper_count = len(copper_layers) if copper_layers else 2
+        fab = fab_floors(copper_count)
+        eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
+        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
+        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        if not quiet:
+            print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
+                  f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")
 
     # Helper to check if a net_id matches the filter patterns
     def net_matches_filter(net_id: int) -> bool:
@@ -1119,6 +1179,55 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'via_loc': (via.x, via.y),
                 })
 
+    # Check track widths and via/hole sizes against the fab floor (issue #176).
+    # Unlike the clearance checks these are per-object (one net), so the net filter
+    # applies to that single net.
+    if check_sizes:
+        if not quiet:
+            print("Checking track widths and via/hole sizes...")
+        for seg in pcb_data.segments:
+            if matching_net_ids is not None and seg.net_id not in matching_net_ids:
+                continue
+            too_thin, shortfall = check_track_width(seg, eff_min_track, size_margin)
+            if too_thin:
+                net_name = pcb_data.nets.get(seg.net_id, None)
+                net_str = net_name.name if net_name else f"net_{seg.net_id}"
+                violations.append({
+                    'type': 'track-width',
+                    'net1': net_str,
+                    'layer': seg.layer,
+                    'width': seg.width,
+                    'min_width': eff_min_track,
+                    'shortfall_mm': shortfall,
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                })
+        for via in pcb_data.vias:
+            if matching_net_ids is not None and via.net_id not in matching_net_ids:
+                continue
+            dia_bad, drill_bad, dia_short, drill_short = check_via_size(
+                via, eff_min_via_dia, eff_min_via_drill, size_margin)
+            if dia_bad or drill_bad:
+                net_name = pcb_data.nets.get(via.net_id, None)
+                net_str = net_name.name if net_name else f"net_{via.net_id}"
+                if dia_bad:
+                    violations.append({
+                        'type': 'via-size',
+                        'net1': net_str,
+                        'size': via.size,
+                        'min_size': eff_min_via_dia,
+                        'shortfall_mm': dia_short,
+                        'via_loc': (via.x, via.y),
+                    })
+                if drill_bad:
+                    violations.append({
+                        'type': 'via-drill-size',
+                        'net1': net_str,
+                        'drill': via.drill,
+                        'min_drill': eff_min_via_drill,
+                        'shortfall_mm': drill_short,
+                        'via_loc': (via.x, via.y),
+                    })
+
     # Same-net segment crossings are not DRC failures: same-net copper is allowed
     # to overlap (KiCad's own DRC permits it -- it only enforces clearance between
     # DIFFERENT nets). They are at most cosmetic clutter, so report them as
@@ -1211,6 +1320,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  Via:{v['net1']} too close to {v['edge']} board edge")
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'track-width':
+                        print(f"  {v['net1']} track too thin for fab")
+                        print(f"    Layer: {v['layer']}, Width: {v['width']:.4f}mm "
+                              f"< min {v['min_width']:.4f}mm (short {v['shortfall_mm']:.4f}mm)")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'via-size':
+                        print(f"  Via:{v['net1']} diameter too small for fab")
+                        print(f"    Size: {v['size']:.4f}mm < min {v['min_size']:.4f}mm "
+                              f"(short {v['shortfall_mm']:.4f}mm)")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'via-drill-size':
+                        print(f"  Via:{v['net1']} drill hole too small for fab")
+                        print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
+                              f"(short {v['shortfall_mm']:.4f}mm)")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
 
                 if len(vlist) > limit:
                     print(f"  ... and {len(vlist) - limit} more "
@@ -1248,10 +1372,26 @@ if __name__ == "__main__":
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max violations to list per type before "... and N more" '
                              '(0 = print all). Default 20.')
+    parser.add_argument('--no-size-checks', action='store_true',
+                        help='Skip the track-width and via/hole-size fab-floor checks')
+    parser.add_argument('--min-track-width', type=float, default=None,
+                        help='Minimum manufacturable track width in mm '
+                             '(default: JLC fab floor for the board layer count)')
+    parser.add_argument('--min-via-diameter', type=float, default=None,
+                        help='Minimum via outer diameter in mm (default: fab floor)')
+    parser.add_argument('--min-via-drill', type=float, default=None,
+                        help='Minimum via drill diameter in mm (default: fab floor)')
+    parser.add_argument('--size-margin', type=float, default=0.0,
+                        help='Absolute tolerance in mm for the size checks (default: 0)')
 
     args = parser.parse_args()
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,
-                         args.clearance_margin, max_print=args.max_print)
+                         args.clearance_margin, max_print=args.max_print,
+                         min_track_width=args.min_track_width,
+                         min_via_diameter=args.min_via_diameter,
+                         min_via_drill=args.min_via_drill,
+                         check_sizes=not args.no_size_checks,
+                         size_margin=args.size_margin)
     sys.exit(1 if violations else 0)
