@@ -2784,7 +2784,10 @@ Examples:
             track_width=args.track_width,
             clearance=args.clearance,
             grid_step=args.grid_step,
-            layers=args.layers
+            layers=args.layers,
+            # Thread the fab hole-to-hole minimum through so GND-via placement
+            # enforces the real drill spacing (issue #125), not the 0.2mm default.
+            hole_to_hole_clearance=args.hole_to_hole_clearance
         )
         coord = GridCoord(gnd_config.grid_step)
 

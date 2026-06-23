@@ -72,15 +72,23 @@ def add_gnd_vias_near_signal_vias(
         if pad.drill and pad.drill > 0:  # Through-hole pad
             existing_gnd_positions.append((pad.global_x, pad.global_y))
 
-    # Minimum distance from signal via center to GND via center
-    # (signal via radius + clearance + GND via radius)
-    min_distance = config.via_size / 2 + config.clearance + config.via_size / 2
+    # Minimum distance from signal via center to GND via center: larger of the
+    # copper ring clearance (via_size + clearance) and the drill hole-to-hole
+    # minimum (via_drill + hole_to_hole_clearance), so the paired GND via clears
+    # the signal via on both measures (issue #125).
+    min_distance = max(config.via_size + config.clearance,
+                       config.via_drill + config.hole_to_hole_clearance)
 
     new_gnd_vias = []
     placed_gnd_positions = []  # Track mm positions of GND vias we're adding
 
-    # Via-to-via minimum clearance (center-to-center)
-    via_via_min_dist = config.via_size + config.clearance
+    # Via-to-via minimum clearance (center-to-center): the larger of copper ring
+    # clearance (via_size + clearance) and drill hole-to-hole (via_drill +
+    # hole_to_hole_clearance). Checking only the copper ring lets a thin-ring via
+    # land inside the drill hole-to-hole minimum -- a VIA-VIA-SAME-NET /
+    # VIA-DRILL-HOLE fab violation (issue #125).
+    via_via_min_dist = max(config.via_size + config.clearance,
+                           config.via_drill + config.hole_to_hole_clearance)
 
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.
@@ -123,12 +131,16 @@ def add_gnd_vias_near_signal_vias(
                 if dist < via_via_min_dist:
                     return False
 
-        # Check clearance from through-hole pads
+        # Check drill hole-to-hole clearance from through-hole pad drills. This is a
+        # physical drill-to-drill minimum, so use hole_to_hole_clearance (NOT the
+        # copper clearance): a GND via gated only by config.clearance can land
+        # inside the larger hole-to-hole minimum of a pad drill -- the
+        # PAD-DRILL-VIA-DRILL violation in issue #125.
         for net_id, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if pad.drill and pad.drill > 0:
                     dist = math.sqrt((x_mm - pad.global_x)**2 + (y_mm - pad.global_y)**2)
-                    min_pad_dist = pad.drill / 2 + config.clearance + config.via_drill / 2
+                    min_pad_dist = pad.drill / 2 + config.hole_to_hole_clearance + config.via_drill / 2
                     if dist < min_pad_dist:
                         return False
 
@@ -256,9 +268,12 @@ def add_gnd_vias_to_existing_board(
         if pad.drill and pad.drill > 0:  # Through-hole pad
             existing_gnd_positions.append((pad.global_x, pad.global_y))
 
-    # Minimum distance from signal via center to GND via center
-    # (signal via radius + clearance + GND via radius)
-    min_distance = config.via_size / 2 + config.clearance + config.via_size / 2
+    # Minimum distance from signal via center to GND via center: larger of the
+    # copper ring clearance (via_size + clearance) and the drill hole-to-hole
+    # minimum (via_drill + hole_to_hole_clearance), so the paired GND via clears
+    # the signal via on both measures (issue #125).
+    min_distance = max(config.via_size + config.clearance,
+                       config.via_drill + config.hole_to_hole_clearance)
 
     # Debug: Print clearance parameters
     print(f"GND via placement parameters:")
@@ -269,8 +284,12 @@ def add_gnd_vias_to_existing_board(
     new_gnd_vias = []
     placed_gnd_positions = []
 
-    # Via-to-via minimum clearance (center-to-center) for batch placement
-    via_via_min_dist = config.via_size + config.clearance
+    # Via-to-via minimum clearance (center-to-center) for batch placement: larger
+    # of copper ring (via_size + clearance) and drill hole-to-hole (via_drill +
+    # hole_to_hole_clearance), so a thin-ring via can't land inside the drill
+    # hole-to-hole minimum (issue #125).
+    via_via_min_dist = max(config.via_size + config.clearance,
+                           config.via_drill + config.hole_to_hole_clearance)
 
     # Grid cells to check for via clearance
     # The obstacle map already expands tracks by track_width/2 + clearance.
@@ -312,12 +331,14 @@ def add_gnd_vias_to_existing_board(
             if dist < via_via_min_dist:
                 return (False, f"too_close_to_via({dist:.2f}mm)")
 
-        # Check clearance from through-hole pads
+        # Check drill hole-to-hole clearance from through-hole pad drills (a
+        # physical drill-to-drill minimum -> hole_to_hole_clearance, NOT the copper
+        # clearance, which under-enforces it; issue #125 PAD-DRILL-VIA-DRILL).
         for net_id, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if pad.drill and pad.drill > 0:
                     dist = math.sqrt((x_mm - pad.global_x)**2 + (y_mm - pad.global_y)**2)
-                    min_pad_dist = pad.drill / 2 + config.clearance + config.via_drill / 2
+                    min_pad_dist = pad.drill / 2 + config.hole_to_hole_clearance + config.via_drill / 2
                     if dist < min_pad_dist:
                         return (False, f"too_close_to_th_pad({dist:.2f}mm)")
 

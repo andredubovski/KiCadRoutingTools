@@ -957,7 +957,11 @@ class PlanesTab(wx.Panel):
                         track_width=config.get('track_width', defaults.TRACK_WIDTH),
                         clearance=config.get('clearance', defaults.CLEARANCE),
                         grid_step=config.get('grid_step', defaults.GRID_STEP),
-                        layers=all_layers
+                        layers=all_layers,
+                        # Thread the fab hole-to-hole minimum so GND-via placement
+                        # enforces real drill spacing (issue #125), not the default.
+                        hole_to_hole_clearance=config.get(
+                            'hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE)
                     )
                     coord = GridCoord(gnd_config.grid_step)
 
