@@ -1011,6 +1011,11 @@ class PlanesTab(wx.Panel):
         """Run disconnected plane repair."""
         from route_disconnected_planes import route_planes as repair_planes
 
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160), mirroring
+        # route_disconnected_planes.py's auto-fix.
+        self._plane_drc_config = dict(config)
+
         # Flatten assignments into parallel net_names and plane_layers lists
         # For each (nets_list, layers_list) assignment, create an entry for
         # each net on each layer

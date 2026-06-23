@@ -731,6 +731,10 @@ Examples:
                         help="Print detailed debug messages")
     parser.add_argument("--debug-lines", action="store_true",
                         help="Add debug lines on User.4 layer showing route paths")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not rewrite the output project's DRC design rules to match "
+                             "the plane routing floors (by default they are made consistent so "
+                             "KiCad's manual DRC shows only genuine violations; issue #160)")
 
     args = parser.parse_args()
 
@@ -815,6 +819,21 @@ Examples:
         _snapped, _removed = clean_plane_copper(args.output_file, net_names, args.clearance)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+
+    # Make the output project's DRC design rules consistent with the floors we
+    # just routed to (issue #160), mirroring route_planes.py, so a manual DRC in
+    # KiCad flags only genuine problems instead of stock-default noise.
+    if not args.no_fix_drc_settings and not args.dry_run \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")
 
 
 if __name__ == "__main__":

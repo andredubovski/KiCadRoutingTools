@@ -41,6 +41,7 @@ def get_dialog_settings(dialog):
         'enable_layer_switch': dialog.enable_layer_switch.GetValue(),
         'move_text_check': dialog.move_text_check.GetValue(),
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
+        'fix_drc_settings': dialog.fix_drc_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -257,6 +258,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.move_text_check.SetValue(settings['move_text_check'])
     if 'add_teardrops_check' in settings:
         dialog.add_teardrops_check.SetValue(settings['add_teardrops_check'])
+    if 'fix_drc_settings' in settings:
+        dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:

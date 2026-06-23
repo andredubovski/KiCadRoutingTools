@@ -697,6 +697,10 @@ class DifferentialTab(wx.Panel):
         # Merge configs
         config = {**routing_config, **diff_config}
 
+        # Remember the routed floors so _apply_results_to_board can make the live
+        # board's DRC constraints consistent with them (issue #160).
+        self._diff_drc_config = dict(config)
+
         # Build actual net names from selected pair net IDs
         net_names = []
         for base_name, p_net_id, n_net_id in selected_pair_info:
@@ -943,6 +947,31 @@ class DifferentialTab(wx.Panel):
 
         # Build connectivity to register new items properly
         board.BuildConnectivity()
+
+        # Make the live board's DRC constraints consistent with what we just
+        # routed to (issue #160), the GUI counterpart of the CLI route_diff's
+        # fix_kicad_drc_settings auto-fix: loosen the Board Setup floors + Default
+        # net class + non-routing severities to the routed values via the pcbnew
+        # API, so the user's manual DRC only flags genuine problems. Best-effort
+        # and guarded -- never block applying the routes. The user's next save
+        # persists it (mark the board modified).
+        cfg = getattr(self, "_diff_drc_config", None)
+        if tracks_added > 0 and cfg and cfg.get('fix_drc_settings', True):
+            try:
+                from fix_kicad_drc_settings import (compute_targets, severity_plan,
+                                                    apply_targets_to_board)
+                targets = compute_targets(
+                    clearance=cfg.get('clearance'),
+                    hole_to_hole=cfg.get('hole_to_hole_clearance'),
+                    edge_clearance=cfg.get('board_edge_clearance'),
+                    track_width=cfg.get('track_width'),
+                    via_diameter=cfg.get('via_size'),
+                    via_drill=cfg.get('via_drill'))
+                if apply_targets_to_board(board, targets, severity_plan()):
+                    board.SetModified()
+                    print("DRC settings: loosened Board Setup floors to the diff-pair routing values (save to persist)")
+            except Exception as e:
+                print(f"(skipped DRC-settings write-back: {e})")
 
         # Refresh the view
         pcbnew.Refresh()

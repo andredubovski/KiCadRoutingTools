@@ -785,6 +785,16 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetToolTip("Add teardrop settings to all pads in output file")
         options_inner.Add(self.add_teardrops_check, 0, wx.ALL, 3)
 
+        self.fix_drc_check = wx.CheckBox(options_scroll, label="Fix DRC settings after routing")
+        self.fix_drc_check.SetValue(True)
+        self.fix_drc_check.SetToolTip(
+            "After routing, loosen the live board's DRC Board Setup floors + Default "
+            "net class + non-routing severities to the values just routed to (issue "
+            "#160), so a manual DRC flags only genuine problems instead of stock-"
+            "default noise. The board's next save persists it. Mirrors the CLI's "
+            "auto-fix (route.py, off via --no-fix-drc-settings)")
+        options_inner.Add(self.fix_drc_check, 0, wx.ALL, 3)
+
         # Guide corridor: follow a user-drawn polyline (issue #7)
         self.guide_corridor_check = wx.CheckBox(options_scroll, label="Follow User-layer guide path")
         self.guide_corridor_check.SetValue(defaults.GUIDE_CORRIDOR_ENABLED)
@@ -1319,6 +1329,9 @@ class RoutingDialog(wx.Dialog):
                 'clearance': self.clearance.GetValue(),
                 'via_size': self.via_size.GetValue(),
                 'via_drill': self.via_drill.GetValue(),
+                # Shared across all tabs: the single "Fix DRC settings after
+                # routing" toggle lives on the Basic tab (issue #160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
             }
 
         def get_routing_config():
@@ -1344,6 +1357,8 @@ class RoutingDialog(wx.Dialog):
                 'debug_lines': self.debug_lines_check.GetValue(),
                 'verbose': self.verbose_check.GetValue(),
                 'enable_layer_switch': self.enable_layer_switch.GetValue(),
+                # Shared Basic-tab toggle, inherited by the Differential tab (#160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -2036,6 +2051,7 @@ class RoutingDialog(wx.Dialog):
             'direction': ['forward', 'backward'][self.direction_choice.GetSelection() - 1] if self.direction_choice.GetSelection() > 0 else None,
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
+            'fix_drc_settings': self.fix_drc_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
