@@ -905,6 +905,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # Authoritatively connected now: drop a stale (stricter-model or
             # pre-rip) failure flag so the net is not reported as a phantom fail.
             _res['failed_pads_info'] = []
+        # Issue #184: re-derive the multi-point pad counts from this same
+        # authoritative union-find (which credits pads reached via planes/zones,
+        # fanout stubs, and rip-up/retry reroutes), not the per-net MST edge tally
+        # gathered during routing -- otherwise the headline under-reports
+        # connectivity (e.g. upsy_desky 73/101) on boards check_connected.py
+        # confirms fully connected, and the tap-retry loop chases already-connected
+        # pads. Match check_connected.py semantics: count over all of the net's pads.
+        if _res.get('is_multipoint'):
+            _res['tap_pads_total'] = len(_pads)
+            _res['tap_pads_connected'] = len(_pads) - len(_dp)
 
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
