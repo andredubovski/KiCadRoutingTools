@@ -2221,16 +2221,21 @@ def main():
     out_path = getattr(args, 'output', None)
     if out_path:
         try:
-            import subprocess as _sp, re as _re
-            _drc = os.path.join(os.path.dirname(os.path.dirname(__file__)), "check_drc.py")
-            _o = _sp.run([sys.executable, "-X", "utf8", _drc, out_path,
-                          "-c", str(args.clearance), "--max-print", "0"],
-                         capture_output=True, text=True).stdout
-            for _c in ("PAD-VIA", "VIA-SEGMENT", "PAD-SEGMENT", "SEGMENT-SEGMENT"):
-                _m = _re.search(_c + r" violations \((\d+)\)", _o)
-                drc_grazes[_c.lower().replace('-', '_')] = int(_m.group(1)) if _m else 0
-            _t = _re.search(r"FOUND (\d+) DRC", _o)
-            drc_grazes['total'] = int(_t.group(1)) if _t else 0
+            import io as _io, contextlib as _cl
+            from check_drc import run_drc as _run_drc
+            with _cl.redirect_stdout(_io.StringIO()):  # keep JSON_SUMMARY output clean
+                _viols = _run_drc(out_path, clearance=args.clearance,
+                                  quiet=True, max_print=0)
+            _by = {}
+            for _v in _viols:
+                _by[_v['type']] = _by.get(_v['type'], 0) + 1
+            drc_grazes = {
+                'pad_via': _by.get('pad-via', 0),
+                'via_segment': _by.get('via-segment', 0),
+                'pad_segment': _by.get('pad-segment', 0),
+                'segment_segment': _by.get('segment-segment', 0),
+                'total': len(_viols),
+            }
         except Exception as _e:
             drc_grazes = {'error': str(_e)}
     summary = {
