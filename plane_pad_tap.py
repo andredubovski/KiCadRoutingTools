@@ -227,18 +227,37 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
     return TapResult(success=False, blocked_cells=best_frontier)
 
 
+def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
+    """True if a same-net via or segment endpoint sits on `opad` -- i.e. the pad has
+    already been escaped/routed, a cheap proxy for "connected to the plane" (the
+    authoritative graph check is in find_unconnected_plane_pads; this stays local)."""
+    ox, oy = opad.global_x, opad.global_y
+    for v in local.vias:
+        if v.net_id == net_id and abs(v.x - ox) < tol and abs(v.y - oy) < tol:
+            return True
+    for s in local.segments:
+        if s.net_id == net_id and (
+                (abs(s.start_x - ox) < tol and abs(s.start_y - oy) < tol) or
+                (abs(s.end_x - ox) < tol and abs(s.end_y - oy) < tol)):
+            return True
+    return False
+
+
 def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
                                   route_via_to_pad_fn, radius: float):
     """Issue #180: before dropping a NEW via, connect the pad by a trace to the
-    nearest EXISTING same-net via or through-hole pad within `radius`. Such copper
-    already reaches the plane (a via spans to the plane layer; a through-hole pad
-    is connected on it), so a new via would be redundant -- and a redundant via can
-    box in a neighbouring foreign pad (castor_pollux U11 -12V, boxed by a GND repair
-    via that pad 12 didn't need because it already reaches the plane through pad 10).
+    nearest EXISTING same-net copper within `radius`:
+      - a same-net via (spans to the plane layer) or through-hole pad -- always
+        plane-connected; or
+      - a same-net SMD pad that has already been escaped (same-net via/segment on
+        it), e.g. an adjacent BGA ball -- ottercast U1.N4 GND connects to its
+        neighbour ball U1.L4 this way.
+    Such copper already reaches the plane, so a new via would be redundant -- and a
+    redundant via can box in a neighbouring foreign pad (castor_pollux U11 -12V).
 
     Unlike step-1 close-via reuse (radius via_size*2.5 ~1.25mm), this reaches the
-    full distant-trace radius so a slightly-farther existing via is preferred over a
-    brand-new one. Returns a successful TapResult (via=None) or None."""
+    full distant-trace radius so a slightly-farther existing target is preferred
+    over a brand-new via. Returns a successful TapResult (via=None) or None."""
     if not pad_layer or radius <= 0:
         return None
     px, py = pad.global_x, pad.global_y
@@ -249,10 +268,13 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
             if 1e-6 < d <= radius:
                 cands.append((d, (v.x, v.y)))
     for opad in local.pads_by_net.get(net_id, []):
-        # Only through-hole same-net pads are guaranteed plane-connected; an SMD
-        # pad would itself need a via, so it is not a safe trace target here.
-        if opad.drill > 0 and not (opad.component_ref == pad.component_ref
-                                   and opad.pad_number == pad.pad_number):
+        if opad.component_ref == pad.component_ref and opad.pad_number == pad.pad_number:
+            continue
+        # Through-hole same-net pads are always plane-connected. An SMD same-net pad
+        # is a valid target only if it is already escaped (has same-net copper on
+        # it) -- a bare ball would itself be unconnected and tracing to it would
+        # just bond two floating pads.
+        if opad.drill > 0 or _pad_has_same_net_copper(opad, net_id, local):
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
