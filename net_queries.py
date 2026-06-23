@@ -351,8 +351,22 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
     # KiCad auto-names a netless pin's net 'Net-(<ref>-<pin>)'. The trailing ')'
     # buries the polarity suffix (e.g. Net-(U12-USB_D+) ends in '+)'), so peel a
     # matching wrapper before applying the suffix rules (issue #91, bitaxe USB).
-    if net_name.startswith('Net-(') and net_name.endswith(')'):
+    is_auto_name = net_name.startswith('Net-(') and net_name.endswith(')')
+    if is_auto_name:
         net_name = net_name[5:-1]
+
+    # In a 'Net-(<ref>-<pin path>)' auto-name the pin path encodes the chip's
+    # internal signal path, e.g. 'U12-GPIO19/U1RTS/.../USB_D-'. The diff marker
+    # lives in the final path segment, but the per-pin prefix differs between the
+    # two halves (GPIO19 vs GPIO20), so the full path never pairs. Use the leaf
+    # so USB_D+/USB_D- pair (issue #181). Only for auto-names: user-named
+    # hierarchical nets like '/bank1/CLK_N' must keep their full path so they
+    # don't pair across banks. KiCad escapes '/' in net names as '{slash}', so
+    # split on either form.
+    if is_auto_name:
+        path = net_name.replace('{slash}', '/')
+        if '/' in path:
+            net_name = path.rsplit('/', 1)[-1]
 
     # DDR true/complement, _t/_c, case-insensitive (CK_t/CK_c, CK_T/CK_C).
     # With an explicit channel separator: DQS0_t_A / DQS0_c_A
@@ -416,10 +430,14 @@ def extract_diff_pair_base(net_name: str) -> Optional[Tuple[str, bool, str]]:
         if net_name[-2] in '0123456789_' or net_name[-2].isupper():
             return (net_name[:-1], False, 'P')
 
-    # Try +/- suffix
-    if net_name.endswith('+'):
+    # Try +/- suffix. Reject the KiCad 'Net-(<ref>-+)' / 'Net-(<ref>--)' form,
+    # where the '+'/'-' is a 2-terminal passive's pad name (buzzers, etc.) sitting
+    # right after the ref-pad '-' separator -- those are DC polarity terminals,
+    # not a coupled signal pair (issue #181). A genuine pair is 'FOO+' / 'FOO-',
+    # never 'FOO-+' / 'FOO--'.
+    if net_name.endswith('+') and not net_name.endswith('-+'):
         return (net_name[:-1], True, '+')
-    if net_name.endswith('-'):
+    if net_name.endswith('-') and not net_name.endswith('--'):
         return (net_name[:-1], False, '+')
 
     return None

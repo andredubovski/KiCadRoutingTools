@@ -67,7 +67,22 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     return best
 
 
-def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=0.05):
+def _fab_track_floor(pcb_data) -> float:
+    """Smallest manufacturable track width for this board (issue #176): the JLC
+    fab minimum for the board's copper-layer count (0.0889 mm on 4+ layers,
+    0.127 mm on 2). Necking a grazing terminal must not emit copper below this --
+    the old 0.05 mm grid-step floor produced sub-fab tracks that pass our
+    clearance-only DRC but would fail KiCad's built-in track-width rule."""
+    from list_nets import fab_floors
+    n = 2
+    try:
+        n = len(pcb_data.board_info.copper_layers) or 2
+    except (AttributeError, TypeError):
+        pass
+    return fab_floors(n)['track_width']
+
+
+def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=None):
     """Neck a TERMINAL-connection segment that grazes a foreign pad, down to `floor`.
 
     A route's terminal connects to an off-grid pad / fanout escape: the
@@ -78,7 +93,12 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=0.
     terminal segment restores clearance without moving the centreline, so
     connectivity is preserved; a graze the floor width still can't clear is left for
     the DRC report. Only segments touching a terminal point are considered (the A*
-    body keep-outs already enforce clearance mid-route). Returns the count necked."""
+    body keep-outs already enforce clearance mid-route). Returns the count necked.
+
+    `floor` defaults to the board's fab track-width minimum (issue #176): necking
+    to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
+    if floor is None:
+        floor = _fab_track_floor(pcb_data)
     def touches(s):
         for tx, ty in term_pts:
             if (abs(s.start_x - tx) < 1e-6 and abs(s.start_y - ty) < 1e-6) or \

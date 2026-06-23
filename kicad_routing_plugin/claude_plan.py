@@ -323,9 +323,16 @@ def _plane_assignments_from_step(step, dialog, notes, action_name):
 
 def _match_net_names(pcb_data, globs):
     """Match net names against include globs, minus "!" exclusion globs
-    (CLI semantics: the plan's route step excludes plane nets as "!GND")."""
-    includes = [g for g in globs if not g.startswith("!")] or ["*"]
-    excludes = [g[1:] for g in globs if g.startswith("!")]
+    (CLI semantics: the plan's route step excludes plane nets as "!GND").
+
+    Uses the shared split_net_patterns helper so a literal active-low net name
+    like "!RESET" stays selectable rather than being read as an exclusion
+    (issue #177)."""
+    from net_queries import split_net_patterns
+    known_names = {net.name for net in pcb_data.nets.values() if net.name}
+    includes, excludes = split_net_patterns(globs, known_names)
+    if not includes:
+        includes = ["*"]
     names = []
     for net in pcb_data.nets.values():
         if not net.net_id or not net.name:
