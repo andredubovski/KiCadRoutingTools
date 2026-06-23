@@ -36,10 +36,6 @@ from terminal_colors import GREEN, RED, RESET
 import routing_defaults as defaults
 import re
 
-# Radius (mm) within which a plane-net pad that cannot get its own via may be
-# connected to a nearby same-net pad/via with a trace (the human's connector-pin
-# -> shield-pad strategy). Only used by the --rip-blocker-nets repair.
-DISTANT_PAD_TRACE_RADIUS = 8.0
 
 
 def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
@@ -354,7 +350,11 @@ def route_planes(
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
     ripped_net_ids: List[int] = []
-    distant_radius = min(max_search_radius, DISTANT_PAD_TRACE_RADIUS) if rip_blocker_nets else 0.0
+    # Trace-to-existing-plane-copper reaches the full via-search radius
+    # (max_search_radius, the --max-search-radius CLI value) so a boxed pad whose
+    # nearest existing same-net via sits past a smaller cap is still reachable
+    # (issue #180: castor_pollux U5.4's nearest GND via was at 4.62mm).
+    distant_radius = max_search_radius if rip_blocker_nets else 0.0
 
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
         # Build per-layer zone clearances for all layers with zones for this net

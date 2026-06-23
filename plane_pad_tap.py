@@ -37,7 +37,11 @@ _DIST_TOL = 1e-3                  # mm - tolerance so exactly-0.65mm pitch quali
 FINE_TAP_GRID_STEP = 0.05         # mm
 FINE_TAP_CLEARANCE = 0.15         # mm
 FINE_TAP_TRACK_WIDTH = 0.15       # mm (capped by pad min dimension)
-FINE_TAP_SEARCH_RADIUS = 3.0      # mm - via search radius for the fine retry
+# NEW-via search radius for the fine retry. Kept smaller than max_search_radius
+# on purpose: placing a brand-new via far from the pad at fine width butterflies
+# neighbouring plane pads. Reaching a far EXISTING via is done via the
+# distant-trace path (= max_search_radius) instead.
+FINE_TAP_SEARCH_RADIUS = 3.0      # mm
 
 # Window half-size margin beyond the via search radius
 _WINDOW_MARGIN = 3.0              # mm
@@ -457,6 +461,13 @@ def tap_pad_with_escalation(
 
     if fine_for_all or pad_is_fine_pitch(pad, pcb_data):
         fine_config = make_fine_tap_config(config, pad)
+        # The fine pass searches for a NEW via site at a thin trace / fine grid.
+        # Keep its NEW-via search capped (FINE_TAP_SEARCH_RADIUS) rather than the
+        # full max_search_radius: placing a brand-new via far from the pad at fine
+        # width is disruptive (it butterflies neighbouring plane pads -- measured
+        # on castor_pollux). Reaching a far EXISTING via is handled separately and
+        # safely by distant_trace_radius (= max_search_radius), so a boxed pad is
+        # still connected by trace; see try_tap_pad step 1b.
         result = try_tap_pad(
             pad, pad_layer, net_id, pcb_data, fine_config,
             min(max_search_radius, FINE_TAP_SEARCH_RADIUS),
