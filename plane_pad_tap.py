@@ -223,6 +223,44 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
     return TapResult(success=False, blocked_cells=best_frontier)
 
 
+def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
+                                  route_via_to_pad_fn, radius: float):
+    """Issue #180: before dropping a NEW via, connect the pad by a trace to the
+    nearest EXISTING same-net via or through-hole pad within `radius`. Such copper
+    already reaches the plane (a via spans to the plane layer; a through-hole pad
+    is connected on it), so a new via would be redundant -- and a redundant via can
+    box in a neighbouring foreign pad (castor_pollux U11 -12V, boxed by a GND repair
+    via that pad 12 didn't need because it already reaches the plane through pad 10).
+
+    Unlike step-1 close-via reuse (radius via_size*2.5 ~1.25mm), this reaches the
+    full distant-trace radius so a slightly-farther existing via is preferred over a
+    brand-new one. Returns a successful TapResult (via=None) or None."""
+    if not pad_layer or radius <= 0:
+        return None
+    px, py = pad.global_x, pad.global_y
+    cands: List[Tuple[float, Tuple[float, float]]] = []
+    for v in local.vias:
+        if v.net_id == net_id:
+            d = math.hypot(v.x - px, v.y - py)
+            if 1e-6 < d <= radius:
+                cands.append((d, (v.x, v.y)))
+    for opad in local.pads_by_net.get(net_id, []):
+        # Only through-hole same-net pads are guaranteed plane-connected; an SMD
+        # pad would itself need a via, so it is not a safe trace target here.
+        if opad.drill > 0 and not (opad.component_ref == pad.component_ref
+                                   and opad.pad_number == pad.pad_number):
+            d = math.hypot(opad.global_x - px, opad.global_y - py)
+            if 1e-6 < d <= radius:
+                cands.append((d, (opad.global_x, opad.global_y)))
+    cands.sort(key=lambda c: c[0])
+    for _d, pos in cands:
+        segs = route_via_to_pad_fn(pos, pad, pad_layer, net_id, routing_obs,
+                                   config, verbose=False)
+        if segs:  # non-empty trace: the pad now reaches the existing plane copper
+            return TapResult(success=True, via=None, segments=segs, reused_via_pos=pos)
+    return None
+
+
 def try_tap_pad(
     pad: Pad,
     pad_layer: Optional[str],
@@ -315,6 +353,18 @@ def try_tap_pad(
         if segs:  # non-empty trace: actually connects the pad to the via
             return TapResult(success=True, via=None, segments=segs,
                              reused_via_pos=best[1])
+
+    # 1b. Before placing a NEW via, prefer a trace to an existing same-net via /
+    # through-hole pad within the distant-trace radius -- that copper already
+    # reaches the plane, so a new via would be redundant and can box a neighbouring
+    # foreign pad (issue #180, castor_pollux U11). Gated on distant_trace_radius>0
+    # (the rip-blocker plane repair), same as the distant-trace fallback below.
+    if pad_layer and distant_trace_radius > 0:
+        r = _try_trace_to_plane_connected(
+            pad, pad_layer, net_id, local, routing_obs, config,
+            route_via_to_pad, distant_trace_radius)
+        if r is not None:
+            return r
 
     # 2. Place a new via near the pad
     failed_positions: Set[Tuple[int, int]] = set()
