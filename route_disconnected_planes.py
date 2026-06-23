@@ -39,7 +39,7 @@ import re
 # Radius (mm) within which a plane-net pad that cannot get its own via may be
 # connected to a nearby same-net pad/via with a trace (the human's connector-pin
 # -> shield-pad strategy). Only used by the --rip-blocker-nets repair.
-DISTANT_PAD_TRACE_RADIUS = 4.0
+DISTANT_PAD_TRACE_RADIUS = 8.0
 
 
 def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
