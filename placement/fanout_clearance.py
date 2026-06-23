@@ -185,6 +185,10 @@ class _Repair:
         self.clearance = clearance
         self.grid_step = grid_step
         self.capture_radius = capture_radius
+        # cap_prefix may list several reference prefixes (e.g. "C,R" = caps and
+        # resistors); str.startswith() accepts the tuple directly.
+        self._cap_prefixes = tuple(p.strip() for p in str(cap_prefix).split(',')
+                                   if p.strip()) or ('C',)
 
         courtyards = extract_courtyard_bboxes(pcb_file)
         locked = set(extract_locked_refs(pcb_file)) | extra_locked
@@ -246,7 +250,7 @@ class _Repair:
             # test and wrongly exclude it from placement (#130).
             n_copper = sum(1 for p in fp.pads
                            if any(str(l).endswith('.Cu') for l in p.layers))
-            is_cap = (ref.startswith(cap_prefix) and n_copper <= 2
+            is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
                       and ref not in locked)
             if is_cap:
                 cap = _Cap(fp, lb)
@@ -382,7 +386,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             max_displacement_cap: float = 3.0,
                             displacement_growth: float = 1.5,
                             allow_rotations: bool = True,
-                            cap_prefix: str = "C",
+                            cap_prefix: str = "C,R",
                             lock_refs: Optional[List[str]] = None,
                             max_passes: int = 30,
                             verbose: bool = False) -> Dict:

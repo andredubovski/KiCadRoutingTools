@@ -112,7 +112,7 @@ def _insert_cap_optimization(steps):
         if s["action"] == "fanout" and (s.get("kind") or "bga").lower() == "bga":
             last_bga = i
     if last_bga is not None:
-        steps.insert(last_bga + 1, {"action": "optimize_caps"})
+        steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R"})
 
 
 def step_label(index, step):

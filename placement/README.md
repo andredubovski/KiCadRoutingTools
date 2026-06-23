@@ -73,6 +73,7 @@ python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--clearance` | 0.25 mm | DRC clearance; **set to the fanout/DRC floor** |
+| `--cap-prefix` | `C,R` | Comma-separated reference prefix(es) for movable passives near a BGA (caps **and** resistors by default). Only 2-copper-pad parts move, so RN-style arrays are auto-excluded; paste-only apertures are ignored when counting pads. |
 | `--capture-radius` | 2 mm | Max distance over which a same-net ball attracts a pad |
 | `--max-displacement` / `--max-displacement-cap` | 2 / 3 mm | Initial and grown move budget per cap |
 | `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size |

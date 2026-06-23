@@ -851,9 +851,12 @@ class BGAOptionsPanel(wx.Panel):
         self.cap_max_passes.SetToolTip("Maximum refinement passes (--max-passes)")
         cap_grid.Add(self.cap_max_passes, 0, wx.EXPAND)
 
-        cap_grid.Add(wx.StaticText(self, label="Cap ref. prefix:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.cap_prefix = wx.TextCtrl(self, value="C")
-        self.cap_prefix.SetToolTip("Reference-designator prefix that identifies caps (--cap-prefix)")
+        cap_grid.Add(wx.StaticText(self, label="Movable prefix(es):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.cap_prefix = wx.TextCtrl(self, value="C,R")
+        self.cap_prefix.SetToolTip("Comma-separated reference prefix(es) for movable "
+                                   "passives near a BGA (--cap-prefix; default C,R = "
+                                   "caps and resistors; RN-style arrays auto-excluded "
+                                   "by the 2-copper-pad test)")
         cap_grid.Add(self.cap_prefix, 0, wx.EXPAND)
 
         cap_sizer.Add(cap_grid, 0, wx.EXPAND | wx.ALL, 5)
@@ -896,7 +899,7 @@ class BGAOptionsPanel(wx.Panel):
             'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
             'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
             'cap_max_passes': self.cap_max_passes.GetValue(),
-            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C',
+            'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
         }
 
@@ -1461,7 +1464,7 @@ class FanoutTab(wx.Panel):
                 max_displacement_cap=fanout_config.get('cap_max_displacement_cap', 3.0),
                 displacement_growth=fanout_config.get('cap_displacement_growth', 1.5),
                 max_passes=int(fanout_config.get('cap_max_passes', 30)),
-                cap_prefix=fanout_config.get('cap_prefix', 'C'),
+                cap_prefix=fanout_config.get('cap_prefix', 'C,R'),
                 allow_rotations=fanout_config.get('cap_allow_rotation', True),
             )
 

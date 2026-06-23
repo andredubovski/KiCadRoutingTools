@@ -580,8 +580,10 @@ python3 place_fanout_clearance.py board_step1.kicad_pcb board_step1b.kicad_pcb \
 
 It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**
 caps had no clear spot within the displacement budget — note them for a manual
-nudge; they are not auto-fixed. It only moves 2-pad caps near a BGA, never
-overlaps caps, and is a no-op when nothing collides. Feed `board_step1b.kicad_pcb`
+nudge; they are not auto-fixed. By default (`--cap-prefix C,R`) it moves 2-pad
+**caps and resistors** near a BGA (RN-style arrays auto-excluded since only
+2-copper-pad parts move); it never overlaps parts, and is a no-op when nothing
+collides. Feed `board_step1b.kicad_pcb`
 into the next step (if multiple BGAs are fanned in series, run this once after
 each, or once after the last fanout — it considers all BGAs' vias on the board).
 Verify with `check_drc.py board_step1b.kicad_pcb -c 0.1` (PAD-VIA count drops).
