@@ -1044,6 +1044,10 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb [output.kicad_pc
 --dry-run                   # Analyze without writing output
 --verbose, -v               # Print detailed debug messages
 --debug-lines               # Add debug lines on User.4 layer showing route paths
+
+# DRC settings
+--no-fix-drc-settings       # Skip making the output project's DRC rules match the
+                            # plane routing floors (done by default; issue #160)
 ```
 
 Features:
