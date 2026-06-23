@@ -1096,6 +1096,13 @@ Examples:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads in output file")
+    parser.add_argument("--no-fix-drc-settings", action="store_true",
+                        help="Do not rewrite the output project's DRC design rules to match "
+                             "the routing floors (by default they are made consistent so "
+                             "KiCad's manual DRC shows only genuine violations; issue #160)")
+    parser.add_argument("--keep-thermal", action="store_true",
+                        help="When fixing DRC settings, leave thermal-relief severity "
+                             "(starved_thermal) untouched instead of demoting it to a warning")
 
     args = parser.parse_args()
 
@@ -1221,3 +1228,19 @@ Examples:
                 mps_segment_intersection=args.mps_segment_intersection,
                 schematic_dir=args.schematic_dir,
                 add_teardrops=args.add_teardrops)
+
+    # Make the output project's DRC design rules consistent with the floors we
+    # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad
+    # flags only genuine problems instead of stock-default noise.
+    if not args.no_fix_drc_settings and not args.skip_routing \
+            and args.output_file and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                args.output_file, input_pcb=args.input_file,
+                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                edge_clearance=args.board_edge_clearance, track_width=args.track_width,
+                via_diameter=args.via_size, via_drill=args.via_drill,
+                keep_thermal=args.keep_thermal)
+        except Exception as e:
+            print(f"  (skipped DRC-settings fix: {e})")

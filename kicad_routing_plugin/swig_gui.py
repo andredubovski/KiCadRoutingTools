@@ -1017,6 +1017,15 @@ class RoutingDialog(wx.Dialog):
         self.mps_segment_intersection.SetToolTip("Force MPS to use segment intersection for crossing detection")
         options_inner.Add(self.mps_segment_intersection, 0, wx.ALL, 3)
 
+        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
+        self.keep_thermal_check.SetValue(False)
+        self.keep_thermal_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
+            "demotes the starved_thermal DRC category to a warning. Check this to "
+            "leave thermal-relief severity untouched (matches the CLI's "
+            "--keep-thermal). Off by default.")
+        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
+
         options_inner.AddSpacer(10)
 
         # Bus routing options
@@ -1286,6 +1295,10 @@ class RoutingDialog(wx.Dialog):
                 'no_bga_zones_text': self.no_bga_zones_ctrl.GetValue().strip(),
                 'power_nets': power_nets,
                 'power_nets_widths': power_widths,
+                # Shared across all tabs: the single "Fix DRC settings after
+                # routing" toggle lives on the Basic tab (issue #160).
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
+                'keep_thermal': self.keep_thermal_check.GetValue(),
             }
 
         def get_claude_params():
@@ -1359,6 +1372,7 @@ class RoutingDialog(wx.Dialog):
                 'enable_layer_switch': self.enable_layer_switch.GetValue(),
                 # Shared Basic-tab toggle, inherited by the Differential tab (#160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
+                'keep_thermal': self.keep_thermal_check.GetValue(),
             }
 
         def sync_pcb_data():
@@ -2052,6 +2066,7 @@ class RoutingDialog(wx.Dialog):
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
+            'keep_thermal': self.keep_thermal_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,
@@ -2940,7 +2955,8 @@ class RoutingDialog(wx.Dialog):
                     track_width=config.get('track_width'),
                     via_diameter=config.get('via_size'),
                     via_drill=config.get('via_drill'))
-                drc_changes = apply_targets_to_board(board, targets, severity_plan())
+                drc_changes = apply_targets_to_board(
+                    board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)))
                 if drc_changes:
                     board.SetModified()
                     print(f"DRC settings: loosened {len(drc_changes)} Board Setup "

@@ -1286,6 +1286,9 @@ For differential pair routing, use route_diff.py:
                              "routed clearances/sizes afterwards (issue #160). By default the "
                              "written project's Board Setup floors are loosened to the routed "
                              "values so KiCad's DRC only flags genuine problems.")
+    parser.add_argument("--keep-thermal", action="store_true",
+                        help="When fixing DRC settings, leave thermal-relief severity "
+                             "(starved_thermal) untouched instead of demoting it to a warning")
 
     # Vertical alignment attraction options
     parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
@@ -1506,6 +1509,7 @@ For differential pair routing, use route_diff.py:
                 args.output_file, input_pcb=args.input_file,
                 clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
-                via_diameter=args.via_size, via_drill=args.via_drill)
+                via_diameter=args.via_size, via_drill=args.via_drill,
+                keep_thermal=args.keep_thermal)
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
