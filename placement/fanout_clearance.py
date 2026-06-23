@@ -104,9 +104,14 @@ class _Cap:
         self.seed_x, self.seed_y = fp.x, fp.y
         self.seed_rot = fp.rotation % 360
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
-        # pads: (off_x, off_y, half_x, half_y, net_id) relative to fp center
+        # pads: (off_x, off_y, half_x, half_y, net_id) relative to fp center.
+        # Copper pads only -- a footprint may define solder-paste apertures as
+        # separate paste-only "pads" (e.g. gkl_misc C_0201_0603Metric), which are
+        # not copper and must not enter the clearance/attraction geometry.
         self.pads = []
         for p in fp.pads:
+            if not any(str(l).endswith('.Cu') for l in p.layers):
+                continue  # paste/mask-only aperture, not copper
             off_x = p.global_x - fp.x
             off_y = p.global_y - fp.y
             tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
@@ -236,7 +241,12 @@ class _Repair:
             if not fp.pads:
                 continue
             lb = courtyards.get(ref) or compute_footprint_bbox_local(fp)
-            is_cap = (ref.startswith(cap_prefix) and len(fp.pads) <= 2
+            # Count COPPER pads only: paste-only apertures (split-paste 0201
+            # footprints) would otherwise push a 2-terminal cap past the 2-pad
+            # test and wrongly exclude it from placement (#130).
+            n_copper = sum(1 for p in fp.pads
+                           if any(str(l).endswith('.Cu') for l in p.layers))
+            is_cap = (ref.startswith(cap_prefix) and n_copper <= 2
                       and ref not in locked)
             if is_cap:
                 cap = _Cap(fp, lb)
