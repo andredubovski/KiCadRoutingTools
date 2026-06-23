@@ -486,9 +486,11 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     track_edge_clearance = edge_clearance + config.track_width / 2 + extra_clearance
     via_edge_clearance = edge_clearance + config.via_size / 2 + extra_clearance
 
-    # Convert to grid coordinates
+    # Convert to grid coordinates. Use to_grid_dist_safe (ceil) for the via
+    # keep-out so grid quantization can't leave a via inside the edge clearance
+    # (#170) - mirrors the via-clearance rounding in the obstacle cache.
     track_expand = coord.to_grid_dist(track_edge_clearance)
-    via_expand = coord.to_grid_dist(via_edge_clearance)
+    via_expand = coord.to_grid_dist_safe(via_edge_clearance)
 
     # Get grid bounds
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -539,39 +541,70 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,
                                      gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
                                      track_expand: int, via_expand: int):
-    """Add obstacles for simple rectangular board outline."""
-    grid_margin = max(track_expand, via_expand) + 5
+    """Add obstacles for simple rectangular board outline.
 
-    # Block left edge
-    for gx in range(gmin_x - grid_margin, gmin_x + track_expand + 1):
+    The via keep-out band (via_expand) reaches FURTHER inboard than the track
+    band (track_expand) because a via is wider than a track. Each edge sweep must
+    therefore cover max(track_expand, via_expand) cells in from the edge and block
+    track layers / vias per-cell: sweeping only track_expand (the old behaviour)
+    never visited the inner via-only band, so route.py dropped vias up to
+    (via_expand - track_expand) cells past the via keep-out, intruding into the
+    board-edge clearance (#170). The track keep-out and the parallel corner
+    handoff to the left/right sweeps are unchanged.
+    """
+    edge_expand = max(track_expand, via_expand)
+    grid_margin = edge_expand + 5
+
+    # Block left edge (full height, so it also covers the via band at both left corners)
+    for gx in range(gmin_x - grid_margin, gmin_x + edge_expand + 1):
+        block_track = gx <= gmin_x + track_expand
+        block_via = gx < gmin_x + via_expand
+        if not (block_track or block_via):
+            continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gx < gmin_x + via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block right edge
-    for gx in range(gmax_x - track_expand, gmax_x + grid_margin + 1):
+    # Block right edge (full height)
+    for gx in range(gmax_x - edge_expand, gmax_x + grid_margin + 1):
+        block_track = gx >= gmax_x - track_expand
+        block_via = gx > gmax_x - via_expand
+        if not (block_track or block_via):
+            continue
         for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gx > gmax_x - via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block top edge (excluding corners already done)
-    for gy in range(gmin_y - grid_margin, gmin_y + track_expand + 1):
+    # Block top edge (middle span; corners covered by the left/right sweeps above)
+    for gy in range(gmin_y - grid_margin, gmin_y + edge_expand + 1):
+        block_track = gy <= gmin_y + track_expand
+        block_via = gy < gmin_y + via_expand
+        if not (block_track or block_via):
+            continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gy < gmin_y + via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
-    # Block bottom edge (excluding corners already done)
-    for gy in range(gmax_y - track_expand, gmax_y + grid_margin + 1):
+    # Block bottom edge (middle span)
+    for gy in range(gmax_y - edge_expand, gmax_y + grid_margin + 1):
+        block_track = gy >= gmax_y - track_expand
+        block_via = gy > gmax_y - via_expand
+        if not (block_track or block_via):
+            continue
         for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            for layer_idx in range(num_layers):
-                obstacles.add_blocked_cell(gx, gy, layer_idx)
-            if gy > gmax_y - via_expand:
+            if block_track:
+                for layer_idx in range(num_layers):
+                    obstacles.add_blocked_cell(gx, gy, layer_idx)
+            if block_via:
                 obstacles.add_blocked_via(gx, gy)
 
 
