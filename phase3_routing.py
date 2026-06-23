@@ -41,6 +41,38 @@ class Phase3Stats:
     total_time: float = 0.0
 
 
+def _nets_crossing_segments(segs, pcb_data, exclude_net_id, exclude_ids):
+    """Net IDs (other than exclude_net_id / exclude_ids) with a segment that truly
+    crosses any segment in `segs` on the same layer (a real different-net short).
+
+    Used when a tap rip-up is abandoned: a net re-routed by a NESTED rip-up cascade
+    can have been laid across the original tap we are about to keep -- that net is
+    NOT in this frame's ripped_items (it was a nested victim), so the #171 cleanup
+    misses it and a SEGMENT-CROSSING short ships (issue #186). Finding it here lets
+    the abandon re-route it clear of the original tap too.
+    """
+    from check_drc import segments_cross
+    if not segs:
+        return []
+    hits = set()
+    for ts in segs:
+        tminx, tmaxx = sorted((ts.start_x, ts.end_x))
+        tminy, tmaxy = sorted((ts.start_y, ts.end_y))
+        for other in pcb_data.segments:
+            if other.net_id in hits or other.net_id == exclude_net_id \
+                    or other.net_id in exclude_ids or other.layer != ts.layer:
+                continue
+            if (max(other.start_x, other.end_x) < tminx or
+                    min(other.start_x, other.end_x) > tmaxx or
+                    max(other.start_y, other.end_y) < tminy or
+                    min(other.start_y, other.end_y) > tmaxy):
+                continue
+            crosses, _ = segments_cross(ts, other)
+            if crosses:
+                hits.add(other.net_id)
+    return list(hits)
+
+
 def _reconcile_multipoint_connectivity(new_result, pcb_data, config, net_id):
     """Re-derive a multipoint result's routed/failed pads from the net's ACTUAL
     copper currently in pcb_data, via the same union-find used for MST seeding.
@@ -575,6 +607,27 @@ def try_phase3_ripup(
                                 state.ripped_route_layer_costs, state.ripped_route_via_positions,
                                 layer_map
                             )
+                    # Issue #186: also re-route any OTHER routed net whose copper
+                    # crosses the original tap we are keeping. A net re-routed by a
+                    # nested rip-up cascade can have been laid across this tap (it was
+                    # in-flight, invisible copper then) and is not in ripped_items, so
+                    # the loop above misses it and a different-net SHORT would ship.
+                    existing_ids = {it[0] for it in reroute_items}
+                    for cid in _nets_crossing_segments(orig_tap_segs, pcb_data, net_id, existing_ids):
+                        if cid not in routed_results:
+                            continue
+                        c_saved, c_ripped, c_was_in = rip_up_net(
+                            cid, pcb_data, routed_net_ids, routed_net_paths,
+                            routed_results, diff_pair_by_net_id, remaining_net_ids,
+                            results, config, track_proximity_cache,
+                            state.working_obstacles, state.net_obstacles_cache,
+                            state.ripped_route_layer_costs, state.ripped_route_via_positions,
+                            layer_map
+                        )
+                        if c_saved is not None:
+                            print(f"    {net_name}: re-routing {pcb_data.nets[cid].name if cid in pcb_data.nets else f'net_{cid}'} "
+                                  f"clear of the kept tap (crossed it; issue #186)")
+                            reroute_items.append((cid, c_saved, c_ripped, c_was_in))
                     _reroute_phase3_ripped_nets(
                         reroute_items,
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
