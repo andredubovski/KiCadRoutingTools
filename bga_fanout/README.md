@@ -134,6 +134,24 @@ python bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
 
+## After fanout: optimize decoupling-cap placement (issue #130)
+
+A fanout drops vias near the ball field. Where a foreign-net via lands under a
+decoupling cap placed at a ball, the via copper overlaps the cap pad — a real
+`PAD-VIA` DRC violation at the clearance floor. The fix is *placement*, so run
+[`place_fanout_clearance.py`](../placement/README.md) on the **fanned** board
+to nudge those caps clear and pull each pad toward its nearest same-net ball
+(so a power/GND via dropped there later shares the via):
+
+```bash
+python place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
+```
+
+Use the same `--clearance` as the fanout. It only moves 2-pad caps near a BGA,
+never overlaps caps, and is a no-op when nothing collides — so run it after
+each fanout, before signal routing. (GUI: the "Optimize decoupling cap
+placement" checkbox on the BGA fanout tab does this automatically.)
+
 ## Module Structure
 
 ```

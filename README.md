@@ -159,6 +159,10 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 # Optionally optimize an existing placement for routability (before routing)
 python place_optimize.py my_board.kicad_pcb --max-displacement 3
 
+# Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
+python bga_fanout.py my_board.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
+python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+
 # Route all nets
 python route.py my_board.kicad_pcb
 
@@ -283,6 +287,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
 - Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](bga_fanout/README.md#escape-methods)
+- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 

@@ -213,6 +213,16 @@ nets** (they tap their plane), so create the planes first (or exclude power with
 `--nets`). Rule of thumb: try `channel` first (keeps diff pairs); fall back to
 `underpad` when `channel` can't escape a dense array.
 
+**After every BGA/PGA fanout, run the decoupling-cap placement optimizer
+(#130).** A fanout drops vias near the ball field; where a foreign-net via
+lands under a decoupling cap placed at a ball, the via copper overlaps the
+cap pad → a real `PAD-VIA` DRC violation at the clearance floor. The fix is
+placement, so run `place_fanout_clearance.py` on the **fanned** board to
+nudge those caps clear (and pull each pad toward its nearest same-net ball so
+a power/GND via dropped there later shares the via). See "Step 1b" below for
+the command. It's cheap, only touches caps near a BGA, and is a no-op when
+nothing collides — so run it after each fanout step before moving on.
+
 Report to user:
 - List of components that may need fanout
 - Package type, pad count, and grid depth for each
@@ -471,7 +481,9 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 ### Routing Order Rationale
 
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
-   nets that planes will handle (`"*" "!GND" "!VCC"`).
+   nets that planes will handle (`"*" "!GND" "!VCC"`). **After each BGA/PGA
+   fanout, run `place_fanout_clearance.py`** (Step 1b) to clear decoupling-cap /
+   fanout-via collisions (#130) before signal routing.
 2. **Differential Pairs** - The most constrained routes claim their channels before
    anything else can block them (if present). Add `--impedance <ohms>` for the
    controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
@@ -555,6 +567,24 @@ common case (an 0.8 mm-pitch BGA can't fit a track between balls at 0.2 mm). If 
 short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proceed
 to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
 accepted).
+
+### Step 1b: Optimize Decoupling-Cap Placement (run after EACH BGA fanout — issue #130)
+Nudges decoupling caps near the BGA off the foreign-net fanout vias (the
+`PAD-VIA` violations #130) and pulls each pad toward its nearest same-net
+ball. Run it on the just-fanned board, **before** signal routing. Use the
+**same `--clearance`** you gave the fanout / your DRC floor — that's the only
+setting that matters (it reads each via's real size from the board).
+
+python3 place_fanout_clearance.py board_step1.kicad_pcb board_step1b.kicad_pcb \
+    --clearance 0.1
+
+It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**
+caps had no clear spot within the displacement budget — note them for a manual
+nudge; they are not auto-fixed. It only moves 2-pad caps near a BGA, never
+overlaps caps, and is a no-op when nothing collides. Feed `board_step1b.kicad_pcb`
+into the next step (if multiple BGAs are fanned in series, run this once after
+each, or once after the last fanout — it considers all BGAs' vias on the board).
+Verify with `check_drc.py board_step1b.kicad_pcb -c 0.1` (PAD-VIA count drops).
 
 ### Step 2b: Impedance-Controlled Single-Ended Nets (only if any were found; runs before the Step 2 signal route)
 ONLY when `/find-high-speed-nets` reported single-ended controlled-impedance nets

@@ -202,6 +202,17 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    UNDER the pad field on inner layers and escapes what channel can't (-> 0). It
    routes diff pairs single-ended and skips power/plane nets (plane them first).
    Do not start signal routing while balls are dropped.
+   DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
+   (escaped == requested) and BEFORE signal routing, run
+   `python3 place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
+   --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
+   landing under a decoupling cap is a real PAD-VIA at the floor; this nudges
+   those caps clear and pulls each pad toward its nearest same-net ball (so a
+   later power/GND via shares the via). It reads each via's real size from the
+   board, only moves 2-pad caps near a BGA, never overlaps caps, and is a no-op
+   when nothing collides. It prints `resolved R/M ... K unresolved`; unresolved
+   caps need a manual nudge. Feed `<out>` into the next step; verify with
+   `check_drc.py <out> -c <floor>` (PAD-VIA drops).
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use
    --no-gnd-vias). CRITICAL: a pair whose pads are on a BGA/PGA being fanned
