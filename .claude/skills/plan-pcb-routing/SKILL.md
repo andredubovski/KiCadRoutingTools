@@ -180,18 +180,49 @@ still reports `failed: 0` (its success metric ignores sub-clearance grazes). The
 budget, per array (measure each component's own pitch — they differ):
 
 ```
-via_size ≤ pitch − track_width − 2·clearance        (one escape track per channel)
-          and  via_size ≥ via_drill + 2·min_annular_ring   (fab floor)
+via_size + track_width + 2·clearance + margin ≤ pitch     (one escape track per channel)
+via_size ≥ via_drill + 2·min_annular_ring,  track_width ≥ fab min track   (fab floors)
 ```
 
-So: read the array's ball pitch (`list_nets.py --design-rules` gives clearance;
-the pitch is the min ball spacing), compute `via_max = pitch − track − 2·clearance`,
-and pass `--via-size min(chosen, via_max)` clamped to the fab annular-ring floor.
-Worked example (keks U1, pitch 0.8, track 0.127, clearance 0.1):
-`via_max = 0.8 − 0.127 − 0.2 = 0.473` → **Ø0.5 grazes (163 DRC), Ø0.45 is clean (0),
-both escape all 129 balls.** If the interval is empty (even the min via won't fit),
-narrow the track, shrink the drill, or add escape layers — don't ship the graze.
-`bga_fanout.py` itself warns `WARNING: escape via ... busts the half-pitch budget`
+Don't just shrink the via against a *fixed* track — **solve for via AND track
+together**, taking each down toward the fab floor as the pitch demands, and leave
+a little margin so the result clears DRC instead of merely touching it. Read each
+array's own ball pitch `P` (the min ball spacing — arrays on one board differ) and
+the requested clearance `C` (Default net-class clearance from
+`list_nets.py --design-rules`), plus the board's fab floors (`min_track_width`,
+`min_via_diameter`/`min_via_drill`, annular ring), then:
+
+```python
+margin = 0.05                                  # slack: clear DRC, don't graze it
+budget = P - 2*C - margin                       # room for one via + one track
+track  = max(min(nominal_track, 0.15), min_track_width)   # keep a routable track
+via    = min(nominal_via, budget - track)       # largest via that still fits
+if via < via_floor:                # via fell below the floor -> thin the track to free room
+    via   = via_floor
+    track = max(min_track_width, budget - via)
+infeasible = track < min_track_width or via < via_floor   # even fab floors won't fit
+via_drill  = max(min_via_drill, via - 2*min_annular_ring)  # hold the annular ring at floor
+# via_floor = max(min_via_diameter, min_via_drill + 2*min_annular_ring)
+```
+
+Pass the computed `--via-size via --via-drill via_drill --track-width track
+--clearance C` to the fanout step. If `infeasible`, the pitch can't take a channel
+escape even at the fab floor → switch to `--escape-method underpad` and/or add
+escape layers; don't ship the graze.
+
+**Why this heuristic matters for the GUI:** the plugin runs `/plan-pcb-routing` in
+*plan-only* mode — it never executes the fanout and never runs the DRC↔smaller-via
+retry loop, so it cannot discover a too-big via after the fact and shrink it. The
+plan must therefore carry via/track that are **already** DRC-safe for the pitch.
+Computing them here — both dimensions, with margin, clamped to the fab floor — is
+what lets the single fanout the GUI runs come out clean the first time.
+
+Worked example (keks U1, pitch 0.8, clearance 0.1, fab floor track 0.1 / via 0.45):
+`budget = 0.8 − 0.2 − 0.05 = 0.55`; track 0.127 → via = min(working, 0.55−0.127) =
+**0.42** (≥ floor) → DRC-clean, vs the Ø0.5 the net-class default would have used
+(163 grazes). At 0.4 mm pitch the budget forces both to the floor (track 0.10, via
+~0.30/0.20 advanced); if even those don't fit, go `--escape-method underpad`.
+`bga_fanout.py` also warns `WARNING: escape via ... busts the half-pitch budget`
 when handed infeasible params, but choose feasible ones here so it never fires.
 
 **Always check the fanout escaped all requested balls.** `bga_fanout.py` ends with
