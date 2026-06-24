@@ -618,29 +618,3 @@ def precompute_via_placement_obstacles(
         blocked_cells_by_layer=blocked_cells_arrays
     )
 
-
-def remove_via_placement_obstacles(
-    via_obstacles: 'GridObstacleMap',
-    routing_obstacles_by_layer: Dict[str, 'GridObstacleMap'],
-    cache: ViaPlacementObstacleData
-):
-    """
-    Remove a net's obstacles from the via and routing obstacle maps.
-
-    Used for incremental updates when ripping up a net during plane via placement.
-
-    Args:
-        via_obstacles: Via obstacle map to update
-        routing_obstacles_by_layer: Dict of routing obstacle maps per layer
-        cache: Pre-computed ViaPlacementObstacleData for this net
-    """
-    # Remove from via obstacle map
-    if len(cache.blocked_vias) > 0:
-        via_obstacles.remove_blocked_vias_batch(cache.blocked_vias)
-
-    # Remove from routing obstacle maps (single-layer maps use layer_idx=0)
-    for layer, cells in cache.blocked_cells_by_layer.items():
-        if layer in routing_obstacles_by_layer and len(cells) > 0:
-            obs = routing_obstacles_by_layer[layer]
-            cells_3d = np.column_stack([cells, np.zeros(len(cells), dtype=np.int32)])
-            obs.remove_blocked_cells_batch(cells_3d)

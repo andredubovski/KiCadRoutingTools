@@ -266,7 +266,7 @@ def copy_plugin(source_dir: Path, dest_dir: Path):
         shutil.rmtree(dest_dir)
 
     # Copy everything, excluding unnecessary files
-    def ignore_patterns(directory, files):
+    def ignore_patterns(_directory, files):
         ignored = []
         for f in files:
             # Keep .claude/ (routing skills) for use from the installed plugin.
