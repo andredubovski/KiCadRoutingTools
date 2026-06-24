@@ -441,6 +441,29 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
                 if _point_in_pad(vx, vy, pad, margin=tolerance):
                     uf.union(pad_repr_id[pad_idx], via_repr_id[via_idx])
 
+    # A track that *ends inside* a pad's copper outline connects that pad even
+    # when the endpoint is offset from the pad centre by more than the tight
+    # centre-to-centre tolerance above — e.g. a route landing in a large
+    # through-hole connector pad enters the annular ring but stops well over
+    # size/4 from the pad centre, so the proximity test misses it though the
+    # copper physically touches (issue #195). Mirror the via-in-pad rule onto
+    # segment endpoints: union a pad to any segment endpoint that lies within the
+    # pad outline on a copper layer the pad occupies.
+    if pad_repr_id and segments:
+        endpoint_index = SpatialIndex(cell_size=1.0)
+        for seg_idx, seg in enumerate(segments):
+            if seg.layer.endswith('.Cu'):
+                endpoint_index.add(seg.start_x, seg.start_y, seg.layer, seg_idx * 2, seg.width)
+                endpoint_index.add(seg.end_x, seg.end_y, seg.layer, seg_idx * 2 + 1, seg.width)
+        for pad_idx in pad_repr_id:
+            pad = pads[pad_idx]
+            reach = max(pad.size_x, pad.size_y) / 2 + tolerance
+            for layer in pad_copper_layers[pad_idx]:
+                for ex, ey, eid, _ in endpoint_index.query_nearby(
+                        pad.global_x, pad.global_y, layer, reach):
+                    if _point_in_pad(ex, ey, pad, margin=tolerance):
+                        uf.union(pad_repr_id[pad_idx], eid)
+
     # Build spatial index for segments
     seg_index = SegmentIndex(cell_size=1.0)
     for seg_idx, seg in enumerate(segments):

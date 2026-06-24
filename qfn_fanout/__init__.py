@@ -241,9 +241,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             placed_global.append((vx, vy, pi.pad.net_id))
             px, py = pi.pad.global_x, pi.pad.global_y
             # Zero-length stub (via centred on the pad) needs no track.
+            # The connecting stub bridges the pad to the via, so it must live on
+            # the pad's own copper layer (the footprint mount layer) -- the
+            # through-via then carries the net down to the `--layer` target.
+            # Putting it on `layer` (an inner/back escape layer) would float it
+            # above the pad and leave the pad disconnected (issue #195).
             if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
                 tracks.append({'start': (px, py), 'end': (vx, vy),
-                               'width': track_width, 'layer': layer,
+                               'width': track_width, 'layer': footprint.layer,
                                'net_id': pi.pad.net_id})
             vias.append({'x': vx, 'y': vy, 'size': via_size, 'drill': via_drill,
                          'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})

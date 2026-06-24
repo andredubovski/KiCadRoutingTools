@@ -193,6 +193,89 @@ def _setback_ladder(setback, spacing_mm, pad_gap_half, config):
     return ladder
 
 
+def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
+    """Routing-layer indices a coupled launch may use at endpoint (x, y) of `net_id`.
+
+    A diff-pair terminal that sits on a through-via or a through-hole pad can
+    launch on ANY routing layer that copper spans, not just the stub's layer --
+    the existing barrel already ties the layers together (issue #195). Returns
+    the set of indices into config.layers that an existing via/THT pad of this
+    net at (x, y) connects. The router uses this to retry the setback search on
+    an open inner layer when the stub layer's corridor is jammed.
+    """
+    if tol is None:
+        tol = config.grid_step * 1.5
+    copper = getattr(pcb_data.board_info, 'copper_layers', None) or list(config.layers)
+    cu_index = {name: i for i, name in enumerate(copper)}
+    routing_idx = {name: i for i, name in enumerate(config.layers)}
+
+    def _span_all():
+        return {ridx for lname, ridx in routing_idx.items() if lname in cu_index}
+
+    spanned = set()
+    # Through-vias: span from their top to bottom copper layer.
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        if abs(via.x - x) > tol or abs(via.y - y) > tol:
+            continue
+        vlayers = via.layers or ['F.Cu', 'B.Cu']
+        v_idxs = [cu_index[l] for l in vlayers if l in cu_index]
+        if not v_idxs:
+            continue
+        lo, hi = min(v_idxs), max(v_idxs)
+        for lname, ridx in routing_idx.items():
+            if lname in cu_index and lo <= cu_index[lname] <= hi:
+                spanned.add(ridx)
+    # Through-hole pads (drill > 0) span every copper layer, like a via barrel.
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if getattr(pad, 'drill', 0) and pad.drill > 0 and \
+                abs(pad.global_x - x) <= tol and abs(pad.global_y - y) <= tol:
+            spanned |= _span_all()
+            break
+    return spanned
+
+
+def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
+                                    alt_layers, setback, pad_gap_half, label,
+                                    layer_names, spacing_mm, config, obstacles,
+                                    connector_obstacles, coord, neighbor_stubs):
+    """_find_open_positions_laddered, but free to launch on an alternate routing
+    layer reachable through the endpoint's via/THT barrel (issue #195).
+
+    Tries the stub layer first and keeps it when it yields a clean (non-rotated)
+    launch -- unchanged behaviour. Only when the stub layer is fully blocked or
+    can launch solely by rotating sideways does it retry the alternate layers
+    (e.g. an open inner layer under a chip) for a clean launch. Returns
+    (candidates, used_setback, rotated, launch_layer_idx).
+    """
+    cands, used, rotated = _find_open_positions_laddered(
+        center_x, center_y, dir_x, dir_y, layer_idx, setback, pad_gap_half,
+        label, layer_names, spacing_mm, config, obstacles, connector_obstacles,
+        coord, neighbor_stubs)
+    if cands and not rotated:
+        return cands, used, rotated, layer_idx
+
+    fallback = (cands, used, rotated, layer_idx) if cands else None
+    for alt in alt_layers:
+        if alt == layer_idx:
+            continue
+        a_cands, a_used, a_rot = _find_open_positions_laddered(
+            center_x, center_y, dir_x, dir_y, alt, setback, pad_gap_half,
+            label, layer_names, spacing_mm, config, obstacles,
+            connector_obstacles, coord, neighbor_stubs)
+        if a_cands and not a_rot:
+            print(f"      {label}: {layer_names[layer_idx]} corridor jammed - "
+                  f"launching on {layer_names[alt]} (reachable through the endpoint via)")
+            return a_cands, a_used, a_rot, alt
+        if fallback is None and a_cands:
+            fallback = (a_cands, a_used, a_rot, alt)
+
+    if fallback is not None:
+        return fallback
+    return [], setback, False, layer_idx
+
+
 def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
                                   setback, pad_gap_half, label, layer_names,
                                   spacing_mm, config, obstacles,
@@ -1621,19 +1704,33 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     src_pad_gap_half = math.hypot(p_src_x - n_src_x, p_src_y - n_src_y) / 2
     tgt_pad_gap_half = math.hypot(p_tgt_x - n_tgt_x, p_tgt_y - n_tgt_y) / 2
 
+    # Alternate launch layers reachable through each terminal's via/THT barrel,
+    # common to both P and N so the pair can launch coupled there (issue #195).
+    # Empty when the terminal isn't via-backed -> multilayer search degenerates
+    # to the single-layer ladder (no behaviour change).
+    src_alt_layers = sorted(
+        (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_src_x, p_src_y, config) &
+         _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config))
+        - {src_layer})
+    tgt_alt_layers = sorted(
+        (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
+         _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config))
+        - {tgt_layer})
+
     # Get all valid setback positions for source and target, sorted by
-    # preference, scanning a ladder of radii per terminal (issue #90)
-    src_candidates, _, src_rotated = _find_open_positions_laddered(
-        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
-        src_pad_gap_half, "source",
+    # preference, scanning a ladder of radii per terminal (issue #90), free to
+    # switch to an open inner layer through the endpoint via (issue #195)
+    src_candidates, _, src_rotated, src_layer = _find_open_positions_multilayer(
+        center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, src_alt_layers,
+        setback_src, src_pad_gap_half, "source",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not src_candidates and src_dir_synth and not src_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         src_dir_x, src_dir_y = -src_dir_x, -src_dir_y
-        src_candidates, _, src_rotated = _find_open_positions_laddered(
-            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, setback_src,
-            src_pad_gap_half, "source",
+        src_candidates, _, src_rotated, src_layer = _find_open_positions_multilayer(
+            center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, src_alt_layers,
+            setback_src, src_pad_gap_half, "source",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not src_candidates:
@@ -1642,18 +1739,19 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None
+    src_layer_name = layer_names[src_layer]
 
-    tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
-        tgt_pad_gap_half, "target",
+    tgt_candidates, _, tgt_rotated, tgt_layer = _find_open_positions_multilayer(
+        center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, tgt_alt_layers,
+        setback_tgt, tgt_pad_gap_half, "target",
         layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
     )
     if not tgt_candidates and tgt_dir_synth and not tgt_flip:
         # Synthesized direction blocked - try escaping from the opposite side
         tgt_dir_x, tgt_dir_y = -tgt_dir_x, -tgt_dir_y
-        tgt_candidates, _, tgt_rotated = _find_open_positions_laddered(
-            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, setback_tgt,
-            tgt_pad_gap_half, "target",
+        tgt_candidates, _, tgt_rotated, tgt_layer = _find_open_positions_multilayer(
+            center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, tgt_alt_layers,
+            setback_tgt, tgt_pad_gap_half, "target",
             layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
         )
     if not tgt_candidates:
@@ -1662,6 +1760,7 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             config, obstacles, connector_obstacles, coord
         )
         return None, 0, blocked, None
+    tgt_layer_name = layer_names[tgt_layer]
 
     # Calculate turning radius in grid units
     min_radius_grid = config.min_turning_radius / config.grid_step

@@ -13,7 +13,7 @@ from kicad_parser import (
     auto_detect_bga_exclusion_zones
 )
 from routing_config import GridRouteConfig
-from connectivity import get_net_endpoints
+from connectivity import get_net_endpoints, _point_in_polygon
 from obstacle_map import build_base_obstacle_map
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, precompute_net_obstacles,
@@ -123,6 +123,84 @@ def resolve_net_ids(pcb_data: PCBData, net_names: List[str]) -> List[Tuple[str, 
             net_ids.append((net_name, net_id))
 
     return net_ids
+
+
+def _dist_point_to_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> float:
+    """Minimum distance from (x, y) to the closest edge of a closed polygon."""
+    best = float('inf')
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq <= 1e-12:
+            d = ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5
+        else:
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / seg_len_sq))
+            cx, cy = x1 + t * dx, y1 + t * dy
+            d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+        if d < best:
+            best = d
+    return best
+
+
+def warn_targets_outside_board(pcb_data: PCBData,
+                               net_ids: List[Tuple[str, int]],
+                               edge_margin: float = 0.0,
+                               label: str = "target") -> List[Tuple]:
+    """Warn about pads of the nets being routed that sit at/over the board edge.
+
+    A pad whose centre falls outside the board outline is unroutable -- the
+    router blocks routing beyond the edge -- and the only symptom is a silent
+    exhaustive-search failure (issue #195: a connector footprint hanging off the
+    bottom of the board). A pad just inside but within the edge keep-out is
+    likely unroutable too. Both are flagged here, before routing, so the cause is
+    obvious instead of looking like a router failure.
+
+    Returns the list of (net_name, where, x, y, kind) flagged pads ('outside' or
+    'near-edge'); also prints a human-readable warning block when non-empty.
+    """
+    bounds = getattr(pcb_data.board_info, 'board_bounds', None)
+    if not bounds:
+        return []
+    outline = getattr(pcb_data.board_info, 'board_outline', None)
+    has_poly = bool(outline) and len(outline) >= 3
+    min_x, min_y, max_x, max_y = bounds
+
+    flagged = []
+    seen = set()
+    for net_name, net_id in net_ids:
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            key = (round(pad.global_x, 3), round(pad.global_y, 3), net_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            x, y = pad.global_x, pad.global_y
+            if has_poly:
+                inside = _point_in_polygon(x, y, outline)
+                dist = _dist_point_to_polygon(x, y, outline) if inside else -1.0
+            else:
+                dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+                inside = dist >= 0
+            ref = getattr(pad, 'component_ref', '') or ''
+            padnum = getattr(pad, 'pad_number', '')
+            where = f"{ref}.{padnum}" if ref else f"pad {padnum}"
+            if not inside:
+                flagged.append((net_name, where, x, y, 'outside'))
+            elif edge_margin > 0 and dist < edge_margin:
+                flagged.append((net_name, where, x, y, 'near-edge'))
+
+    if flagged:
+        print(f"\nWARNING: {len(flagged)} {label} pad(s) at/over the board outline "
+              f"-- these may be unroutable (the router cannot route past the board edge):")
+        for net_name, where, x, y, kind in flagged:
+            if kind == 'outside':
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is OUTSIDE the board outline")
+            else:
+                print(f"    {net_name} ({where}) at ({x:.2f}, {y:.2f}) is within "
+                      f"{edge_margin:.2f}mm of the board edge (inside the edge keep-out)")
+    return flagged
 
 
 def filter_already_routed(

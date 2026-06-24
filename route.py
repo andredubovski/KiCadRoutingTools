@@ -81,7 +81,7 @@ from net_ordering import order_nets_mps, order_nets_inside_out
 from routing_common import (
     setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
     run_length_matching, sync_pcb_data_segments,
-    get_common_config_kwargs
+    get_common_config_kwargs, warn_targets_outside_board
 )
 import routing_defaults as defaults
 import re
@@ -376,6 +376,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Find net IDs and filter already-routed nets
     net_ids = resolve_net_ids(pcb_data, net_names)
+    # Flag target pads that sit at/over the board edge before routing, so an
+    # unroutable off-board pad reads as a clear warning rather than a silent
+    # exhaustive-search failure (issue #195).
+    _edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    warn_targets_outside_board(pcb_data, net_ids,
+                               edge_margin=_edge_clear + track_width / 2)
     # Every net in this run's --nets filter, by name (not just the routable ones
     # resolve_net_ids keeps). The dead-end sweep uses this so it also cleans
     # inherited stubs on in-filter nets it did not actively route -- single-pad,
