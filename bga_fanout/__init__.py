@@ -1521,8 +1521,11 @@ def generate_bga_fanout(footprint: Footprint,
             (issue #122): every signal ball drops a via in its pad and routes
             straight UNDER the pad field on an inner layer, jogging into a
             between-ball channel only to dodge a via. It escapes fully-populated
-            arrays the channel router can't (ulx3s 22x22), but routes diff pairs
-            as single-ended. Power/plane nets are skipped (they tap their plane).
+            arrays the channel router can't (ulx3s 22x22). When diff_pair_patterns
+            are given it escapes those pairs COUPLED (issue #182) - via-free on
+            the top layer for edge pairs, on an inner layer with via-in-pad for
+            deeper ones - so route_diff picks them up. Power/plane nets are
+            skipped (they tap their plane).
 
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
@@ -1597,11 +1600,18 @@ def generate_bga_fanout(footprint: Footprint,
         net_filter_fn = None
         if net_filter:
             net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+        # Differential pairs (issue #182): escape each pair coupled so route_diff
+        # can pick the two halves up (without this they go single-ended).
+        up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
+                         if diff_pair_patterns else {})
+        if up_diff_pairs:
+            print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
             footprint, pcb_data, grid, layers,
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
             net_filter_fn=net_filter_fn,
+            diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
         )
         return tracks, vias_to_add, [], failed_nets
 

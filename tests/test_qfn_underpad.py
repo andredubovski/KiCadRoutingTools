@@ -5,19 +5,18 @@ Escapes a fine-pitch QFN diff pair (tigard U3, QFN-64 0.5mm, /USB_DP+/USB_DN)
 by dropping a staggered through-via just past each pad instead of the surface
 45-degree fan. Asserts both halves escape and the two different-net vias clear.
 
-Skips if the stress corpus board isn't present (it lives outside the repo).
+Uses kicad_files/tigard.kicad_pcb; skips cleanly if absent.
 """
 import math
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 from kicad_parser import parse_kicad_pcb
 from qfn_fanout import generate_qfn_fanout
 
-BOARD = os.path.join(
-    os.environ.get("STRESS_DIR", os.path.expanduser("~/Documents/kicad_stress_test")),
-    "boards_unrouted_set3", "tigard.kicad_pcb")
+BOARD = os.path.join(ROOT, "kicad_files", "tigard.kicad_pcb")
 
 VIA_SIZE, CLEARANCE = 0.45, 0.1
 

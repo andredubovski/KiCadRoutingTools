@@ -120,7 +120,16 @@ computes this automatically.
   - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.
   - **Power/plane nets are skipped** - they tap their plane through a via, not a
     lateral escape. (Plane the power nets first, or exclude them with `--nets`.)
-  - Diff pairs are routed as **single-ended** (the pair geometry isn't preserved).
+  - **Differential pairs are escaped coupled** when `--diff-pairs` is given
+    (issue #182): each pair's P and N exit on the **same layer**, converged to
+    the diff spacing and extended past the boundary, so `route_diff` picks them
+    up. Edge pairs escape **via-free on the top layer** (broadside pairs straight
+    off the boundary; stacked pairs *END-ON*, the trail ball bulging through the
+    pad gap), which keeps the rim via-free so the **deeper stacked pairs escape
+    END-ON on an inner layer** (via-in-pad, same layer for P/N) running underneath
+    them. A pair that can't fit a coupled corridor falls back to single-ended
+    (still connected, just not coupled). On `glasgow_revC` (BGA U30, 0.8 mm
+    pitch) all 13 FPGA Z-pairs escape coupled and route_diff couples them.
   - Use a **small via and track** for the pitch - the escape needs one clean
     track between adjacent via-in-pads, roughly `via ≤ pitch − 2·track − 2·clearance`.
     For 0.8 mm pitch, `--via-size 0.35 --track-width 0.12 --clearance 0.1` works well.
@@ -128,9 +137,9 @@ computes this automatically.
     runs on the BGA's own layer.
 
 ```bash
-# Dense BGA that the channel router can't fully escape
+# Dense BGA that the channel router can't fully escape (diff pairs escaped coupled)
 python bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
-    --layers F.Cu In1.Cu In2.Cu B.Cu \
+    --layers F.Cu In1.Cu In2.Cu B.Cu --diff-pairs "*" \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
 
