@@ -233,6 +233,9 @@ class _Repair:
                 if p.net_id > 0:
                     self.attract.setdefault(p.net_id, []).append(
                         (p.global_x, p.global_y))
+        # Kept for visualization (animate_fanout_clearance.py): the BGA ball-field
+        # bounding boxes that define the region of interest.
+        self.bga_bboxes = bga_bboxes
 
         # --- static obstacle rects (locked parts incl. BGAs) ---
         # and movable caps near a BGA. Courtyard collisions are checked
@@ -389,13 +392,19 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             cap_prefix: str = "C,R",
                             lock_refs: Optional[List[str]] = None,
                             max_passes: int = 30,
-                            verbose: bool = False) -> Dict:
+                            verbose: bool = False,
+                            on_move=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout vias and toward
     same-net balls. Run AFTER bga_fanout.py.
 
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
     new_rotation} for moved caps), 'resolved', 'unresolved' (refs still
     overlapping a foreign via), and 'bga_refs'.
+
+    on_move, if given, is a callback invoked with the internal _Repair state
+    once at the seed placement and again after every accepted cap move. It is
+    used purely for visualization (animate_fanout_clearance.py) and has no
+    effect on the result.
     """
     extra_locked: Set[str] = set()
     if lock_refs:
@@ -426,6 +435,9 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     print(f"Caps initially overlapping a foreign via: {len(violators0)}"
           + (f" ({', '.join(sorted(violators0))})" if violators0 else ""))
 
+    if on_move is not None:
+        on_move(st)  # seed frame
+
     budget = {r: max_displacement for r in st.caps}
     rotate = {r: False for r in st.caps}
     # process worst violators first
@@ -449,6 +461,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             if best[0] < current - EPS:
                 cap.x, cap.y, cap.rot = best[1], best[2], best[3]
                 moves += 1
+                if on_move is not None:
+                    on_move(st)
                 if verbose:
                     print(f"  pass {pass_num}: {ref} -> "
                           f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g} "
