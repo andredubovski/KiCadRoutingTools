@@ -41,14 +41,14 @@ from connectivity import (
 )
 from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
-    compute_mps_net_ordering, find_pad_nearest_to_position, find_pad_at_position,
+    compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, find_single_ended_nets, identify_power_nets
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
-    build_base_obstacle_map_with_vis, add_net_obstacles_with_vis, get_net_bounds,
+    build_base_obstacle_map_with_vis, get_net_bounds,
     VisualizationData, draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from obstacle_costs import (
@@ -58,7 +58,7 @@ from obstacle_costs import (
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
-from single_ended_routing import (route_net, route_net_with_obstacles, route_net_with_visualization,
+from single_ended_routing import (route_net_with_obstacles, route_net_with_visualization,
                                    route_multipoint_taps, build_corridor_waypoints)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -80,7 +80,7 @@ from phase3_routing import run_phase3_tap_routing
 from net_ordering import order_nets_mps, order_nets_inside_out
 from routing_common import (
     setup_bga_exclusion_zones, resolve_net_ids, filter_already_routed,
-    build_obstacle_infrastructure, run_length_matching, sync_pcb_data_segments,
+    run_length_matching, sync_pcb_data_segments,
     get_common_config_kwargs
 )
 import routing_defaults as defaults

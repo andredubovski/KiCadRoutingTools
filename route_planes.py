@@ -26,7 +26,7 @@ from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
 from route import batch_route
-from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_obstacles
+from obstacle_cache import ViaPlacementObstacleData
 from connectivity import compute_mst_segments
 
 # Import from new refactored modules
@@ -119,36 +119,6 @@ class ViaSpatialIndex:
                         best_dist_sq = dist_sq
                         best_via = (vx, vy)
         return best_via
-
-
-def find_existing_via_nearby(
-    pad: Pad,
-    existing_vias: List[Tuple[float, float]],
-    max_search_radius: float
-) -> Optional[Tuple[float, float]]:
-    """
-    Find an existing via on the target net within search radius of the pad.
-
-    Args:
-        pad: The pad to connect
-        existing_vias: List of (x, y) positions of existing vias on target net
-        max_search_radius: Maximum distance to search
-
-    Returns:
-        (x, y) position of nearest existing via, or None if none found
-    """
-    best_via = None
-    best_dist_sq = max_search_radius * max_search_radius
-
-    for vx, vy in existing_vias:
-        dx = vx - pad.global_x
-        dy = vy - pad.global_y
-        dist_sq = dx * dx + dy * dy
-        if dist_sq <= best_dist_sq:
-            best_dist_sq = dist_sq
-            best_via = (vx, vy)
-
-    return best_via
 
 
 def find_via_position(
@@ -1944,13 +1914,6 @@ def create_plane(
         # Cache for incremental obstacle updates during rip-up
         # Computed lazily when we first encounter each blocker net
         via_obstacle_cache: Dict[int, ViaPlacementObstacleData] = {}
-
-        def ensure_via_obstacle_cache(blocker_net_id: int):
-            """Ensure we have cached obstacles for a net (computed lazily)."""
-            if blocker_net_id not in via_obstacle_cache:
-                via_obstacle_cache[blocker_net_id] = precompute_via_placement_obstacles(
-                    pcb_data, blocker_net_id, config, all_layers
-                )
 
         # Build list of pads needing vias for this net
         pads_needing_vias = [p for p in target_pads if p['needs_via']]

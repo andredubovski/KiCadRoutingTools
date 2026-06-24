@@ -856,12 +856,6 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return False
         return matches_any_pattern(net_info.name, net_patterns)
 
-    # Helper to check if a violation involves at least one matching net
-    def violation_matches_filter(net1_str: str, net2_str: str) -> bool:
-        if net_patterns is None:
-            return True
-        return matches_any_pattern(net1_str, net_patterns) or matches_any_pattern(net2_str, net_patterns)
-
     if net_patterns and not quiet:
         print(f"Filtering to nets matching: {net_patterns}")
 

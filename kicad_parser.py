@@ -5,7 +5,7 @@ KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad
 import re
 import math
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
@@ -2120,12 +2120,6 @@ def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
     local_y = -dx * sin_r + dy * cos_r
 
     return local_x, local_y
-
-
-def _extract_board_outline_from_pcbnew(board, to_mm):
-    """Extract board outline polygon from Edge.Cuts drawings via pcbnew."""
-    outline, _ = _extract_board_contours_from_pcbnew(board, to_mm)
-    return outline
 
 
 def _extract_board_contours_from_pcbnew(board, to_mm):
