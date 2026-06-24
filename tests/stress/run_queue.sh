@@ -5,10 +5,17 @@
 # it skips finished boards and won't double-launch ones already running (incl.
 # harness Agent runs detected via the run-dir).
 #
-# Usage: run_queue.sh [concurrency] [model]   (defaults: 4 sonnet)
+# Usage: run_queue.sh [concurrency] [model]   (defaults: <#cores> sonnet)
 # Watch:  tail -f ~/Documents/kicad_stress_test/QUEUE_STATUS.txt
+#
+# Concurrency defaults to the core count: a board worker is mostly *thinking*
+# (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
+# boards keep the machine busy without Ncore heavy processes at once. run_limited.sh
+# caps each tool step at ~4 GB and kills it (a finding) if several heavy steps do
+# coincide, so memory can't run away. Lower the arg if you still see swapping.
 set -u
-CONC="${1:-4}"; MODEL="${2:-sonnet}"
+NCORE="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+CONC="${1:-$NCORE}"; MODEL="${2:-sonnet}"
 # Repo root is derived from this script's own location (tests/stress/run_queue.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +54,15 @@ is_running(){  # our worker, any tool writing the run dir, or run dir touched <4
 log(){ echo "$(date '+%H:%M:%S') $*" | tee -a "$STATUS"; }
 : > "$STATUS"
 log "queue start: concurrency=$CONC model=$MODEL total=$total"
+
+# Bounded-retry watchdog: run_board.sh writes no results JSON on failure, so a
+# board whose worker can never finish would be relaunched forever. The watchdog
+# stubs a FAILED result after QUEUE_MAX_LAUNCH (default 3) attempts so the queue
+# terminates. It self-exits when every board is accounted for; the trap kills it
+# if the queue exits first.
+bash "$SELF/queue_watchdog.sh" >/dev/null 2>&1 &
+WATCHDOG_PID=$!
+trap 'kill "$WATCHDOG_PID" 2>/dev/null' EXIT
 
 while true; do
   done_n=0; run_n=0; run_l=""; todo=""
