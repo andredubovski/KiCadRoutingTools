@@ -69,6 +69,14 @@ def main():
     ap.add_argument("manifest", help="Path to redo_commands.sh manifest")
     ap.add_argument("--remap", action="append", default=[],
                     help="OLD:NEW path-prefix rewrite applied to every argument (repeatable)")
+    ap.add_argument("--workdir", metavar="DIR",
+                    help="Run EVERY command in DIR (created if needed), ignoring each "
+                         "command's recorded `# cwd=`. Use this to replay into a fresh "
+                         "directory: the manifest's relative output paths then chain "
+                         "correctly inside DIR. Without it, a command runs in its recorded "
+                         "cwd -- which silently OVERWRITES the original run's boards if "
+                         "that cwd isn't covered by --remap. The source board (absolute "
+                         "path) still resolves either way.")
     ap.add_argument("--skip-checks", action="store_true",
                     help="Skip check_*.py commands (they do not mutate the board)")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan, run nothing")
@@ -88,6 +96,9 @@ def main():
         remaps.append((old, new))
         os.makedirs(new, exist_ok=True)
 
+    if args.workdir:
+        os.makedirs(args.workdir, exist_ok=True)
+
     cmds = parse_manifest(args.manifest)
     if not cmds:
         print(f"No commands found in {args.manifest}")
@@ -102,7 +113,16 @@ def main():
     t0 = time.time()
     for i, (cwd, argv) in enumerate(cmds, 1):
         argv = apply_remaps(argv, remaps)
-        cwd = apply_remaps([cwd], remaps)[0] if cwd else None
+        # --workdir forces every command into one directory (chains relative outputs
+        # correctly); otherwise use the command's recorded cwd, remapped.
+        if args.workdir:
+            cwd = args.workdir
+        else:
+            remapped = apply_remaps([cwd], remaps)[0] if cwd else None
+            if remaps and cwd and remapped == cwd:
+                print(f"    WARNING: cwd {cwd} not covered by --remap; this command will "
+                      f"run in (and may overwrite) the original run dir. Use --workdir.")
+            cwd = remapped
         if args.skip_checks and is_check_cmd(argv):
             print(f"[{i}/{len(cmds)}] skip check: {' '.join(map(shlex.quote, argv[:3]))} ...")
             continue
