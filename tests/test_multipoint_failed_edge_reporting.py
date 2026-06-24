@@ -10,9 +10,9 @@ showed up in BOTH `routed_single` and `failed_multipoint` (a contradiction). It
 must appear only in `failed_multipoint` (and the headline `failed` count), never
 in `routed_single`.
 
-Repro: routing the congested `/IO_Banks/IO_Buffer_B/*` neighborhood of
-glasgow_revC boxes in a fine-pitch resistor-network pad so an MST edge fails.
-Routing is deterministic, so the failing net is stable.
+Repro: routing the congested `/IO_Banks/*` block of glasgow_revC leaves a
+multi-point net with an unroutable MST edge (a pad too boxed in even for the
+via-in-pad escape). Routing is deterministic, so the failing net is stable.
 
     python3 tests/test_multipoint_failed_edge_reporting.py
 """
@@ -31,7 +31,7 @@ def run_route():
     out = tempfile.mktemp(suffix=".kicad_pcb")
     cmd = [sys.executable, "route.py", BOARD,
            "--output", out,
-           "--nets", "/IO_Banks/IO_Buffer_B/*",
+           "--nets", "/IO_Banks/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
            "--clearance", "0.1", "--via-size", "0.3",
            "--via-drill", "0.2", "--track-width", "0.1"]
