@@ -205,8 +205,16 @@ def _points_edge_distance(px, py, x1, y1, x2, y2):
     return out
 
 
-def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
+def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
+
+    ``clip_bounds`` (min_x, min_y, max_x, max_y) restricts the rasterized region
+    to the obstacle map's actual extent. Without it, a large polygon -- e.g. a
+    whole-board ring keep-out -- rasterizes the entire board on EVERY build, even
+    a tiny local-window build, dominating route_disconnected_planes and the
+    via-in-pad unblock (the map only covers the window, so cells outside it are
+    never blocked anyway). Clipping is a pure optimisation: no cell inside the map
+    changes. A full-board build passes the board bounds, so nothing is clipped.
 
     Shared geometry kernel for the polygon obstacle passes (board cutouts, KiCad
     keep-out rule areas, and user-drawn keepout zones). Returns four parallel
@@ -228,6 +236,11 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float):
 
     cmin_x, cmax_x = poly[:, 0].min() - margin, poly[:, 0].max() + margin
     cmin_y, cmax_y = poly[:, 1].min() - margin, poly[:, 1].max() + margin
+    if clip_bounds is not None:
+        cmin_x = max(cmin_x, clip_bounds[0]); cmin_y = max(cmin_y, clip_bounds[1])
+        cmax_x = min(cmax_x, clip_bounds[2]); cmax_y = min(cmax_y, clip_bounds[3])
+        if cmin_x > cmax_x or cmin_y > cmax_y:
+            return None, None, None, None  # polygon doesn't overlap the map
     gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
     gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
     gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
@@ -396,6 +409,11 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     layer_map = build_layer_map(layer_list)
     track_clear = config.clearance + config.track_width / 2
     via_clear = config.clearance + config.via_size / 2
+    # Restrict rasterization to the map's extent: on a local-window build a
+    # whole-board ring keep-out would otherwise rasterize the entire board per
+    # call (the dominant cost of route_disconnected_planes and the via-in-pad
+    # unblock). Full-board builds set board_bounds to the whole board -> no clip.
+    clip = getattr(pcb_data.board_info, 'board_bounds', None)
 
     for ko in keepouts:
         poly = ko.get('polygon') or []
@@ -419,7 +437,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
         margin = max(track_clear, via_clear) + coord.grid_step
-        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin)
+        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin, clip_bounds=clip)
         if gx_flat is None:
             continue
 
