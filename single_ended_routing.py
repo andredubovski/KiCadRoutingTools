@@ -278,38 +278,18 @@ def _identify_blocking_obstacles(
 ) -> Dict[int, Tuple[str, int]]:
     """Identify which nets are blocking specific grid positions; net_id -> (name, count).
 
-    Dispatches to the Rust port (grid_router.identify_blocking_obstacles, 0.16.1+)
-    when available -- the per-cell neighbourhood scan over every foreign
-    segment/via/pad is a hot loop -- and falls back to the pure-Python
-    implementation otherwise. The two are byte-identical (exact integer grid math,
-    each element counted at most once)."""
-    rust_fn = _rust_identify_fn()
-    if rust_fn is None:
-        return _identify_blocking_obstacles_py(blocked_positions, pcb_data, config, current_net_id)
-    return _identify_blocking_obstacles_rust(
-        rust_fn, blocked_positions, pcb_data, config, current_net_id)
-
-
-def _rust_identify_fn():
-    """The Rust identify_blocking_obstacles if the loaded binary provides it, else
-    None (older prebuilt). Cached after first lookup."""
-    global _RUST_IDENTIFY_FN
-    try:
-        return _RUST_IDENTIFY_FN
-    except NameError:
-        pass
-    fn = None
+    The per-cell neighbourhood scan over every foreign segment/via/pad is done in
+    Rust (grid_router.identify_blocking_obstacles, 0.16.1+). We build the
+    grid-integer arrays for the foreign geometry and call it. There is no Python
+    fallback: rebuild the router if the loaded binary predates 0.16.1."""
     try:
         import grid_router
-        fn = getattr(grid_router, 'identify_blocking_obstacles', None)
-    except Exception:
-        fn = None
-    _RUST_IDENTIFY_FN = fn
-    return fn
+        rust_fn = grid_router.identify_blocking_obstacles
+    except (ImportError, AttributeError) as e:
+        raise RuntimeError(
+            "grid_router.identify_blocking_obstacles is unavailable -- rebuild the "
+            "Rust router to 0.16.1+ (python build_router.py --from-source)") from e
 
-
-def _identify_blocking_obstacles_rust(rust_fn, blocked_positions, pcb_data, config, current_net_id):
-    """Build grid-integer arrays for the foreign geometry and call the Rust port."""
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
     num_layers = len(config.layers)
@@ -369,122 +349,6 @@ def _identify_blocking_obstacles_rust(rust_fn, blocked_positions, pcb_data, conf
     for net_id, count in counts.items():
         net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
         blockers[net_id] = (net_name, count)
-    return blockers
-
-
-def _identify_blocking_obstacles_py(
-    blocked_positions: List[Tuple[int, int, int]],
-    pcb_data: PCBData,
-    config: GridRouteConfig,
-    current_net_id: int = -1
-) -> Dict[int, Tuple[str, int]]:
-    """Pure-Python fallback for _identify_blocking_obstacles (see its docstring)."""
-    coord = GridCoord(config.grid_step)
-    layer_map = build_layer_map(config.layers)
-
-    # Calculate expansion radius (same as obstacle map uses)
-    expansion_mm = config.track_width / 2 + config.clearance + config.track_width / 2
-    expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-    via_expansion_mm = config.via_size / 2 + config.track_width / 2 + config.clearance
-    via_expansion_grid = max(1, coord.to_grid_dist(via_expansion_mm))
-
-    blockers: Dict[int, Tuple[str, int]] = {}
-
-    # Convert blocked positions to set for faster lookup
-    blocked_set = set(blocked_positions)
-
-    def _bump(net_id):
-        net_name = (pcb_data.nets[net_id].name if net_id in pcb_data.nets
-                    else f"net_{net_id}")
-        blockers[net_id] = (net_name, blockers[net_id][1] + 1 if net_id in blockers else 1)
-
-    # Invert the overlap test for segments/vias (was ~30s of the signal route):
-    # instead of expanding EVERY foreign segment by its clearance halo and testing
-    # each of millions of expanded cells against the small blocked set, dilate the
-    # small blocked set ONCE by the (uniform) segment/via radius. A segment cell
-    # then blocks iff it lands in the dilated set -- one O(1) lookup, no inner
-    # (ex, ey) loop. The test is symmetric to the old one (a cell is within radius
-    # of a blocked cell iff that blocked cell is within radius of it), and each
-    # segment/via still counts at most once (first overlapping cell), so the
-    # blocker counts -- and thus the rip-up ranking -- are byte-for-byte identical.
-    def _dilate(r, drop_layer=False):
-        out = set()
-        rng = range(-r, r + 1)
-        for bx, by, bl in blocked_set:
-            for ex in rng:
-                for ey in rng:
-                    out.add((bx + ex, by + ey) if drop_layer else (bx + ex, by + ey, bl))
-        return out
-
-    seg_dilated = _dilate(expansion_grid)
-    # Check segments: a segment blocks if any of its walk-line cells lands within
-    # the segment clearance halo of a blocked cell on the same layer.
-    for seg in pcb_data.segments:
-        if seg.net_id == current_net_id:
-            continue
-        layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
-            continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            if (gx, gy, layer_idx) in seg_dilated:
-                _bump(seg.net_id)
-                break  # count this segment once, move on
-
-    # Check vias (span all layers, so the dilated set is layer-agnostic in x/y).
-    via_dilated_xy = _dilate(via_expansion_grid, drop_layer=True)
-    for via in pcb_data.vias:
-        if via.net_id == current_net_id:
-            continue
-        if coord.to_grid(via.x, via.y) in via_dilated_xy:
-            _bump(via.net_id)
-
-    # Check pads (from other nets)
-    for ref, footprint in pcb_data.footprints.items():
-        for pad in footprint.pads:
-            if pad.net_id == current_net_id or pad.net_id == 0:
-                continue
-
-            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-
-            # Compute pad expansion (rotated-rect bbox so a tilted pad's blocked
-            # cells are still attributed to it)
-            if hasattr(pad, 'size_x'):
-                pad_half_x, pad_half_y = pad_rect_halfspan(pad)
-            else:
-                pad_half_x = pad_half_y = 0.5
-            pad_expansion_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
-            pad_expansion_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
-
-            # Check pad layers
-            pad_layers = []
-            if pad.drill and pad.drill > 0:
-                # Through-hole pad - blocks all layers
-                pad_layers = list(range(len(config.layers)))
-            else:
-                # SMD pad - only specific layer
-                for layer_name in pad.layers:
-                    if layer_name in layer_map:
-                        pad_layers.append(layer_map[layer_name])
-
-            for layer_idx in pad_layers:
-                for ex in range(-pad_expansion_x, pad_expansion_x + 1):
-                    for ey in range(-pad_expansion_y, pad_expansion_y + 1):
-                        if (gx + ex, gy + ey, layer_idx) in blocked_set:
-                            net_name = pcb_data.nets[pad.net_id].name if pad.net_id in pcb_data.nets else f"net_{pad.net_id}"
-                            if pad.net_id in blockers:
-                                blockers[pad.net_id] = (net_name, blockers[pad.net_id][1] + 1)
-                            else:
-                                blockers[pad.net_id] = (net_name, 1)
-                            break
-                    else:
-                        continue
-                    break
-                else:
-                    continue
-                break
-
     return blockers
 
 
