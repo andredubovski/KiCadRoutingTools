@@ -2094,6 +2094,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # --- Extract user-layer keepout polygons (issue #27) ---
     keepout_zones = extract_keepout_zones_from_board(board, keepout_layer)
 
+    # --- Extract KiCad rule-area keep-outs (issue #95) ---
+    # board_info.keepouts (the (keepout ...) rule areas the router must avoid)
+    # isn't cleanly exposed via the pcbnew zone API, so read them from the board
+    # file content exactly as the text parser does (parse_kicad_pcb), keeping the
+    # GUI/SWIG path at parity with the CLI. Best-effort: the saved file is the
+    # last-saved state, which is fine for rule areas (design-time features, not
+    # edited mid-route). Without this the router lays copper through rule areas.
+    try:
+        board_filename = board.GetFileName()
+        if board_filename:
+            with open(board_filename, 'r', encoding='utf-8') as f:
+                board_info.keepouts = extract_keepouts(f.read())
+    except Exception:
+        pass
+
     return PCBData(
         board_info=board_info,
         nets=nets,
