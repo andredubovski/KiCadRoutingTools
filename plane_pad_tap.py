@@ -426,7 +426,18 @@ def try_tap_pad(
         local, config, net_id, verbose=False,
         same_net_pad_clearance=same_net_pad_clearance)
     routing_obs = None
-    if pad_layer:
+    # The routing-obstacle map is consulted ONLY to route a via->pad TRACE -- i.e.
+    # when reusing nearby same-net copper (steps 1/1b, gated on not disable_reuse),
+    # for the distant-trace fallback (distant_trace_radius>0), or when
+    # find_via_position lands a via OUTSIDE the pad (possible only with
+    # max_search_radius>0, since the in-pad ring search ignores it). A pure
+    # via-IN-pad placement (max_search_radius=0, disable_reuse, no distant trace)
+    # connects by copper overlap and never routes a trace, so its routing map is
+    # built-but-unused -- skip the ~0.5s Rust build entirely (#189 perf; the
+    # via-in-pad unblock hits this path). find_via_position tolerates a None
+    # routing map (it only does the routability check when one is provided).
+    _needs_trace_map = (not disable_reuse) or distant_trace_radius > 0 or max_search_radius > 0
+    if pad_layer and _needs_trace_map:
         # Optional half-grid clearance cushion: build_routing_obstacle_map
         # blocks cells by center distance, so routed traces can end up a
         # fraction of a grid step (~0.015mm at 0.05 grid) closer to other
