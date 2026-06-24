@@ -302,58 +302,52 @@ def _identify_blocking_obstacles(
     # Convert blocked positions to set for faster lookup
     blocked_set = set(blocked_positions)
 
-    # Check segments
+    def _bump(net_id):
+        net_name = (pcb_data.nets[net_id].name if net_id in pcb_data.nets
+                    else f"net_{net_id}")
+        blockers[net_id] = (net_name, blockers[net_id][1] + 1 if net_id in blockers else 1)
+
+    # Invert the overlap test for segments/vias (was ~30s of the signal route):
+    # instead of expanding EVERY foreign segment by its clearance halo and testing
+    # each of millions of expanded cells against the small blocked set, dilate the
+    # small blocked set ONCE by the (uniform) segment/via radius. A segment cell
+    # then blocks iff it lands in the dilated set -- one O(1) lookup, no inner
+    # (ex, ey) loop. The test is symmetric to the old one (a cell is within radius
+    # of a blocked cell iff that blocked cell is within radius of it), and each
+    # segment/via still counts at most once (first overlapping cell), so the
+    # blocker counts -- and thus the rip-up ranking -- are byte-for-byte identical.
+    def _dilate(r, drop_layer=False):
+        out = set()
+        rng = range(-r, r + 1)
+        for bx, by, bl in blocked_set:
+            for ex in rng:
+                for ey in rng:
+                    out.add((bx + ex, by + ey) if drop_layer else (bx + ex, by + ey, bl))
+        return out
+
+    seg_dilated = _dilate(expansion_grid)
+    # Check segments: a segment blocks if any of its walk-line cells lands within
+    # the segment clearance halo of a blocked cell on the same layer.
     for seg in pcb_data.segments:
         if seg.net_id == current_net_id:
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-        # Check if segment's expanded cells overlap with blocked positions
         for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            for ex in range(-expansion_grid, expansion_grid + 1):
-                for ey in range(-expansion_grid, expansion_grid + 1):
-                    if (gx + ex, gy + ey, layer_idx) in blocked_set:
-                        net_name = pcb_data.nets[seg.net_id].name if seg.net_id in pcb_data.nets else f"net_{seg.net_id}"
-                        if seg.net_id in blockers:
-                            blockers[seg.net_id] = (net_name, blockers[seg.net_id][1] + 1)
-                        else:
-                            blockers[seg.net_id] = (net_name, 1)
-                        break  # Found overlap, move to next segment point
-                else:
-                    continue
-                break
-            else:
-                continue
-            break
+            if (gx, gy, layer_idx) in seg_dilated:
+                _bump(seg.net_id)
+                break  # count this segment once, move on
 
-    # Check vias
+    # Check vias (span all layers, so the dilated set is layer-agnostic in x/y).
+    via_dilated_xy = _dilate(via_expansion_grid, drop_layer=True)
     for via in pcb_data.vias:
         if via.net_id == current_net_id:
             continue
-        gx, gy = coord.to_grid(via.x, via.y)
-
-        # Vias block all layers within via expansion radius
-        for layer_idx in range(len(config.layers)):
-            for ex in range(-via_expansion_grid, via_expansion_grid + 1):
-                for ey in range(-via_expansion_grid, via_expansion_grid + 1):
-                    if (gx + ex, gy + ey, layer_idx) in blocked_set:
-                        net_name = pcb_data.nets[via.net_id].name if via.net_id in pcb_data.nets else f"net_{via.net_id}"
-                        if via.net_id in blockers:
-                            blockers[via.net_id] = (net_name, blockers[via.net_id][1] + 1)
-                        else:
-                            blockers[via.net_id] = (net_name, 1)
-                        break
-                else:
-                    continue
-                break
-            else:
-                continue
-            break
+        if coord.to_grid(via.x, via.y) in via_dilated_xy:
+            _bump(via.net_id)
 
     # Check pads (from other nets)
     for ref, footprint in pcb_data.footprints.items():
