@@ -1406,11 +1406,18 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
             via_pairs.append((vd, dr))
     tap_res = None
     for vd, dr in via_pairs:
+        # try_default=False: skip the default-parameter pass and go straight to
+        # the fine (grid 0.05 / capped clearance) placement. Each pass builds via
+        # + routing obstacle maps (the profiled bottleneck, ~0.5s each in Rust);
+        # the default pass is redundant here -- fine uses min(grid)/min(clearance)
+        # so it is strictly >= permissive, and a via-in-pad needs no via->pad
+        # trace, so the fine pass never fails where the default would succeed.
         tap_res = tap_pad_with_escalation(
             pad_obj, pad_layer, net_id, pcb_data,
             replace(config, via_size=vd, via_drill=dr, board_edge_clearance=0.0),
             max_search_radius=0.0, via_size=vd, via_drill=dr,
-            fine_for_all=True, distant_trace_radius=0.0, disable_reuse=True)
+            try_default=False, fine_for_all=True,
+            distant_trace_radius=0.0, disable_reuse=True)
         if tap_res.success and tap_res.via is not None:
             break
     if tap_res is None or not tap_res.success or tap_res.via is None:
@@ -1489,7 +1496,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
             via, (vgx, vgy), pli = r
             _register_unblock_via(obstacles, vgx, vgy, layer_names)
             new_targets = list(targets) + [(vgx, vgy, li) for li in range(len(layer_names))]
-            placed.append((via, vgx, vgy, pli))
+            placed.append((via, vgx, vgy, pli, pad))
     # forward probe (from sources) exhausted -> the SOURCE pad is boxed
     if fwd_i and fwd_i < lim:
         pad = _net_pad_near(pcb_data, net_id, sources, coord)
@@ -1499,21 +1506,34 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
             via, (vgx, vgy), pli = r
             _register_unblock_via(obstacles, vgx, vgy, layer_names)
             new_sources = list(sources) + [(vgx, vgy, li) for li in range(len(layer_names))]
-            placed.append((via, vgx, vgy, pli))
+            placed.append((via, vgx, vgy, pli, pad))
     if not placed:
         return res + ([],)
 
-    res2 = _route_main_connection(router, obstacles, config, new_sources, new_targets, track_margin,
+    # Cap the retry's full A* at the same budget as the stuck threshold we trigger
+    # on (max_probe_iterations): if dropping the via opened the pad, the inner
+    # layer beside it is clear and the route is found within the probe budget;
+    # if it isn't, grinding to the full max_iterations (1e6 at grid 0.05) just to
+    # fail again is wasted -- fail fast and report the pad honestly.
+    retry_config = replace(config, max_iterations=config.max_probe_iterations)
+    res2 = _route_main_connection(router, obstacles, retry_config, new_sources, new_targets, track_margin,
                                   pcb_data, net_id, print_prefix, direction_labels,
                                   single_direction, waypoints)
     if res2[0] is None:
+        # The via placed but didn't rescue the route. Memoise the pad as failed so
+        # route_multipoint_taps' next rip-reroute pass doesn't redo the expensive
+        # placement + retry for it -- without this the unblock is re-attempted
+        # every pass for a pad it can't help (the cap above makes that more likely).
+        cache = pcb_data._via_unblock_failed
+        for (_v, _gx, _gy, _pli, pad) in placed:
+            cache.add((net_id, round(pad.global_x, 3), round(pad.global_y, 3)))
         return res + ([],)  # unblock didn't help; report the original failure
     # Keep only the vias the retry actually used: the new path must terminate on
     # the via cell at a NON-pad layer (it reached the pad through the via). Drop
     # any the route didn't need, so no floating copper is added.
     p2 = res2[0]
     ends = (p2[0], p2[-1])
-    used = [via for (via, vgx, vgy, pli) in placed
+    used = [via for (via, vgx, vgy, pli, pad) in placed
             if any(e[0] == vgx and e[1] == vgy and e[2] != pli for e in ends)]
     if used:
         print(f"{print_prefix}{GREEN}Via-in-pad unblock: dropped {len(used)} fab-floor "
