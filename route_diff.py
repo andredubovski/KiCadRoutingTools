@@ -87,7 +87,8 @@ from length_matching import apply_intra_pair_length_matching
 from net_ordering import order_nets_mps, order_nets_inside_out, separate_nets_by_type
 from routing_common import (
     setup_bga_exclusion_zones, filter_already_routed,
-    run_length_matching, sync_pcb_data_segments, get_common_config_kwargs
+    run_length_matching, sync_pcb_data_segments, get_common_config_kwargs,
+    warn_targets_outside_board
 )
 import re
 from terminal_colors import RED, GREEN, YELLOW, RESET
@@ -334,6 +335,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if return_results:
             return 0, 0, 0.0, {'results': [], 'all_swap_vias': [], 'exclusion_zone_lines': [], 'boundary_debug_labels': []}
         return 0, 0, 0.0
+
+    # Flag target pads at/over the board edge before routing, so an unroutable
+    # off-board pad reads as a clear warning rather than a silent search failure
+    # (issue #195).
+    _edge_clear = board_edge_clearance if board_edge_clearance > 0 else clearance
+    warn_targets_outside_board(pcb_data, net_ids,
+                               edge_margin=_edge_clear + track_width / 2)
 
     net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
     if not net_ids:
