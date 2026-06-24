@@ -781,15 +781,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Build summary data
     import json
-    routed_single = []
-    failed_single = []
-    failed_single_ids = []  # Track IDs for history output
-    for net_name, net_id in single_ended_nets:
-        if net_id in routed_results:
-            routed_single.append(net_name)
-        else:
-            failed_single.append(net_name)
-            failed_single_ids.append(net_id)
+    # routed_single / failed_single are derived below, AFTER the authoritative
+    # connectivity sweep -- a net with a result in routed_results may still have
+    # left pads disconnected (a failed MST edge), and must not be reported routed
+    # (issue #189). failed_single stays "no result at all"; the partially-routed
+    # disconnected nets are surfaced via failed_multipoint (and mp_deficit).
 
     # Keep only each net's authoritative result in the write-list. routed_results
     # holds one result per net; rip-reroute paths (restore_net, layer-swap) can
@@ -951,6 +947,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if nid in routed_results and nid not in failed_multipoint_ids}
     successful = len(fully_routed_ids)
     failed = len(scope_ids) - successful
+
+    # Now classify each net for the summary. A net only counts as routed_single
+    # if it is fully connected (issue #189): one that routed a result but left
+    # pads disconnected (a failed MST edge) is in failed_multipoint_ids and is
+    # NOT routed. failed_single stays "no result at all" so the place/route loop
+    # does not double-count it (its deficit is already in mp_deficit).
+    routed_single = []
+    failed_single = []
+    failed_single_ids = []  # Track IDs for history output
+    for net_name, net_id in single_ended_nets:
+        if net_id in fully_routed_ids:
+            routed_single.append(net_name)
+        elif net_id not in routed_results:
+            failed_single.append(net_name)
+            failed_single_ids.append(net_id)
 
     # Print human-readable summary
     print("\n" + "=" * 60)
