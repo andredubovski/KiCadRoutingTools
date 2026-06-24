@@ -1711,72 +1711,6 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
     return obstacles, vis_data
 
 
-def add_net_obstacles_with_vis(obstacles: GridObstacleMap, pcb_data: PCBData,
-                                net_id: int, config: GridRouteConfig,
-                                extra_clearance: float = 0.0,
-                                blocked_cells: List[Set[Tuple[int, int]]] = None,
-                                blocked_vias: Set[Tuple[int, int]] = None,
-                                diagonal_margin: float = 0.0):
-    """Add a net's segments, vias, and pads as obstacles, capturing vis data.
-
-    This is a combined function for adding all of a net's obstacles at once,
-    useful for incrementally building obstacles during batch routing.
-
-    Args:
-        diagonal_margin: Extra margin (in grid units) for track blocking to catch diagonal
-                        segments that pass between grid points. Use 0.25 for single-ended routing.
-    """
-    coord = GridCoord(config.grid_step)
-    num_layers = len(config.layers)
-    layer_map = build_layer_map(config.layers)
-
-    if blocked_cells is None:
-        blocked_cells = [set() for _ in range(num_layers)]
-    if blocked_vias is None:
-        blocked_vias = set()
-
-    # Add segments - use actual segment width and layer-specific routing track width
-    for seg in pcb_data.segments:
-        if seg.net_id != net_id:
-            continue
-        layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
-            continue
-        # Use layer-specific track width for routing track portion
-        layer_track_width = config.get_track_width(seg.layer)
-        seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else layer_track_width
-        expansion_mm = layer_track_width / 2 + seg_width / 2 + config.clearance + extra_clearance
-        expansion_grid = max(1, coord.to_grid_dist(expansion_mm))
-        via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
-        via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              blocked_cells, blocked_vias)
-
-    # Add vias - use actual via size and max track width (vias span all layers)
-    max_track_width = config.get_max_track_width()
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
-            continue
-        via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
-        via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
-        # True via-via clearance radius in cells as a FLOAT (no floor): the disc
-        # threshold is radius**2, so this blocks exactly the cells within the real
-        # clearance. Flooring (to_grid_dist) lost up to ~1 cell and let two vias sit
-        # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
-        # required) -- a real cross-net via-via DRC violation the router never saw.
-        via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
-        _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
-                          diagonal_margin, blocked_cells, blocked_vias)
-
-    # Add pads
-    pads = pcb_data.pads_by_net.get(net_id, [])
-    for pad in pads:
-        _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                          blocked_cells, blocked_vias)
-
-
 def check_line_clearance(obstacles: GridObstacleMap,
                          x1: float, y1: float,
                          x2: float, y2: float,
@@ -1819,28 +1753,6 @@ def check_line_clearance(obstacles: GridObstacleMap,
 
         dist += step
 
-    return True
-
-
-def check_stub_layer_clearance(obstacles: GridObstacleMap,
-                                stub_segments: List[Segment],
-                                target_layer_idx: int,
-                                config: GridRouteConfig) -> bool:
-    """Check if all stub segments can be placed on target_layer without conflicts.
-
-    Args:
-        obstacles: The obstacle map to check against
-        stub_segments: List of segments that form the stub
-        target_layer_idx: Layer index to check clearance on
-        config: Routing configuration
-
-    Returns:
-        True if all segments are clear on target_layer, False otherwise
-    """
-    for seg in stub_segments:
-        if not check_line_clearance(obstacles, seg.start_x, seg.start_y,
-                                     seg.end_x, seg.end_y, target_layer_idx, config):
-            return False
     return True
 
 
