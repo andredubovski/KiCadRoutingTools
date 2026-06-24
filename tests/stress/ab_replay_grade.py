@@ -107,6 +107,34 @@ def _tool_of(argv):
     return argv[-1] if argv else "?"
 
 
+def _diff_pair_stats(log_text):
+    """Coupled diff-pair completion, from route_diff's JSON_SUMMARY lines in the
+    replay log. route_diff classifies each pair as coupled (routed_diff_pairs),
+    deferred-to-single-ended (single_ended_diff_pairs), or failed. Across multiple
+    route_diff calls a pair's FINAL status wins (a retry can couple one that first
+    failed). 'Completion' here = coupled / total pairs -- the rate of pairs actually
+    routed as coupled diff pairs (single-ended fallback does NOT count). Returns
+    None pct when the board has no diff pairs."""
+    status = {}
+    for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
+        try:
+            d = json.loads(m.group(1))
+        except Exception:
+            continue
+        if "routed_diff_pairs" not in d:   # skip non-diff summaries (e.g. bga_fanout)
+            continue
+        for p in d.get("routed_diff_pairs", []):       status[p] = "coupled"
+        for p in d.get("single_ended_diff_pairs", []): status[p] = "single_ended"
+        for p in d.get("failed_diff_pairs", []):       status[p] = "failed"
+    total = len(status)
+    coupled = sum(1 for v in status.values() if v == "coupled")
+    return {"diff_pairs_total": total,
+            "diff_pairs_coupled": coupled,
+            "diff_pairs_single_ended": sum(1 for v in status.values() if v == "single_ended"),
+            "diff_pairs_failed": sum(1 for v in status.values() if v == "failed"),
+            "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
+
+
 def grade(pcb, clearance):
     drc = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb,
                           "-c", clearance, "--quiet"], capture_output=True, text=True)
@@ -149,6 +177,10 @@ def do_board(set_dir, out_dir, label, board):
             peak_by_tool[tool] = round(max(peak_by_tool.get(tool, 0.0), pk), 1)  # max, not sum
             total_s += sec
             peak_board = max(peak_board, pk)
+    # Coupled diff-pair completion is parsed from route_diff's JSON_SUMMARY in the
+    # replay log (captured above), so it reflects what actually coupled-routed.
+    log_path = f"{dst}/_replay.log"
+    dp = _diff_pair_stats(Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else "")
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
@@ -157,12 +189,14 @@ def do_board(set_dir, out_dir, label, board):
            "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
            "completion_pct": None,
            "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
-           "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps}
+           "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
+           **dp}
     if done:
         res.update(grade(final, clr))
+    dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
           f"drc={res['drc']} conn={res['conn']} compl={res['completion_pct']}% "
-          f"t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
+          f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
     return res
 
 
@@ -198,10 +232,12 @@ def regrade(out_dir, set_dir):
         fname = final_output_name(txt)
         final = bdir / fname if fname else None
         done = bool(final) and final.exists()
+        lp = bdir / "_replay.log"
+        dp = _diff_pair_stats(lp.read_text(errors="replace") if lp.exists() else "")
         res = {"board": b, "clearance": clr, "replay_rc": 0,
                "final": fname if done else None, "chain_complete": done,
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
-               "completion_pct": None}  # regrade re-runs no commands, so no timing
+               "completion_pct": None, **dp}  # regrade re-runs no commands, so no timing
         if done:
             res.update(grade(str(final), clr))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
@@ -221,9 +257,9 @@ def compare(old_json, new_json):
     new = {r["board"]: r for r in json.loads(Path(new_json).read_text())}
     boards = sorted(set(old) | set(new))
     print(f"{'board':14} {'drc o->n':>11} {'conn o->n':>11} {'compl% o->n':>13} "
-          f"{'time(s) o->n':>16} {'peakMB o->n':>15}  note")
-    print("-" * 110)
-    drc_delta = conn_delta = 0
+          f"{'dpair o->n':>13} {'time(s) o->n':>16} {'peakMB o->n':>15}  note")
+    print("-" * 124)
+    drc_delta = conn_delta = dpair_delta = 0
     t_old = t_new = 0.0
     time_old, time_new = {}, {}   # per-tool wall-clock summed across boards (speedup view)
     pk_old, pk_new = {}, {}       # per-tool peak RSS = max across boards (memory view)
@@ -232,11 +268,18 @@ def compare(old_json, new_json):
         oc = o and o["chain_complete"]
         nc = n and n["chain_complete"]
         if not (oc and nc):
-            print(f"{b:14} {'-':>11} {'-':>11} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
+            print(f"{b:14} {'-':>11} {'-':>11} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
                   f"(old={'ok' if oc else 'broken'}, new={'ok' if nc else 'broken'}) -- excluded")
             continue
         dd = n["drc"] - o["drc"]; cd = n["conn"] - o["conn"]
         drc_delta += dd; conn_delta += cd
+        # coupled diff-pair count (fewer coupled = quality regression)
+        ocp, ncp = o.get("diff_pairs_coupled"), n.get("diff_pairs_coupled")
+        odt, ndt = o.get("diff_pairs_total"), n.get("diff_pairs_total")
+        dpd = (ncp - ocp) if (ocp is not None and ncp is not None) else 0
+        dpair_delta += dpd
+        dp_o = f"{ocp}/{odt}" if odt else "-"
+        dp_n = f"{ncp}/{ndt}" if ndt else "-"
         to, tn = o.get("total_seconds"), n.get("total_seconds")
         if to is not None and tn is not None:
             t_old += to; t_new += tn
@@ -249,15 +292,16 @@ def compare(old_json, new_json):
         op, npc = o.get("completion_pct"), n.get("completion_pct")
         po, pn = o.get("peak_rss_mb"), n.get("peak_rss_mb")
         flag = ""
-        if dd > 0 or cd > 0:               flag = "  <-- REGRESSION"
-        elif dd < 0 or cd < 0:             flag = "  improved"
+        if dd > 0 or cd > 0 or dpd < 0:    flag = "  <-- REGRESSION"
+        elif dd < 0 or cd < 0 or dpd > 0:  flag = "  improved"
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
         print(f"{b:14} {o['drc']:>4} -> {n['drc']:<4} {o['conn']:>4} -> {n['conn']:<4} "
-              f"{_fmt(op):>5} -> {_fmt(npc):<5} {_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} "
-              f"{_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
-    print("-" * 110)
-    verdict = "REGRESSION" if (drc_delta > 0 or conn_delta > 0) else "no regression"
-    print(f"net delta: drc {drc_delta:+d}, conn {conn_delta:+d}  ==>  {verdict}")
+              f"{_fmt(op):>5} -> {_fmt(npc):<5} {dp_o:>5} -> {dp_n:<5} "
+              f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
+    print("-" * 124)
+    verdict = "REGRESSION" if (drc_delta > 0 or conn_delta > 0 or dpair_delta < 0) else "no regression"
+    print(f"net delta: drc {drc_delta:+d}, conn {conn_delta:+d}, "
+          f"coupled diff-pairs {dpair_delta:+d}  ==>  {verdict}")
     if t_old and t_new:
         print(f"total replay wall-clock: {t_old:.1f}s -> {t_new:.1f}s  ({t_old/t_new:.2f}x)")
         print("\nper-tool: wall-clock (summed) and peak RSS (max) over boards complete in both:")
@@ -271,7 +315,7 @@ def compare(old_json, new_json):
     else:
         print("(timing/peak not available in one/both summaries -- re-run waves with the "
               "current ab_replay_grade to capture per-step timing + peak memory)")
-    return drc_delta <= 0 and conn_delta <= 0
+    return drc_delta <= 0 and conn_delta <= 0 and dpair_delta >= 0
 
 
 def main():
