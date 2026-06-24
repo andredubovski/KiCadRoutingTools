@@ -8,7 +8,7 @@ import math
 import time
 import numpy as np
 from typing import Dict, List, Optional, Set, Tuple
-from terminal_colors import RED, YELLOW, GREEN, RESET
+from terminal_colors import YELLOW, GREEN, RESET
 
 from dataclasses import replace
 from kicad_parser import PCBData, Segment, Via
@@ -276,18 +276,109 @@ def _identify_blocking_obstacles(
     config: GridRouteConfig,
     current_net_id: int = -1
 ) -> Dict[int, Tuple[str, int]]:
-    """
-    Identify which nets are blocking specific grid positions.
+    """Identify which nets are blocking specific grid positions; net_id -> (name, count).
 
-    Args:
-        blocked_positions: List of (gx, gy, layer) blocked cells
-        pcb_data: PCB data with segments, vias, pads
-        config: Routing configuration
-        current_net_id: Current net ID to exclude from results
+    Dispatches to the Rust port (grid_router.identify_blocking_obstacles, 0.16.1+)
+    when available -- the per-cell neighbourhood scan over every foreign
+    segment/via/pad is a hot loop -- and falls back to the pure-Python
+    implementation otherwise. The two are byte-identical (exact integer grid math,
+    each element counted at most once)."""
+    rust_fn = _rust_identify_fn()
+    if rust_fn is None:
+        return _identify_blocking_obstacles_py(blocked_positions, pcb_data, config, current_net_id)
+    return _identify_blocking_obstacles_rust(
+        rust_fn, blocked_positions, pcb_data, config, current_net_id)
 
-    Returns:
-        Dict of net_id -> (net_name, count) for blocking nets
-    """
+
+def _rust_identify_fn():
+    """The Rust identify_blocking_obstacles if the loaded binary provides it, else
+    None (older prebuilt). Cached after first lookup."""
+    global _RUST_IDENTIFY_FN
+    try:
+        return _RUST_IDENTIFY_FN
+    except NameError:
+        pass
+    fn = None
+    try:
+        import grid_router
+        fn = getattr(grid_router, 'identify_blocking_obstacles', None)
+    except Exception:
+        fn = None
+    _RUST_IDENTIFY_FN = fn
+    return fn
+
+
+def _identify_blocking_obstacles_rust(rust_fn, blocked_positions, pcb_data, config, current_net_id):
+    """Build grid-integer arrays for the foreign geometry and call the Rust port."""
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+    num_layers = len(config.layers)
+    expansion_grid = max(1, coord.to_grid_dist(config.track_width + config.clearance))
+    via_expansion_grid = max(1, coord.to_grid_dist(
+        config.via_size / 2 + config.track_width / 2 + config.clearance))
+
+    blocked = np.asarray(blocked_positions, dtype=np.int64) if blocked_positions \
+        else np.empty((0, 3), dtype=np.int64)
+
+    seg_rows = []
+    for seg in pcb_data.segments:
+        if seg.net_id == current_net_id:
+            continue
+        li = layer_map.get(seg.layer)
+        if li is None:
+            continue
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        seg_rows.append((gx1, gy1, gx2, gy2, li, seg.net_id))
+    segs = np.asarray(seg_rows, dtype=np.int64) if seg_rows else np.empty((0, 6), dtype=np.int64)
+
+    via_rows = []
+    for via in pcb_data.vias:
+        if via.net_id == current_net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        via_rows.append((gx, gy, via.net_id))
+    vias = np.asarray(via_rows, dtype=np.int64) if via_rows else np.empty((0, 3), dtype=np.int64)
+
+    pad_rows = []
+    for ref, footprint in pcb_data.footprints.items():
+        for pad in footprint.pads:
+            if pad.net_id == current_net_id or pad.net_id == 0:
+                continue
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            if hasattr(pad, 'size_x'):
+                pad_half_x, pad_half_y = pad_rect_halfspan(pad)
+            else:
+                pad_half_x = pad_half_y = 0.5
+            ex_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
+            ex_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
+            if pad.drill and pad.drill > 0:
+                mask = (1 << num_layers) - 1  # through-hole: all layers
+            else:
+                mask = 0
+                for layer_name in pad.layers:
+                    if layer_name in layer_map:
+                        mask |= 1 << layer_map[layer_name]
+            if mask:
+                pad_rows.append((gx, gy, ex_x, ex_y, pad.net_id, mask))
+    pads = np.asarray(pad_rows, dtype=np.int64) if pad_rows else np.empty((0, 6), dtype=np.int64)
+
+    counts = rust_fn(blocked, segs, vias, pads,
+                     int(expansion_grid), int(via_expansion_grid), int(num_layers))
+    blockers: Dict[int, Tuple[str, int]] = {}
+    for net_id, count in counts.items():
+        net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
+        blockers[net_id] = (net_name, count)
+    return blockers
+
+
+def _identify_blocking_obstacles_py(
+    blocked_positions: List[Tuple[int, int, int]],
+    pcb_data: PCBData,
+    config: GridRouteConfig,
+    current_net_id: int = -1
+) -> Dict[int, Tuple[str, int]]:
+    """Pure-Python fallback for _identify_blocking_obstacles (see its docstring)."""
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
 
