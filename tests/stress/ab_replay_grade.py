@@ -84,12 +84,41 @@ def _conn_count(text):
     return int(m.group(1)) if m else 0
 
 
+def _completion(text):
+    """Routing completion from check_connected output: a net is complete if it is
+    neither unrouted nor has a connectivity issue. Returns (total, incomplete, pct)
+    or (None, None, None) if the net total can't be parsed."""
+    tm = re.search(r"Checking (\d+) [\w ]*nets", text)
+    if not tm:
+        return None, None, None
+    total = int(tm.group(1))
+    um = re.search(r"Unrouted nets \((\d+)\)", text)
+    im = re.search(r"Connectivity issues \((\d+)\)", text)
+    incomplete = min(total, (int(um.group(1)) if um else 0) + (int(im.group(1)) if im else 0))
+    pct = round(100.0 * (total - incomplete) / total, 1) if total else None
+    return total, incomplete, pct
+
+
+def _tool_of(argv):
+    """Tool name (basename of the first .py arg) for per-tool timing aggregation."""
+    for a in argv:
+        if a.endswith(".py"):
+            return os.path.basename(a)
+    return argv[-1] if argv else "?"
+
+
 def grade(pcb, clearance):
     drc = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb,
                           "-c", clearance, "--quiet"], capture_output=True, text=True)
-    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_connected.py"), pcb,
-                           "--quiet"], capture_output=True, text=True)
-    return _drc_count(drc.stdout + drc.stderr), _conn_count(conn.stdout + conn.stderr)
+    # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
+    # only prints in non-quiet mode; the unrouted/connectivity-issue counts print
+    # either way.
+    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_connected.py"), pcb],
+                          capture_output=True, text=True)
+    ctext = conn.stdout + conn.stderr
+    total, incomplete, pct = _completion(ctext)
+    return {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
+            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
 
 
 def do_board(set_dir, out_dir, label, board):
@@ -99,21 +128,41 @@ def do_board(set_dir, out_dir, label, board):
     Path(dst).mkdir(parents=True, exist_ok=True)
     txt = manifest.read_text()
     clr = route_clearance(txt)
+    timings_path = f"{dst}/timings.json"
     with open(f"{dst}/_replay.log", "w") as log:
         rc = subprocess.run([sys.executable, str(REPO / "tests/stress/redo_stress_test.py"),
                              str(manifest), "--remap", f"{src}:{dst}",
-                             "--skip-checks", "--continue-on-error"],
+                             "--skip-checks", "--continue-on-error",
+                             "--timings-out", timings_path],
                             stdout=log, stderr=subprocess.STDOUT).returncode
+    # Per-step wall-clock (for A/B timing comparison): keep the raw per-command
+    # list and a per-tool sum (route.py / route_planes.py / ... -- where the
+    # vectorization speedups land), plus the total.
+    steps, time_by_tool, peak_by_tool, total_s, peak_board = [], {}, {}, 0.0, 0.0
+    if os.path.exists(timings_path):
+        for c in json.loads(Path(timings_path).read_text()).get("commands", []):
+            tool = _tool_of(c.get("argv", []))
+            sec = c.get("seconds", 0.0)
+            pk = c.get("peak_rss_mb", 0.0)
+            steps.append({"tool": tool, "seconds": sec, "peak_rss_mb": pk, "rc": c.get("returncode")})
+            time_by_tool[tool] = round(time_by_tool.get(tool, 0.0) + sec, 3)
+            peak_by_tool[tool] = round(max(peak_by_tool.get(tool, 0.0), pk), 1)  # max, not sum
+            total_s += sec
+            peak_board = max(peak_board, pk)
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
     res = {"board": board, "clearance": clr, "replay_rc": rc,
            "final": fname if done else None, "chain_complete": done,
-           "drc": None, "conn": None}
+           "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
+           "completion_pct": None,
+           "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
+           "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps}
     if done:
-        res["drc"], res["conn"] = grade(final, clr)
+        res.update(grade(final, clr))
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
-          f"drc={res['drc']} conn={res['conn']} final={res['final']}", flush=True)
+          f"drc={res['drc']} conn={res['conn']} compl={res['completion_pct']}% "
+          f"t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
     return res
 
 
@@ -151,44 +200,77 @@ def regrade(out_dir, set_dir):
         done = bool(final) and final.exists()
         res = {"board": b, "clearance": clr, "replay_rc": 0,
                "final": fname if done else None, "chain_complete": done,
-               "drc": None, "conn": None}
+               "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
+               "completion_pct": None}  # regrade re-runs no commands, so no timing
         if done:
-            res["drc"], res["conn"] = grade(str(final), clr)
-        print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} conn={res['conn']}")
+            res.update(grade(str(final), clr))
+        print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
+              f"conn={res['conn']} compl={res['completion_pct']}%")
         results.append(res)
     (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
     print(f"[regrade] rewrote {out_dir/'summary.json'}")
     return results
 
 
+def _fmt(v):
+    return "-" if v is None else str(v)
+
+
 def compare(old_json, new_json):
     old = {r["board"]: r for r in json.loads(Path(old_json).read_text())}
     new = {r["board"]: r for r in json.loads(Path(new_json).read_text())}
     boards = sorted(set(old) | set(new))
-    print(f"{'board':16} {'drc old->new':>14}  {'conn old->new':>15}  note")
-    print("-" * 70)
+    print(f"{'board':14} {'drc o->n':>11} {'conn o->n':>11} {'compl% o->n':>13} "
+          f"{'time(s) o->n':>16} {'peakMB o->n':>15}  note")
+    print("-" * 110)
     drc_delta = conn_delta = 0
+    t_old = t_new = 0.0
+    time_old, time_new = {}, {}   # per-tool wall-clock summed across boards (speedup view)
+    pk_old, pk_new = {}, {}       # per-tool peak RSS = max across boards (memory view)
     for b in boards:
         o, n = old.get(b), new.get(b)
         oc = o and o["chain_complete"]
         nc = n and n["chain_complete"]
         if not (oc and nc):
-            print(f"{b:16} {'-':>14}  {'-':>15}  chain incomplete "
+            print(f"{b:14} {'-':>11} {'-':>11} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
                   f"(old={'ok' if oc else 'broken'}, new={'ok' if nc else 'broken'}) -- excluded")
             continue
-        dd = n["drc"] - o["drc"]
-        cd = n["conn"] - o["conn"]
-        drc_delta += dd
-        conn_delta += cd
+        dd = n["drc"] - o["drc"]; cd = n["conn"] - o["conn"]
+        drc_delta += dd; conn_delta += cd
+        to, tn = o.get("total_seconds"), n.get("total_seconds")
+        if to is not None and tn is not None:
+            t_old += to; t_new += tn
+        for src, dst in ((o.get("time_by_tool", {}), time_old), (n.get("time_by_tool", {}), time_new)):
+            for k, v in src.items():
+                dst[k] = round(dst.get(k, 0.0) + v, 3)
+        for src, dst in ((o.get("peak_by_tool", {}), pk_old), (n.get("peak_by_tool", {}), pk_new)):
+            for k, v in src.items():
+                dst[k] = round(max(dst.get(k, 0.0), v), 1)
+        op, npc = o.get("completion_pct"), n.get("completion_pct")
+        po, pn = o.get("peak_rss_mb"), n.get("peak_rss_mb")
         flag = ""
-        if dd > 0 or cd > 0:
-            flag = "  <-- REGRESSION"
-        elif dd < 0 or cd < 0:
-            flag = "  improved"
-        print(f"{b:16} {o['drc']:>5} -> {n['drc']:<5}  {o['conn']:>6} -> {n['conn']:<6} {flag}")
-    print("-" * 70)
+        if dd > 0 or cd > 0:               flag = "  <-- REGRESSION"
+        elif dd < 0 or cd < 0:             flag = "  improved"
+        speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
+        print(f"{b:14} {o['drc']:>4} -> {n['drc']:<4} {o['conn']:>4} -> {n['conn']:<4} "
+              f"{_fmt(op):>5} -> {_fmt(npc):<5} {_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} "
+              f"{_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
+    print("-" * 110)
     verdict = "REGRESSION" if (drc_delta > 0 or conn_delta > 0) else "no regression"
     print(f"net delta: drc {drc_delta:+d}, conn {conn_delta:+d}  ==>  {verdict}")
+    if t_old and t_new:
+        print(f"total replay wall-clock: {t_old:.1f}s -> {t_new:.1f}s  ({t_old/t_new:.2f}x)")
+        print("\nper-tool: wall-clock (summed) and peak RSS (max) over boards complete in both:")
+        print(f"  {'tool':28} {'t_old(s)':>9} {'t_new(s)':>9} {'speedup':>8}   "
+              f"{'peak_old':>9} {'peak_new':>9}")
+        for tool in sorted(set(time_old) | set(time_new), key=lambda k: -time_new.get(k, 0)):
+            ot, nt = time_old.get(tool, 0.0), time_new.get(tool, 0.0)
+            sp = f"{ot/nt:.2f}x" if nt else "-"
+            print(f"  {tool:28} {ot:>9.1f} {nt:>9.1f} {sp:>8}   "
+                  f"{pk_old.get(tool, 0):>8.0f}MB {pk_new.get(tool, 0):>8.0f}MB")
+    else:
+        print("(timing/peak not available in one/both summaries -- re-run waves with the "
+              "current ab_replay_grade to capture per-step timing + peak memory)")
     return drc_delta <= 0 and conn_delta <= 0
 
 

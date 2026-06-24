@@ -28,6 +28,37 @@ import sys
 import time
 
 
+def _tree_rss_kb(pid):
+    """Resident set size (KB) of a process plus its direct children, via ps --
+    same tree-RSS method run_limited.sh uses for its memory watchdog."""
+    total = 0
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout
+        total += sum(int(x) for x in out.split())
+        kids = subprocess.run(["pgrep", "-P", str(pid)],
+                              capture_output=True, text=True).stdout.split()
+        for k in kids:
+            o2 = subprocess.run(["ps", "-o", "rss=", "-p", k],
+                                capture_output=True, text=True).stdout
+            total += sum(int(x) for x in o2.split())
+    except Exception:
+        pass
+    return total
+
+
+def run_with_peak_rss(argv, cwd, interval=0.5):
+    """Run a command (inheriting stdout/stderr) while sampling its process-tree
+    RSS; return (returncode, peak_rss_kb). Lets the replay record per-step peak
+    memory so an engine change's memory effect is comparable, not just its time."""
+    p = subprocess.Popen(argv, cwd=cwd)
+    peak = 0
+    while p.poll() is None:
+        peak = max(peak, _tree_rss_kb(p.pid))
+        time.sleep(interval)
+    return p.returncode, peak
+
+
 def parse_manifest(path):
     """Yield (cwd, argv) for each recorded command. cwd is None if not recorded."""
     cmds = []
@@ -133,9 +164,10 @@ def main():
         if cwd and not os.path.isdir(cwd):
             os.makedirs(cwd, exist_ok=True)
         cmd_t0 = time.time()
-        rc = subprocess.run(argv, cwd=cwd).returncode
+        rc, peak_kb = run_with_peak_rss(argv, cwd)
         dt = time.time() - cmd_t0
-        timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc, "argv": argv})
+        timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc,
+                        "peak_rss_mb": round(peak_kb / 1024, 1), "argv": argv})
         print(f"    -> {dt:.2f}s" + (f"  exit {rc}" if rc != 0 else ""))
         if rc != 0:
             failures += 1
@@ -154,7 +186,7 @@ def main():
         print("Per-command time (slowest first):")
         for t in sorted(timings, key=lambda x: -x["seconds"]):
             tool = next((os.path.basename(a) for a in t["argv"] if a.endswith(".py")), "?")
-            print(f"  {t['seconds']:7.2f}s  [{t['index']}] {tool}")
+            print(f"  {t['seconds']:7.2f}s  {t.get('peak_rss_mb', 0):7.0f}MB  [{t['index']}] {tool}")
     if args.timings_out:
         with open(args.timings_out, "w") as f:
             json.dump({"manifest": args.manifest, "total_seconds": round(total, 3),
