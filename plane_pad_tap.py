@@ -399,7 +399,18 @@ def try_tap_pad(
     # Imported lazily: route_planes imports this module at top level.
     from route_planes import find_via_position, route_via_to_pad
 
-    half_size = max_search_radius + _WINDOW_MARGIN
+    if max_search_radius > 0:
+        half_size = max_search_radius + _WINDOW_MARGIN
+    else:
+        # Via-IN-pad only (no spiral): the window need only cover the pad plus a
+        # via's clearance halo -- any foreign copper farther than that can't block
+        # a via placed inside the pad. Sizing it to the pad instead of the fixed
+        # 3mm spiral margin shrinks the Rust obstacle-map build ~8x at grid 0.05
+        # (#189 via-in-pad unblock). Conservative: full via diameter + clearance +
+        # a couple grid cells of slack, and make_local_window still pulls in items
+        # within its _ITEM_MARGIN beyond the window, so no near obstacle is missed.
+        half_size = (max(pad.size_x, pad.size_y) / 2 + via_size
+                     + config.clearance + 2 * config.grid_step)
     local = make_local_window(pcb_data, pad.global_x, pad.global_y, half_size)
 
     if extra_vias:
