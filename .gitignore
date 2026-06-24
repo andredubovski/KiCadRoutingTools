@@ -50,3 +50,4 @@ rust_*/target/
 /kicad_files/interf_u_*.kicad_pcb
 /kicad_files/sonde_u_*.kicad_pcb
 kicad_files/.history/
+/kicad_files/*kicad_pro
