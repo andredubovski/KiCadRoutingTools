@@ -1055,13 +1055,16 @@ def compute_endpoint_escape(pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_nam
     Euclidean geometry, the two corrections the grid map gets wrong here:
       - track_ok : cells genuinely clear for this net's track. Un-blocking them
         lets the route walk off the boxed endpoint to where an escape via fits.
-      - via_bad  : cells where a via would actually graze foreign copper. Blocking
-        them stops the route vias landing on a grid-missed graze.
+      - via_bad  : cells where an escape via would violate real DRC against ANY
+        obstacle -- foreign track/via/pad copper, OR hole-to-hole drill clearance
+        vs any via or through-hole pad drill (incl. same-net). Blocking them stops
+        the route dropping a via on a grid-missed graze or a drill-clearance bust.
 
     Returns (track_ok, via_bad) as lists of (gx, gy). Foreign copper = everything
     not on this net: the board's segments/vias (other nets) plus `extra_segs` /
     `extra_vias` -- not-yet-committed foreign copper to also avoid (e.g. a diff
-    pair's partner middle + the legs committed earlier this round)."""
+    pair's partner middle + the legs committed earlier this round). Drill
+    hole-to-hole additionally considers same-net vias/pads (a fab rule)."""
     lname = layer_names[layer_idx]
     ex, ey = coord.to_float(ep_gx, ep_gy)
     win = radius * config.grid_step + config.via_size / 2 + config.clearance + 0.5
@@ -1076,9 +1079,34 @@ def compute_endpoint_escape(pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_nam
     fvia = ([v for v in board_vias if v.net_id != net_id and abs(v.x - ex) <= win and abs(v.y - ey) <= win] +
             [v for v in extra_vias if v.net_id != net_id and abs(v.x - ex) <= win and abs(v.y - ey) <= win])
 
-    # Exact thresholds, compared squared to skip the per-cell sqrt.
+    # An escape via we allow must pass real DRC against EVERY obstacle type, so
+    # reuse the canonical check_drc geometry. No clearance margin -- margin is a
+    # check_drc grading tolerance, not a placement rule; an escape via must clear
+    # by the full rule.
+    from check_drc import (check_via_segment_overlap, check_via_via_overlap,
+                           check_via_drill_overlap, check_pad_via_overlap,
+                           check_pad_drill_via_overlap)
+    from kicad_parser import Via
+    h2h = config.hole_to_hole_clearance
+    rlayers = list(config.layers)
+    via_layers = [config.layers[0], config.layers[-1]]
+    # Every via near the window, regardless of net: a new via's DRILL must clear
+    # every other drill (hole-to-hole is a fab rule that applies even same-net).
+    nearby_vias = ([v for v in board_vias if abs(v.x - ex) <= win and abs(v.y - ey) <= win] +
+                   [v for v in extra_vias if abs(v.x - ex) <= win and abs(v.y - ey) <= win])
+    # Foreign pads (copper) and any through-hole pad drills (hole-to-hole), windowed.
+    fpads, tht_pads = [], []
+    for pnid, pads in (getattr(pcb_data, 'pads_by_net', None) or {}).items():
+        for p in pads:
+            pw = max(p.size_x, p.size_y)
+            if abs(p.global_x - ex) > win + pw or abs(p.global_y - ey) > win + pw:
+                continue
+            if pnid != net_id:
+                fpads.append(p)
+            if getattr(p, 'drill', 0) > 0:
+                tht_pads.append(p)
+
     track_need = config.get_net_track_width(net_id, lname) / 2 + config.clearance
-    via_r = config.via_size / 2
     track_ok, via_bad = [], []
     for ox in range(-radius, radius + 1):
         for oy in range(-radius, radius + 1):
@@ -1094,16 +1122,16 @@ def compute_endpoint_escape(pcb_data, net_id, ep_gx, ep_gy, layer_idx, layer_nam
                 t_clear = all(math.hypot(v.x - x, v.y - y) - v.size / 2 >= track_need for v in fvia)
             if t_clear and _pt_foreign_pad_dist(pcb_data, net_id, x, y, lname) >= track_need:
                 track_ok.append((gx, gy))
-            # a via here would graze foreign copper? (a via spans every layer, so
-            # any-layer foreign segment counts) -- catches the diagonal-segment
-            # via-raster under-cover the grid map misses
-            v_bad = any(
-                _point_segment_dist2(x, y, s.start_x, s.start_y, s.end_x, s.end_y) <
-                (via_r + s.width / 2 + config.clearance) ** 2
-                for s in fseg)
-            if not v_bad:
-                v_bad = any(math.hypot(v.x - x, v.y - y) < via_r + v.size / 2 + config.clearance for v in fvia)
-            if v_bad:
+            # Would an escape via dropped here violate real clearance against ANY
+            # obstacle? foreign track / via / pad COPPER, plus hole-to-hole DRILL
+            # clearance vs every via and through-hole pad drill (incl. same-net).
+            cand = Via(x=x, y=y, size=config.via_size, drill=config.via_drill,
+                       layers=via_layers, net_id=net_id)
+            if (any(check_via_segment_overlap(cand, s, config.clearance, 0.0)[0] for s in fseg) or
+                    any(check_via_via_overlap(cand, v, config.clearance, 0.0)[0] for v in fvia) or
+                    any(check_via_drill_overlap(cand, v, h2h, 0.0)[0] for v in nearby_vias) or
+                    any(check_pad_via_overlap(p, cand, config.clearance, rlayers, 0.0)[0] for p in fpads) or
+                    any(check_pad_drill_via_overlap(p, cand, h2h, 0.0)[0] for p in tht_pads)):
                 via_bad.append((gx, gy))
     return track_ok, via_bad
 

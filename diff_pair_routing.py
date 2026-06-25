@@ -2475,13 +2475,22 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
     or (None, None, 0) if either leg can't be routed."""
     from single_ended_routing import _route_leg, _path_to_segments_vias, apply_endpoint_escape
     from obstacle_map import (add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
-                              add_vias_list_as_obstacles, remove_vias_list_from_obstacles)
+                              add_vias_list_as_obstacles, remove_vias_list_from_obstacles,
+                              get_same_net_through_hole_positions)
     router = GridRouter(
         via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
         layer_costs=config.get_layer_costs())
     nlayers = len(config.layers)
     own_tol = _launch_assoc_tol(config)
+    # An existing same-net through-hole (the net's THT pads + any pre-placed via,
+    # e.g. a hand-placed escape via) already connects all layers, so a leg whose
+    # path lands on that cell must REUSE it -- not stack a second coincident via a
+    # hole-to-hole bust. Mirror the multipoint router's reuse set.
+    reuse_holes = set(get_same_net_through_hole_positions(pcb_data, net_id, config))
+    for _v in (getattr(pcb_data, 'vias', None) or []):
+        if _v.net_id == net_id:
+            reuse_holes.add(coord.to_grid(_v.x, _v.y))
 
     def _term_anchor(term, mid_layer):
         """The leg endpoint: the terminal's own-net through-via (its access to
@@ -2549,7 +2558,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                 path, coord, layer_names, net_id, config,
                 (ax, ay, layer_names[path[0][2]]),
                 (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
-                pcb_data=pcb_data)
+                through_hole_positions=reuse_holes, pcb_data=pcb_data)
             segs += ps
             vias += pv
         return segs, vias, iters
