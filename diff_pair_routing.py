@@ -2394,12 +2394,114 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             continue
         if _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
             continue
-        print(f"  DIRECT HYBRID: coupled middle on {layer_names[layer_idx]} "
-              f"({len(mid_segs)} segs, {iters} iters); both legs -> single-ended")
-        return {'new_segments': mid_segs, 'new_vias': p_vias + n_vias,
-                'iterations': iters, 'hybrid_defer': True,
-                'path_length': len(simplified)}
+
+        # Attach each terminal to its middle near-end with a point-to-point
+        # single-ended leg. The partner net's copper (its middle + already-routed
+        # legs) is an obstacle, so a side-swap leg routes AROUND it -- which is
+        # how polarity gets fixed at the pads, no coupled polarity stage needed.
+        leg_segs, leg_vias, total_iters = [], [], iters
+        ok = True
+        committed_segs, committed_vias = [], []  # partner copper accumulates
+        pair_vias = [v for v in (getattr(pcb_data, 'vias', None) or [])
+                     if v.net_id in (p_net_id, n_net_id)]
+        for net_id, mid_float, t_src, t_tgt in (
+                (p_net_id, p_float, (p_src_x, p_src_y), (p_tgt_x, p_tgt_y)),
+                (n_net_id, n_float, (n_src_x, n_src_y), (n_tgt_x, n_tgt_y))):
+            # The other net's middle + terminal vias (and, this round, the first
+            # net's legs/vias) must block, so a side-swap leg routes around them.
+            partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs
+            partner_v = [v for v in pair_vias if v.net_id != net_id] + committed_vias
+            ls, lv, it = _route_hybrid_legs(
+                pcb_data, net_id, config, obstacles, layer_names, coord,
+                mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias)
+            if ls is None:
+                ok = False
+                break
+            leg_segs += ls
+            leg_vias += lv
+            committed_segs += ls
+            committed_vias += lv
+            total_iters += it
+        if not ok:
+            continue
+        all_segs = mid_segs + leg_segs
+        if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+            continue
+        print(f"  DIRECT HYBRID: coupled middle on {layer_names[layer_idx]} + "
+              f"{len(leg_segs)} leg seg(s) ({total_iters} iters)")
+        return {'new_segments': all_segs, 'new_vias': p_vias + n_vias + leg_vias,
+                'iterations': total_iters, 'path_length': len(simplified)}
     return None
+
+
+def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
+                       mid_float, term_src, term_tgt, partner_segs, partner_vias,
+                       pair_vias):
+    """Point-to-point single-ended legs joining each terminal to the coupled
+    middle's near end, routing around partner copper. Returns (segs, vias, iters)
+    or (None, None, 0) if either leg can't be routed."""
+    from single_ended_routing import _route_leg, _path_to_segments_vias
+    from obstacle_map import (add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
+                              add_vias_list_as_obstacles, remove_vias_list_from_obstacles)
+    router = GridRouter(
+        via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
+        turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
+        layer_costs=config.get_layer_costs())
+    nlayers = len(config.layers)
+    own_tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+
+    def _term_anchor(term, mid_layer):
+        """The leg endpoint: the terminal's own-net through-via (its access to
+        the middle layer) if one sits at the terminal, else the pad itself."""
+        best = None
+        for v in pair_vias:
+            if v.net_id != net_id:
+                continue
+            d = math.hypot(v.x - term[0], v.y - term[1])
+            if d <= own_tol and (best is None or d < best[0]):
+                best = (d, v.x, v.y, mid_layer)  # via spans layers -> use mid layer
+        if best:
+            return best[1], best[2], best[3], True
+        return term[0], term[1], mid_layer, False
+
+    add_segments_list_as_obstacles(obstacles, partner_segs, config)
+    add_vias_list_as_obstacles(obstacles, partner_vias, config)
+    try:
+        segs, vias, iters = [], [], 0
+        for term, mid_pt in ((term_src, mid_float[0]), (term_tgt, mid_float[-1])):
+            ax, ay, alayer, on_via = _term_anchor(term, mid_pt[2])
+            tgx, tgy = coord.to_grid(ax, ay)
+            mgx, mgy = coord.to_grid(mid_pt[0], mid_pt[1])
+            if (tgx, tgy) == (mgx, mgy):
+                continue  # terminal already coincides with the middle end
+            # On a through-via the leg may leave on any layer; off a bare pad it
+            # must start on the pad's own layer.
+            sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
+                       else [(tgx, tgy, alayer)])
+            targets = [(mgx, mgy, mid_pt[2])]
+            obstacles.clear_allowed_cells()
+            obstacles.clear_source_target_cells()
+            for ox in range(-2, 3):
+                for oy in range(-2, 3):
+                    obstacles.add_allowed_cell(tgx + ox, tgy + oy)
+                    obstacles.add_allowed_cell(mgx + ox, mgy + oy)
+            path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
+            obstacles.clear_allowed_cells()
+            obstacles.clear_source_target_cells()
+            iters += it
+            if path is None:
+                return None, None, 0
+            ps, pv = _path_to_segments_vias(
+                path, coord, layer_names, net_id, config,
+                (ax, ay, layer_names[path[0][2]]),
+                (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
+                pcb_data=pcb_data)
+            segs += ps
+            vias += pv
+        return segs, vias, iters
+    finally:
+        remove_segments_list_from_obstacles(obstacles, partner_segs, config)
+        remove_vias_list_from_obstacles(obstacles, partner_vias, config)
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,

@@ -810,15 +810,15 @@ def route_diff_pairs(
 
             if not ripped_up:
                 # Last resort: the coupled route can't cleanly join a terminal (a
-                # connector graze, or P/N must swap sides). Lay the coupled MIDDLE
-                # directly source->target on the open layer and defer each terminal
-                # leg to a point-to-point single-ended join (watchy USB_D).
+                # connector graze, or P/N must swap sides). Lay the coupled middle
+                # directly source->target on the open layer and attach each
+                # terminal with a point-to-point single-ended leg (watchy USB_D).
                 if (config.diff_pair_hybrid_escape and result
                         and (result.get('connector_graze') or result.get('pn_crossing'))):
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles, config.layers)
-                    if hyb and not hyb.get('failed') and hyb.get('hybrid_defer'):
-                        print(f"  HYBRID ESCAPE: direct coupled middle routed; both "
-                              f"terminal legs deferred to single-ended")
+                    if hyb and not hyb.get('failed'):
+                        print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
+                              f"terminal legs")
                         add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                         results.append(hyb)
                         successful += 1
@@ -837,9 +837,6 @@ def route_diff_pairs(
                         track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
                         invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
                         invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
-                        # Terminal legs finished by the single-ended follow-up pass.
-                        state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
-                        state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
                         continue
                 if not polarity_skip:
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
