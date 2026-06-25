@@ -8,6 +8,7 @@ dramatically speeding up routing by avoiding redundant obstacle calculations.
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
 import math
+import os
 import numpy as np
 
 from kicad_parser import PCBData
@@ -16,6 +17,10 @@ from routing_utils import build_layer_map, iter_pad_blocked_cells, \
     pad_blocked_cells_array, segment_blocked_cells_array, square_offsets, circle_offsets
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
+
+# Mirror obstacle_map's EXACT_KEEPOUT gate so the cache's via keep-out matches
+# build_base under the experiment (the track keep-out is already the exact capsule).
+_EXACT_KEEPOUT = bool(os.environ.get("EXACT_KEEPOUT"))
 
 # Import Rust router
 import sys
@@ -109,6 +114,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
     expansion_mm_by_layer = {}
     via_block_grid_by_layer = {}
+    via_block_mm_by_layer = {}
     layer_widths = []  # per-layer future-routing-track width (impedance / power)
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
@@ -121,6 +127,7 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
         via_block_mm = config.via_size / 2 + layer_width / 2 + config.clearance + extra_clearance
         via_block_grid_by_layer[layer_name] = max(1, coord.to_grid_dist_safe(via_block_mm))
+        via_block_mm_by_layer[layer_name] = via_block_mm
 
     # Process segments. Keep-out from the segment's ACTUAL width, not just the
     # net's configured width: a pre-existing wide/diff-pair trace (e.g. a 0.2mm
@@ -141,13 +148,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         if seg_w <= layer_w:
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_grid = via_block_grid_by_layer.get(seg.layer, 1)
+            via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             expansion_mm = max(coord.grid_step,
                                own_half + config.clearance + config.track_width / 2 + extra_clearance)
-            via_block_grid = max(1, coord.to_grid_dist_safe(
-                config.via_size / 2 + own_half + config.clearance + extra_clearance))
+            via_block_mm = config.via_size / 2 + own_half + config.clearance + extra_clearance
+            via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm, via_block_grid,
-                                    blocked_cells_set, blocked_vias_set)
+                                    blocked_cells_set, blocked_vias_set, via_block_mm=via_block_mm)
 
     # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
     # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-
@@ -195,12 +203,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
                                 track_margin_mm: float, via_block_grid: int,
                                 blocked_cells: List["np.ndarray"],
-                                blocked_vias: List["np.ndarray"]):
+                                blocked_vias: List["np.ndarray"],
+                                via_block_mm: float = None):
     """Collect segment obstacle cells into sets (no obstacle map modification).
 
     The track keep-out is a capsule measured from the REAL float segment (handles
-    off-grid endpoints + diagonals); the via keep-out still uses the Bresenham line
-    (vias land on grid cells, and the diagonal margin already compensates there).
+    off-grid endpoints + diagonals). The via keep-out is the Bresenham line +
+    circle by default; under EXACT_KEEPOUT it is also the exact capsule (with the
+    via margin), matching build_base.
     """
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
@@ -216,10 +226,15 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
     rows[:, 2] = layer_idx
     blocked_cells.append(rows)
 
-    # Via blocking still rasterized along the Bresenham line (issue #35).
-    line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
-    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
-    blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
+    if _EXACT_KEEPOUT and via_block_mm is not None:
+        # Exact via keep-out: capsule from the true segment (matches build_base).
+        blocked_vias.append(segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step))
+    else:
+        # Via blocking rasterized along the Bresenham line (issue #35).
+        line = np.array(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int32)
+        via_offs = circle_offsets(via_block_range, effective_via_block_sq)
+        blocked_vias.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
 
 
 def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,

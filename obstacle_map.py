@@ -94,7 +94,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
         via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm)
+                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
     # Vias span all layers, so use max track width for track blocking
@@ -805,7 +805,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance + extra_clearance
         via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm)
+                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
 
 
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -865,7 +865,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle_with_exclusion(
             obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-            exclude_grid_cells, expansion_mm=expansion_mm
+            exclude_grid_cells, expansion_mm=expansion_mm, via_block_mm=via_block_mm
         )
 
 
@@ -941,7 +941,7 @@ def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PC
 def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord: GridCoord,
                                           layer_idx: int, expansion_grid: int, via_block_grid: int,
                                           exclude_cells: Set[Tuple[int, int]],
-                                          expansion_mm: float = None):
+                                          expansion_mm: float = None, via_block_mm: float = None):
     """Add a segment as obstacle, excluding certain grid cells."""
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
@@ -960,22 +960,19 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
     effective_via_block_sq = (via_block_grid + 0.25) ** 2 if is_diagonal else via_block_grid * via_block_grid
     via_block_range = via_block_grid + 1 if is_diagonal else via_block_grid
 
-    if _EXACT_KEEPOUT and expansion_mm is not None:
-        # Exact capsule track keep-out (same shape build_base/cache use), minus the
-        # excluded cells. Via keep-out stays Bresenham+circle, gated per line cell
-        # exactly as the legacy path.
+    if _EXACT_KEEPOUT and expansion_mm is not None and via_block_mm is not None:
+        # Exact capsule track + via keep-out (same shape build_base/cache use),
+        # each minus the excluded cells.
         for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
                                                     seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
             c = (int(cgx), int(cgy))
             if c not in exclude_cells:
                 obstacles.add_blocked_cell(c[0], c[1], layer_idx)
-        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            if (gx, gy) in exclude_cells:
-                continue
-            for ex in range(-via_block_range, via_block_range + 1):
-                for ey in range(-via_block_range, via_block_range + 1):
-                    if ex*ex + ey*ey <= effective_via_block_sq and (gx + ex, gy + ey) not in exclude_cells:
-                        obstacles.add_blocked_via(gx + ex, gy + ey)
+        for cgx, cgy in segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                                    seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
+            c = (int(cgx), int(cgy))
+            if c not in exclude_cells:
+                obstacles.add_blocked_via(c[0], c[1])
         return
 
     gx, gy = gx1, gy1
@@ -1108,7 +1105,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             via_block_mm = config.via_size / 2 + seg_width / 2 + config.clearance
             via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              expansion_mm=expansion_mm)
+                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
 
 
 def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: list,
@@ -1164,12 +1161,18 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
                 for ex in range(-expansion_grid, expansion_grid + 1):
                     for ey in range(-expansion_grid, expansion_grid + 1):
                         cells_to_remove.append((gx + ex, gy + ey, layer_idx))
-        # Via blocking cells (Bresenham + circle, same in both modes)
-        for gx, gy in walk_line(gx1, gy1, gx2, gy2):
-            for ex in range(-via_block_range, via_block_range + 1):
-                for ey in range(-via_block_range, via_block_range + 1):
-                    if ex*ex + ey*ey <= effective_via_block_sq:
-                        vias_to_remove.append((gx + ex, gy + ey))
+        # Via cells must also match the ADD shape: capsule (via margin) when
+        # exact, else Bresenham + circle.
+        if _EXACT_KEEPOUT:
+            for cgx, cgy in segment_blocked_cells_array(
+                    seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
+                vias_to_remove.append((int(cgx), int(cgy)))
+        else:
+            for gx, gy in walk_line(gx1, gy1, gx2, gy2):
+                for ex in range(-via_block_range, via_block_range + 1):
+                    for ey in range(-via_block_range, via_block_range + 1):
+                        if ex*ex + ey*ey <= effective_via_block_sq:
+                            vias_to_remove.append((gx + ex, gy + ey))
 
     # Batch remove cells and vias
     if cells_to_remove:
@@ -1404,7 +1407,7 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
                           layer_idx: int, expansion_grid: int, via_block_grid: int,
                           blocked_cells: List[Set[Tuple[int, int]]] = None,
                           blocked_vias: Set[Tuple[int, int]] = None,
-                          expansion_mm: float = None):
+                          expansion_mm: float = None, via_block_mm: float = None):
     """Add a segment as obstacle to the map.
 
     Args:
@@ -1417,7 +1420,9 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
         blocked_cells: Optional per-layer sets to collect blocked cells for visualization
         blocked_vias: Optional set to collect blocked via positions for visualization
         expansion_mm: True track keep-out distance (mm); enables the exact
-            point-to-segment keep-out when EXACT_KEEPOUT is set.
+            point-to-segment track keep-out when EXACT_KEEPOUT is set.
+        via_block_mm: True via keep-out distance (mm); enables the exact
+            point-to-segment via keep-out when EXACT_KEEPOUT is set.
     """
     gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
     gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
@@ -1442,8 +1447,14 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
         cells = (line[:, None, :] + track_offs[None, :, :]).reshape(-1, 2)
     _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
 
-    via_offs = circle_offsets(via_block_range, effective_via_block_sq)
-    vias = (line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
+    if _EXACT_KEEPOUT and via_block_mm is not None:
+        # Exact via keep-out: a via centre this close to the true segment grazes
+        # it (the Bresenham+circle stamp under-covers off-grid/diagonal lines).
+        vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                           seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
+    else:
+        via_offs = circle_offsets(via_block_range, effective_via_block_sq)
+        vias = (line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2)
     _batch_vias(obstacles, vias, blocked_vias)
 
 
