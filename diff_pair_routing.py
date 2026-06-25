@@ -2382,13 +2382,28 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             continue
         centerline_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], lyr)
                             for gx, gy, lyr in simplified]
-        p_float = create_parallel_path_from_float(centerline_float, sign=1, spacing_mm=spacing_mm)
-        n_float = create_parallel_path_from_float(centerline_float, sign=-1, spacing_mm=spacing_mm)
-        p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, 1, -1, spacing_mm)
+        # Choose which offset side is P (no coupled polarity stage here). Pick the
+        # assignment that minimises terminal-leg crossings: put the P track on the
+        # side P's vias are actually on. A genuine side-swap (P-via on opposite
+        # sides at the two ends) costs one crossing either way, but this never
+        # crosses BOTH legs gratuitously.
+        off_plus = create_parallel_path_from_float(centerline_float, sign=1, spacing_mm=spacing_mm)
+        off_minus = create_parallel_path_from_float(centerline_float, sign=-1, spacing_mm=spacing_mm)
+
+        def _d2(a, b):
+            return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+        # cost of P=+1: P-via farther from the +side end than the -side end => cross
+        cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
+                     (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
+        p_sign = 1 if cost_plus <= 1 else -1
+        n_sign = -p_sign
+        p_float = off_plus if p_sign == 1 else off_minus
+        n_float = off_minus if p_sign == 1 else off_plus
+        p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, p_sign, n_sign, spacing_mm)
         p_segs, p_vias, _ = _float_path_to_geometry(
-            p_float, p_net_id, None, None, 1, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+            p_float, p_net_id, None, None, p_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
         n_segs, n_vias, _ = _float_path_to_geometry(
-            n_float, n_net_id, None, None, -1, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+            n_float, n_net_id, None, None, n_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
         mid_segs = p_segs + n_segs
         if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
             continue
