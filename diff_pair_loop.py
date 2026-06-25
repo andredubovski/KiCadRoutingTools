@@ -809,6 +809,40 @@ def route_diff_pairs(
                         ripped_up = True
 
             if not ripped_up:
+                # Last resort: a connector graze the rip-up can't clear (the
+                # partner's own escape via isn't a rippable blocker). Keep the
+                # coupled middle and defer each terminal leg to a point-to-point
+                # single-ended join (hybrid escape -- watchy USB_D).
+                if (config.diff_pair_hybrid_escape and result
+                        and result.get('connector_graze')):
+                    hyb = route_diff_pair_with_obstacles(
+                        pcb_data, pair, config, obstacles, base_obstacles,
+                        unrouted_stubs, hybrid_mode=True)
+                    if hyb and not hyb.get('failed') and hyb.get('hybrid_defer'):
+                        print(f"  HYBRID ESCAPE: coupled middle routed; both terminal "
+                              f"legs deferred to single-ended")
+                        add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
+                        results.append(hyb)
+                        successful += 1
+                        total_iterations += hyb.get('iterations', 0)
+                        if pair.p_net_id in remaining_net_ids:
+                            remaining_net_ids.remove(pair.p_net_id)
+                        if pair.n_net_id in remaining_net_ids:
+                            remaining_net_ids.remove(pair.n_net_id)
+                        routed_net_ids.append(pair.p_net_id)
+                        routed_net_ids.append(pair.n_net_id)
+                        routed_results[pair.p_net_id] = hyb
+                        routed_results[pair.n_net_id] = hyb
+                        diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
+                        diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
+                        track_proximity_cache[pair.p_net_id] = compute_track_proximity_for_net(pcb_data, pair.p_net_id, config, layer_map)
+                        track_proximity_cache[pair.n_net_id] = compute_track_proximity_for_net(pcb_data, pair.n_net_id, config, layer_map)
+                        invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
+                        # Terminal legs finished by the single-ended follow-up pass.
+                        state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
+                        state.diff_pair_single_ended_nets[pair.n_net_id] = pair.n_net_name
+                        continue
                 if not polarity_skip:
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                 failed += 1

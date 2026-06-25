@@ -1001,10 +1001,15 @@ def _generate_debug_arrows(center_src_x, center_src_y, src_dir_x, src_dir_y,
 
 def _float_path_to_geometry(float_path, net_id, original_start, original_end, sign,
                             src_stub_dir, tgt_stub_dir, src_extension, tgt_extension,
-                            config, layer_names):
+                            config, layer_names, omit_connectors=False):
     """Convert floating-point path (x, y, layer) to segments and vias.
 
     Adds extension segments to ensure P and N connectors are parallel.
+
+    With omit_connectors=True the terminal connector segments (terminal -> route
+    start/end) are skipped: only the coupled middle is emitted, leaving clean
+    stub free-ends at each end for a later point-to-point single-ended pass to
+    join to the terminal (hybrid diff routing -- watchy USB_D).
 
     Args:
         float_path: List of (x, y, layer_idx) tuples
@@ -1026,6 +1031,12 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
     vias = []
     connector_lines = []  # Debug lines for connectors
     num_segments = len(float_path) - 1
+
+    if omit_connectors:
+        # Hybrid mode: emit only the coupled middle; the terminal joins are done
+        # single-ended afterwards, so suppress both connector segments.
+        original_start = None
+        original_end = None
 
     # Add connecting segment from original start if needed
     if original_start and len(float_path) > 0:
@@ -2297,7 +2308,8 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     forced_target_dir: Optional[Tuple[float, float]] = None,
                                     swap_allowed_ends: Tuple[str, ...] = ('source', 'target'),
                                     force_swap: bool = False,
-                                    force_no_swap: bool = False) -> Optional[dict]:
+                                    force_no_swap: bool = False,
+                                    hybrid_mode: bool = False) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -3060,6 +3072,29 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         else:
             net = pcb_data.nets.get(obj.net_id)
             what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
+        # Hybrid fallback: the graze is on a terminal CONNECTOR, not the coupled
+        # middle. Re-emit the middle alone (no connectors) and, if it is clean,
+        # hand it back flagged so the loop commits the coupled run and defers each
+        # terminal leg to a point-to-point single-ended join that can wiggle
+        # around the partner copper the rigid connector could not (watchy USB_D).
+        if config.diff_pair_hybrid_escape and hybrid_mode:
+            p_mid, p_mv, _ = _float_path_to_geometry(
+                p_float_path, p_net_id, p_start, p_end, p_sign,
+                src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext,
+                config, layer_names, omit_connectors=True)
+            n_mid, n_mv, _ = _float_path_to_geometry(
+                n_float_path, n_net_id, n_start, n_end, n_sign,
+                src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext,
+                config, layer_names, omit_connectors=True)
+            mid_segs = p_mid + n_mid
+            if not _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
+                print("  -> hybrid escape: keeping the coupled middle, deferring both "
+                      "terminal legs to single-ended point-to-point")
+                hyb = dict(result)
+                hyb['new_segments'] = mid_segs
+                hyb['new_vias'] = p_mv + n_mv + gnd_vias
+                hyb['hybrid_defer'] = True
+                return hyb
         print(f"  Connector grazes foreign {what} by {overlap:.3f}mm on {seg.layer} - "
               f"rejecting pair route (issue #165)")
         print("  (a connector/setback segment violates clearance to the partner or "
