@@ -2327,14 +2327,19 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     csx, csy = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
     ctx, cty = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
 
-    # Layers reachable (via the through-via/THT barrel) at BOTH terminals.
-    src_layers = (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_src_x, p_src_y, config) &
-                  _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config))
-    tgt_layers = (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
-                  _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config))
-    cand_layers = (src_layers & tgt_layers) or {src[4]}
-    # Prefer inner layers (most likely open under the parts), then by index.
-    layer_order = sorted(cand_layers, key=lambda i: (layer_names[i] in ('F.Cu', 'B.Cu'), i))
+    # The coupled middle may run on ANY routing layer: each terminal leg is a
+    # single-ended A* from the pad's layer to the middle, and it drops a via for
+    # the layer change itself -- so an inner-layer middle is reachable even when
+    # no via exists yet (stock surface fanout). Prefer the layers an existing
+    # via/THT barrel already spans (no extra escape via needed), then inner
+    # layers (most likely open under the parts), then F.Cu/B.Cu.
+    spanned = ((_endpoint_launch_layer_indices(pcb_data, p_net_id, p_src_x, p_src_y, config) &
+                _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config)) &
+               (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
+                _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config)))
+    layer_order = sorted(
+        range(len(config.layers)),
+        key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
 
     min_radius_grid = config.min_turning_radius / config.grid_step
     turn_cost = int(min_radius_grid * math.pi / 4 * 1000)

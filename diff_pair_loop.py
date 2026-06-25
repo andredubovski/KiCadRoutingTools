@@ -809,12 +809,13 @@ def route_diff_pairs(
                         ripped_up = True
 
             if not ripped_up:
-                # Last resort: the coupled route can't cleanly join a terminal (a
-                # connector graze, or P/N must swap sides). Lay the coupled middle
-                # directly source->target on the open layer and attach each
-                # terminal with a point-to-point single-ended leg (watchy USB_D).
-                if (config.diff_pair_hybrid_escape and result
-                        and (result.get('connector_graze') or result.get('pn_crossing'))):
+                # Last resort, whatever the failure mode (no valid setback, a
+                # connector graze, P/N must swap sides): lay the coupled middle
+                # directly source->target on the best open layer and attach each
+                # terminal with a point-to-point single-ended leg that drops its
+                # own escape via if needed (watchy USB_D). Returns None when it
+                # can't lay a clean route, so this can't make things worse.
+                if config.diff_pair_hybrid_escape and result:
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles, config.layers)
                     if hyb and not hyb.get('failed'):
                         print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
