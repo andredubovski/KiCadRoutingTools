@@ -414,6 +414,79 @@ identify which pairs on your board are high-speed if uncertain.
 
 Simple straight connectors link the original stub endpoints to the corresponding P/N track start/end points.
 
+## Inner-Layer Launch via Escape Vias
+
+The setback search (above) launches the coupled pair from the **stub's own
+layer**. When that layer's launch corridor is jammed — e.g. a QFN/BGA fanout
+whose escape stubs face *into* a dense pad field on `F.Cu` — but the terminal
+sits on a **through-via or through-hole pad**, the pair can launch on any
+routing layer that barrel spans instead (issue #195). The setback search retries
+on the via-reachable inner/back layers and prefers a clean launch there:
+
+```
+source: F.Cu corridor jammed - launching on In1.Cu (reachable through the endpoint via)
+```
+
+A via is associated with a terminal when it sits within ~a via-radius of the
+pad/stub tip (`_launch_assoc_tol`), so a hand- or auto-placed escape via that is
+slightly offset still counts. This makes under-pad fanout (`bga_fanout` /
+`qfn_fanout --escape-method underpad`) compose with coupled routing: the fanout
+drops the escape vias, and the diff route picks the pair up on the open inner
+layer.
+
+When a launch can be found only by rotating the escape direction (the stub faces
+away from the route), the search also tries launching **toward the other
+terminal** and keeps a clean launch there if one exists, so the centerline heads
+down the open corridor instead of U-turning off the stub.
+
+## Hybrid Escape (Direct Coupled Middle + Point-to-Point Legs)
+
+Some terminal geometries have **no clean connector join** for the coupled
+centerline at all: the straight P/N connectors graze the partner's escape via
+(issue #165), or the pair must **swap sides** between the two ends (P above N at
+one terminal, below at the other), or no valid setback exists in any direction.
+The normal centerline+connector pipeline fails these.
+
+As a **last resort** — only after rip-up and the polarity/flip retries are
+exhausted — the router falls back to a hybrid that decouples the coupled middle
+from the terminal escapes (`_route_direct_coupled_middle`):
+
+1. **Direct coupled middle.** Route the centerline *straight* from the source
+   via-midpoint to the target via-midpoint on the best open layer — no
+   escape-direction setback, no connectors, no polarity stage. Candidate layers
+   are all routing layers (preferring those an existing via barrel spans, then
+   inner, then `F.Cu`/`B.Cu`). Offset the centerline into a clean parallel P/N
+   pair. The pair runs the open corridor as close to each terminal as it can.
+
+2. **Polarity by minimum crossings.** There is no coupled polarity stage; the
+   P/N offset side is chosen to **minimise terminal-leg crossings** — align the P
+   track with the side P's vias are actually on. A genuine side-swap still costs
+   one crossing leg either way, but both legs never cross gratuitously.
+
+3. **Point-to-point legs.** Attach each terminal to its middle near-end with a
+   short single-ended A* leg (`_route_hybrid_legs`). The leg starts on the
+   terminal's own through-via (any layer) or the bare pad's layer and **drops its
+   own escape via** for the layer change to the middle. The **partner net's
+   copper** — its middle, its terminal vias, and the first net's just-routed legs
+   — is added as an obstacle, so a side-swap leg routes *around* it. That is
+   where polarity is resolved: at the pads, by independent A*, with no coupled
+   crossing.
+
+The result is a fully-connected, DRC-clean pair: coupled where it matters (the
+parallel run) and single-ended only on the last millimetre at each terminal,
+where coupling buys nothing and flexibility is everything.
+
+**Scope.** The hybrid needs each terminal to have *room* for inner-layer access —
+a through-via/THT pad, or a bare pad with enough clearance for the leg to drop an
+escape via. It does **not** rewrite placement: a terminal that is physically
+**boxed** on the surface layer (e.g. a stock *surface* fanout that packs a
+neighbour stub hard against the pad) has nowhere to put an escape via, and no
+amount of routing fixes that — fan such pairs out **under-pad** (escape vias
+instead of surface stubs) so they are not boxed, or open the obstruction in
+placement. The hybrid is gated by `diff_pair_hybrid_escape` (default on) and
+returns the pair to the normal failure path (single-ended follow-up) when it
+can't lay a clean route, so it never makes a pair worse.
+
 ## Debug Visualization
 
 With `--debug-lines`, debug geometry is output on User layers as graphic lines:
