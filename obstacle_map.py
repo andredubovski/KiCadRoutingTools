@@ -1395,12 +1395,12 @@ def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None):
         blocked_vias.update(map(tuple, vias_xy.tolist()))
 
 
-# Experiment toggle (#197 follow-up): exact point-to-segment (capsule) track
-# keep-out for build_base, matching what the obstacle CACHE already uses for
-# already-routed nets (segment_blocked_cells_array, issue #70/B). The legacy
-# square stamp over-reaches sqrt(2) in diagonal corners (traps boxed endpoints)
-# and under-covers off-grid lines (issue #173). Env-gated so we can A/B the cost.
-_EXACT_KEEPOUT = bool(os.environ.get("EXACT_KEEPOUT"))
+# Exact point-to-segment (capsule) track + via keep-out, matching what the
+# obstacle CACHE already uses for already-routed nets (segment_blocked_cells_array,
+# issue #70/B). The legacy square stamp over-reaches sqrt(2) in diagonal corners
+# (traps boxed endpoints -- #197) and under-covers off-grid lines (#173). Now the
+# default; set EXACT_KEEPOUT=0 to fall back to the square stamp (A/B / debugging).
+_EXACT_KEEPOUT = os.environ.get("EXACT_KEEPOUT", "1") != "0"
 
 
 def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
@@ -1737,7 +1737,8 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         via_block_mm = config.via_size / 2 + seg_width / 2 + effective_clearance + extra_clearance
         via_block_grid = max(1, coord.to_grid_dist_safe(via_block_mm))
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_grid, via_block_grid,
-                              blocked_cells, blocked_vias)
+                              blocked_cells, blocked_vias,
+                              expansion_mm=expansion_mm, via_block_mm=via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
     # Use actual via size and max track width (vias span all layers)

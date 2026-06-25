@@ -467,30 +467,26 @@ from the terminal escapes (`_route_direct_coupled_middle`):
    short single-ended A* leg (`_route_hybrid_legs`). The leg starts on the
    terminal's own through-via (any layer) or the bare pad's layer and **drops its
    own escape via** for the layer change to the middle. The **partner net's
-   copper** — its middle, its terminal vias, and the first net's just-routed legs
-   — is added as an obstacle, so a side-swap leg routes *around* it. That is
-   where polarity is resolved: at the pads, by independent A*, with no coupled
-   crossing.
+   copper** — its middle, its terminal vias, the first net's just-routed legs, and
+   the partner's **original fanout stub** (excluded from the diff-pair obstacle
+   map, so re-added here) — is added as an obstacle, so a side-swap leg routes
+   *around* it. That is where polarity is resolved: at the pads, by independent A*,
+   with no coupled crossing.
 
-   **Boxed-endpoint escape.** A bare-pad stub tip can sit in a foreign keep-out
+   **Boxed-endpoint handling.** A bare-pad stub tip can sit in a foreign keep-out
    tight enough that the leg can't get a via in *at the tip* — but a via still
-   fits a short walk away (the human fix is to nudge the via ~0.05 mm into the
-   roomier pocket). Two grid-approximation artefacts used to trap the leg there,
-   both fixed by `single_ended_routing.apply_endpoint_escape`, which recomputes a
-   small window around the endpoint with exact, DRC-grade geometry: the
-   conservative **square** obstacle expansion blocks every cell around the tip (so
-   the leg can't step onto its own copper to walk out) — it **un-blocks** the
-   cells that are genuinely track-clear; and the grid via-block **under-covers a
-   diagonal** foreign stub (so an escaping leg would drop its via a hair too
-   close) — it **blocks** the cells where a via would actually graze. The leg then
-   walks `F.Cu` off the boxed tip and vias down at a clean spot. This is what
-   routes the stock *surface-fanned* watchy `USB_D` pair (boxed by the adjacent
-   `USB_DET` stub, ~0.225 mm away) 1/1 with no hand-placed vias — issue #197.
-
-   The same helper is shared by the single-ended router (`route_net_with_obstacles`
-   applies it, gated on a fully-boxed endpoint, so the common un-boxed endpoint
-   pays nothing): any net whose terminal is sealed in by the square keep-out gets
-   the same exact-geometry escape.
+   fits a short walk away. This used to need a local escape (`apply_endpoint_escape`),
+   because the obstacle map's approximations near a diagonal stub were wrong: the
+   conservative **square** track stamp blocked the tip's Euclidean-legal neighbours
+   (so the leg couldn't step off it), and the bresenham via-block **under-covered**
+   the diagonal stub (so an escape via landed a hair too close). Both are now fixed
+   *globally* by the **exact (capsule) obstacle keep-out** (`build_base` measures
+   track and via clearance from the true float segment, matching the cache —
+   issue #173). With exact geometry the boxed tip's clear cells are no longer
+   falsely blocked and the escape via lands clean, so the special-case escape code
+   was retired. This is what routes the stock *surface-fanned* watchy `USB_D` pair
+   (boxed by the adjacent `USB_DET` stub, ~0.225 mm away) 1/1 with no hand-placed
+   vias — issue #197.
 
 The result is a fully-connected, DRC-clean pair: coupled where it matters (the
 parallel run) and single-ended only on the last millimetre at each terminal,
@@ -498,7 +494,7 @@ where coupling buys nothing and flexibility is everything.
 
 **Scope.** The hybrid needs each terminal to have *room* for inner-layer access —
 a through-via/THT pad, or a bare pad with a clean via spot within a short walk of
-the tip (the boxed-tip escape above finds it even when the tip itself is packed
+the tip (the exact keep-out lets the leg reach it even when the tip itself is packed
 against a neighbour stub). It does **not** rewrite placement: a terminal with **no
 via-legal cell anywhere near** it (a neighbour stub hard against the pad on every
 side) genuinely has nowhere to escape, and no amount of routing fixes that — fan

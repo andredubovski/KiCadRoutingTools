@@ -18,9 +18,10 @@ from routing_utils import build_layer_map, iter_pad_blocked_cells, \
 from bresenham_utils import walk_line, is_diagonal_segment, get_diagonal_via_blocking_params
 from net_queries import expand_pad_layers
 
-# Mirror obstacle_map's EXACT_KEEPOUT gate so the cache's via keep-out matches
-# build_base under the experiment (the track keep-out is already the exact capsule).
-_EXACT_KEEPOUT = bool(os.environ.get("EXACT_KEEPOUT"))
+# Mirror obstacle_map's EXACT_KEEPOUT default so the cache's via keep-out matches
+# build_base (the track keep-out is already the exact capsule). Default on; set
+# EXACT_KEEPOUT=0 for the square/circle fallback.
+_EXACT_KEEPOUT = os.environ.get("EXACT_KEEPOUT", "1") != "0"
 
 # Import Rust router
 import sys

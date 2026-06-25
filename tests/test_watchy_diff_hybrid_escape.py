@@ -9,15 +9,17 @@ on an open inner layer + a point-to-point single-ended leg per terminal that dro
 its own escape via.
 
 The USB_D+ stub tip is physically boxed on F.Cu by the adjacent USB_DET surface
-stub (~0.225mm away). The leg used to fail there because:
-  - the conservative SQUARE obstacle expansion blocks every cell around the tip,
-    so the leg can't step off it to walk to where a via fits, and
-  - the grid via-block under-covers the DIAGONAL USB_DET stub, so a leg that did
-    escape would drop its via a hair too close (a graze the grid map misses).
-`compute_endpoint_escape` (shared with single-ended routing) recomputes both with
-exact DRC-grade geometry near the tip:
-it un-blocks the genuinely-track-clear cells and blocks the genuine via grazes, so
-the leg walks F.Cu off the boxed tip and vias down at a clean spot.
+stub (~0.225mm away). The leg used to fail there because the obstacle map's
+approximations near that diagonal stub were wrong: the conservative SQUARE track
+stamp blocked every Euclidean-legal cell around the tip (so the leg couldn't step
+off it), and the bresenham via-block under-covered the diagonal stub (so a via
+landed a hair too close). The fix made the obstacle keep-out EXACT (a capsule from
+the true float segment, in build_base to match the cache) for both the track and
+via keep-out, and wired the partner stub into the leg's keep-out. With exact
+geometry the boxed tip's clear cells are no longer falsely blocked and the escape
+via lands clean -- no special-case escape code needed (the earlier
+compute_endpoint_escape local correction was retired once the global keep-out
+became exact).
 
 This test fans the stock board itself (so it can't silently depend on a
 pre-fanned fixture) and asserts the pair routes 1/1, connects end to end, and is
