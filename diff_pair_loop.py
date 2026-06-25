@@ -14,7 +14,7 @@ from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_m
 from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
-from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
+from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints, _route_direct_coupled_middle
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
@@ -809,18 +809,16 @@ def route_diff_pairs(
                         ripped_up = True
 
             if not ripped_up:
-                # Last resort: a connector graze the rip-up can't clear (the
-                # partner's own escape via isn't a rippable blocker). Keep the
-                # coupled middle and defer each terminal leg to a point-to-point
-                # single-ended join (hybrid escape -- watchy USB_D).
+                # Last resort: the coupled route can't cleanly join a terminal (a
+                # connector graze, or P/N must swap sides). Lay the coupled MIDDLE
+                # directly source->target on the open layer and defer each terminal
+                # leg to a point-to-point single-ended join (watchy USB_D).
                 if (config.diff_pair_hybrid_escape and result
-                        and result.get('connector_graze')):
-                    hyb = route_diff_pair_with_obstacles(
-                        pcb_data, pair, config, obstacles, base_obstacles,
-                        unrouted_stubs, hybrid_mode=True)
+                        and (result.get('connector_graze') or result.get('pn_crossing'))):
+                    hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles, config.layers)
                     if hyb and not hyb.get('failed') and hyb.get('hybrid_defer'):
-                        print(f"  HYBRID ESCAPE: coupled middle routed; both terminal "
-                              f"legs deferred to single-ended")
+                        print(f"  HYBRID ESCAPE: direct coupled middle routed; both "
+                              f"terminal legs deferred to single-ended")
                         add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
                         results.append(hyb)
                         successful += 1

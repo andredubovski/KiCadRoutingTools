@@ -2296,6 +2296,112 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     return None
 
 
+def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names):
+    """Hybrid coupled middle (last resort): route a clean parallel P/N pair
+    straight from the source via-midpoint to the target via-midpoint on the
+    open layer -- no escape-direction setback, no connectors, no polarity stage.
+
+    Both terminals carry through-vias (or THT pads), so the centerline can start
+    and end as close as possible to each terminal on whichever spanned layer is
+    open, and the two terminal legs are then finished by the point-to-point
+    single-ended follow-up pass (which fixes polarity at the pads). Returns a
+    result dict flagged hybrid_defer, or None if no clean middle could be laid.
+    """
+    if PoseRouter is None:
+        return None
+    coord = GridCoord(config.grid_step)
+    p_net_id, n_net_id = diff_pair.p_net_id, diff_pair.n_net_id
+    spacing_mm = (config.track_width + config.diff_pair_gap) / 2
+
+    srcs, tgts, err = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+    if err or not srcs or not tgts:
+        return None
+    src, tgt = srcs[0], tgts[0]
+    p_src_x, p_src_y, n_src_x, n_src_y = src[5], src[6], src[7], src[8]
+    p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y = tgt[5], tgt[6], tgt[7], tgt[8]
+    csx, csy = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
+    ctx, cty = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
+
+    # Layers reachable (via the through-via/THT barrel) at BOTH terminals.
+    src_layers = (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_src_x, p_src_y, config) &
+                  _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config))
+    tgt_layers = (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
+                  _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config))
+    cand_layers = (src_layers & tgt_layers) or {src[4]}
+    # Prefer inner layers (most likely open under the parts), then by index.
+    layer_order = sorted(cand_layers, key=lambda i: (layer_names[i] in ('F.Cu', 'B.Cu'), i))
+
+    min_radius_grid = config.min_turning_radius / config.grid_step
+    turn_cost = int(min_radius_grid * math.pi / 4 * 1000)
+    diff_pair_spacing_grid = max(1, int(2 * spacing_mm / config.grid_step + 0.5))
+    max_turn_units = max(int(config.max_turn_angle / 45.0 + 0.5), 1)
+    pose_kwargs = dict(
+        via_cost=config.via_cost_units() * 2, h_weight=config.heuristic_weight,
+        turn_cost=turn_cost, min_radius_grid=min_radius_grid,
+        via_proximity_cost=int(config.via_proximity_cost),
+        diff_pair_spacing=diff_pair_spacing_grid, max_turn_units=max_turn_units)
+    _lc = config.get_layer_costs()
+    if any(c != 1000 for c in _lc):
+        pose_kwargs['layer_costs'] = _lc
+    pr = PoseRouter(**pose_kwargs)
+    via_spacing_grid = max(1, int(max(spacing_mm, (config.via_size + config.clearance) / 2)
+                                  / config.grid_step + 0.5))
+    max_iters = config.max_iterations * 8
+
+    dx, dy = ctx - csx, cty - csy
+    L = math.hypot(dx, dy) or 1.0
+    theta = direction_to_theta_idx(dx / L, dy / L)
+    s_gx, s_gy = coord.to_grid(csx, csy)
+    t_gx, t_gy = coord.to_grid(ctx, cty)
+
+    for layer_idx in layer_order:
+        if obstacles.is_blocked(s_gx, s_gy, layer_idx) or obstacles.is_blocked(t_gx, t_gy, layer_idx):
+            continue
+        obstacles.clear_allowed_cells()
+        obstacles.clear_source_target_cells()
+        for ox in range(-2, 3):
+            for oy in range(-2, 3):
+                obstacles.add_allowed_cell(s_gx + ox, s_gy + oy)
+                obstacles.add_allowed_cell(t_gx + ox, t_gy + oy)
+        obstacles.add_source_target_cell(s_gx, s_gy, layer_idx)
+        obstacles.add_source_target_cell(t_gx, t_gy, layer_idx)
+        path, iters, _blocked, _gnd = pr.route_pose_with_frontier(
+            obstacles, s_gx, s_gy, layer_idx, theta,
+            t_gx, t_gy, layer_idx, theta, max_iters, diff_pair_via_spacing=via_spacing_grid)
+        obstacles.clear_allowed_cells()
+        obstacles.clear_source_target_cells()
+        if not path:
+            continue
+        grid_path = []
+        for gx, gy, _th, lyr in path:
+            if grid_path and grid_path[-1] == (gx, gy, lyr):
+                continue
+            grid_path.append((gx, gy, lyr))
+        simplified = simplify_path(grid_path)
+        if len(simplified) < 2:
+            continue
+        centerline_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], lyr)
+                            for gx, gy, lyr in simplified]
+        p_float = create_parallel_path_from_float(centerline_float, sign=1, spacing_mm=spacing_mm)
+        n_float = create_parallel_path_from_float(centerline_float, sign=-1, spacing_mm=spacing_mm)
+        p_float, n_float = _process_via_positions(simplified, p_float, n_float, coord, config, 1, -1, spacing_mm)
+        p_segs, p_vias, _ = _float_path_to_geometry(
+            p_float, p_net_id, None, None, 1, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+        n_segs, n_vias, _ = _float_path_to_geometry(
+            n_float, n_net_id, None, None, -1, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
+        mid_segs = p_segs + n_segs
+        if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
+            continue
+        if _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
+            continue
+        print(f"  DIRECT HYBRID: coupled middle on {layer_names[layer_idx]} "
+              f"({len(mid_segs)} segs, {iters} iters); both legs -> single-ended")
+        return {'new_segments': mid_segs, 'new_vias': p_vias + n_vias,
+                'iterations': iters, 'hybrid_defer': True,
+                'path_length': len(simplified)}
+    return None
+
+
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     config: GridRouteConfig,
                                     obstacles: GridObstacleMap,
@@ -2309,7 +2415,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
                                     swap_allowed_ends: Tuple[str, ...] = ('source', 'target'),
                                     force_swap: bool = False,
                                     force_no_swap: bool = False,
-                                    hybrid_mode: bool = False) -> Optional[dict]:
+                                    ) -> Optional[dict]:
     """
     Route a differential pair using centerline + offset approach.
 
@@ -3072,29 +3178,6 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         else:
             net = pcb_data.nets.get(obj.net_id)
             what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
-        # Hybrid fallback: the graze is on a terminal CONNECTOR, not the coupled
-        # middle. Re-emit the middle alone (no connectors) and, if it is clean,
-        # hand it back flagged so the loop commits the coupled run and defers each
-        # terminal leg to a point-to-point single-ended join that can wiggle
-        # around the partner copper the rigid connector could not (watchy USB_D).
-        if config.diff_pair_hybrid_escape and hybrid_mode:
-            p_mid, p_mv, _ = _float_path_to_geometry(
-                p_float_path, p_net_id, p_start, p_end, p_sign,
-                src_stub_dir_tuple, tgt_stub_dir_tuple, src_p_ext, tgt_p_ext,
-                config, layer_names, omit_connectors=True)
-            n_mid, n_mv, _ = _float_path_to_geometry(
-                n_float_path, n_net_id, n_start, n_end, n_sign,
-                src_stub_dir_tuple, tgt_stub_dir_tuple, src_n_ext, tgt_n_ext,
-                config, layer_names, omit_connectors=True)
-            mid_segs = p_mid + n_mid
-            if not _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
-                print("  -> hybrid escape: keeping the coupled middle, deferring both "
-                      "terminal legs to single-ended point-to-point")
-                hyb = dict(result)
-                hyb['new_segments'] = mid_segs
-                hyb['new_vias'] = p_mv + n_mv + gnd_vias
-                hyb['hybrid_defer'] = True
-                return hyb
         print(f"  Connector grazes foreign {what} by {overlap:.3f}mm on {seg.layer} - "
               f"rejecting pair route (issue #165)")
         print("  (a connector/setback segment violates clearance to the partner or "
