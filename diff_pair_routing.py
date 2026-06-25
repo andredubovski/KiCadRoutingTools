@@ -204,7 +204,13 @@ def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
     an open inner layer when the stub layer's corridor is jammed.
     """
     if tol is None:
-        tol = config.grid_step * 1.5
+        # Associate a via/THT pad whose copper plausibly CONNECTS to this terminal
+        # (one placed at/near the pad or stub free-end to escape it), not only a
+        # grid-coincident one: hand- or auto-placed escape vias are often offset
+        # from the exact stub tip by up to ~a via radius (watchy USB_D). Stays
+        # below a fine pad pitch so it can't grab a neighbour terminal's via.
+        tol = max(config.grid_step * 1.5,
+                  config.via_size * 0.75 + config.track_width / 2)
     copper = getattr(pcb_data.board_info, 'copper_layers', None) or list(config.layers)
     cu_index = {name: i for i, name in enumerate(copper)}
     routing_idx = {name: i for i, name in enumerate(config.layers)}
