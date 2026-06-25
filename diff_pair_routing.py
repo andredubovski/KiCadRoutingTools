@@ -242,10 +242,87 @@ def _endpoint_launch_layer_indices(pcb_data, net_id, x, y, config, tol=None):
     return spanned
 
 
+def _pt_seg_dist(px, py, ax, ay, bx, by):
+    """Distance from point (px,py) to segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 <= 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _terminal_escape_vias(pcb_data, p_net_id, n_net_id, p_term, n_term, config):
+    """The pair's own escape/terminal vias sitting at the P/N launch terminals.
+
+    These are excluded from the routing obstacle map (own-net), so the setback
+    search is blind to them -- a per-half offset connector can then graze the
+    PARTNER half's escape via (issue #165 / watchy USB_D). Returns a list of
+    (x, y, size, net_id) for vias of either net within the launch-association
+    tolerance of either terminal.
+    """
+    tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+    out = []
+    for via in getattr(pcb_data, 'vias', None) or []:
+        if via.net_id not in (p_net_id, n_net_id):
+            continue
+        if (math.hypot(via.x - p_term[0], via.y - p_term[1]) <= tol or
+                math.hypot(via.x - n_term[0], via.y - n_term[1]) <= tol):
+            out.append((via.x, via.y, via.size, via.net_id))
+    return out
+
+
+def _make_offset_connector_check(p_term, n_term, escape_vias, spacing_mm, config):
+    """Build an offset_check(launch_x, launch_y, dir_x, dir_y) -> bool closure.
+
+    For a candidate setback launch point, the P and N tracks sit at +-spacing
+    perpendicular to the launch direction; each terminal runs a short connector
+    to its offset launch point. This returns False if either connector would
+    clip the *partner* terminal's escape via (the gap the obstacle map misses),
+    so the setback search rejects that candidate and picks a clearing one.
+    Returns None when there are no escape vias to avoid (no behaviour change).
+    """
+    if not escape_vias:
+        return None
+
+    # A via this close to a terminal IS that terminal's own launch via (it need
+    # not sit exactly on the stub tip) -- the connector legitimately starts on
+    # it, so don't count it as a graze of its own leg.
+    own_tol = max(config.grid_step * 1.5, config.via_size * 0.75 + config.track_width / 2)
+
+    def _leg_grazes(term, off):
+        for vx, vy, vsize, _ in escape_vias:
+            # skip the via at this terminal (its own launch via)
+            if math.hypot(vx - term[0], vy - term[1]) <= own_tol:
+                continue
+            need = config.clearance + config.track_width / 2 + vsize / 2
+            if _pt_seg_dist(vx, vy, term[0], term[1], off[0], off[1]) < need:
+                return True
+        return False
+
+    def check(lx, ly, dx, dy):
+        px, py = -dy, dx  # perpendicular
+        off_a = (lx + px * spacing_mm, ly + py * spacing_mm)
+        off_b = (lx - px * spacing_mm, ly - py * spacing_mm)
+        # Assign each terminal to its nearer offset launch point (the route's
+        # likely polarity). Rejecting both assignments over-rejects tight-but-
+        # legal launches (e.g. #195's 0.5mm-pitch escape vias), so use the
+        # nearest assignment only.
+        def d2(a, b):
+            return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+        if d2(p_term, off_a) + d2(n_term, off_b) <= d2(p_term, off_b) + d2(n_term, off_a):
+            legs = ((p_term, off_a), (n_term, off_b))
+        else:
+            legs = ((p_term, off_b), (n_term, off_a))
+        return not (_leg_grazes(*legs[0]) or _leg_grazes(*legs[1]))
+    return check
+
+
 def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
                                     alt_layers, setback, pad_gap_half, label,
                                     layer_names, spacing_mm, config, obstacles,
-                                    connector_obstacles, coord, neighbor_stubs):
+                                    connector_obstacles, coord, neighbor_stubs,
+                                    offset_check=None):
     """_find_open_positions_laddered, but free to launch on an alternate routing
     layer reachable through the endpoint's via/THT barrel (issue #195).
 
@@ -258,7 +335,7 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
     cands, used, rotated = _find_open_positions_laddered(
         center_x, center_y, dir_x, dir_y, layer_idx, setback, pad_gap_half,
         label, layer_names, spacing_mm, config, obstacles, connector_obstacles,
-        coord, neighbor_stubs)
+        coord, neighbor_stubs, offset_check=offset_check)
     if cands and not rotated:
         return cands, used, rotated, layer_idx
 
@@ -269,7 +346,7 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
         a_cands, a_used, a_rot = _find_open_positions_laddered(
             center_x, center_y, dir_x, dir_y, alt, setback, pad_gap_half,
             label, layer_names, spacing_mm, config, obstacles,
-            connector_obstacles, coord, neighbor_stubs)
+            connector_obstacles, coord, neighbor_stubs, offset_check=offset_check)
         if a_cands and not a_rot:
             print(f"      {label}: {layer_names[layer_idx]} corridor jammed - "
                   f"launching on {layer_names[alt]} (reachable through the endpoint via)")
@@ -285,7 +362,8 @@ def _find_open_positions_multilayer(center_x, center_y, dir_x, dir_y, layer_idx,
 def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
                                   setback, pad_gap_half, label, layer_names,
                                   spacing_mm, config, obstacles,
-                                  connector_obstacles, coord, neighbor_stubs):
+                                  connector_obstacles, coord, neighbor_stubs,
+                                  offset_check=None):
     """_find_open_positions over a ladder of setback radii (issue #90).
 
     Returns (candidates, used_setback, rotated); `rotated` is True when the
@@ -299,7 +377,7 @@ def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
             center_x, center_y, dir_x, dir_y, layer_idx, s, label,
             layer_names, spacing_mm, config, obstacles,
             connector_obstacles, coord, neighbor_stubs,
-            quiet_failure=True)
+            quiet_failure=True, offset_check=offset_check)
         if candidates:
             if i > 0:
                 print(f"      {label}: setback {ladder[0]:.2f}mm blocked, "
@@ -320,7 +398,7 @@ def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
                 center_x, center_y, rdx, rdy, layer_idx, s, label,
                 layer_names, spacing_mm, config, obstacles,
                 connector_obstacles, coord, neighbor_stubs,
-                quiet_failure=True)
+                quiet_failure=True, offset_check=offset_check)
             if candidates:
                 print(f"      {label}: escape direction blocked at every "
                       f"setback - launching rotated {rot_deg:+d}deg at {s:.2f}mm")
@@ -334,7 +412,7 @@ def _find_open_positions_laddered(center_x, center_y, dir_x, dir_y, layer_idx,
 def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
                          label, layer_names, spacing_mm, config, obstacles,
                          connector_obstacles, coord, neighbor_stubs,
-                         quiet_failure=False):
+                         quiet_failure=False, offset_check=None):
     """Find open position for setback, preferring 0° but angling away from nearby stubs if needed.
 
     Only angles away from 0° if the nearest unrouted stub is too close (within
@@ -379,6 +457,10 @@ def _find_open_positions(center_x, center_y, dir_x, dir_y, layer_idx, setback,
         probe_y = y + dy * probe_dist
         probe_gx, probe_gy = coord.to_grid(probe_x, probe_y)
         if obstacles.is_blocked(probe_gx, probe_gy, layer_idx):
+            return None
+        # Reject if a per-half offset connector from this launch would clip a
+        # partner escape via (the own-net via the obstacle map excludes) -- #165.
+        if offset_check is not None and not offset_check(x, y, dx, dy):
             return None
         return (gx, gy, dx, dy, x, y)
 
@@ -1723,13 +1805,28 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
          _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config))
         - {tgt_layer})
 
+    # Reject setback candidates whose per-half offset connector would clip the
+    # PARTNER terminal's escape via -- the own-net via the obstacle map excludes,
+    # which #165 would otherwise catch only after a full route (watchy USB_D).
+    src_offset_check = _make_offset_connector_check(
+        (p_src_x, p_src_y), (n_src_x, n_src_y),
+        _terminal_escape_vias(pcb_data, p_net_id, n_net_id,
+                              (p_src_x, p_src_y), (n_src_x, n_src_y), config),
+        spacing_mm, config)
+    tgt_offset_check = _make_offset_connector_check(
+        (p_tgt_x, p_tgt_y), (n_tgt_x, n_tgt_y),
+        _terminal_escape_vias(pcb_data, p_net_id, n_net_id,
+                              (p_tgt_x, p_tgt_y), (n_tgt_x, n_tgt_y), config),
+        spacing_mm, config)
+
     # Get all valid setback positions for source and target, sorted by
     # preference, scanning a ladder of radii per terminal (issue #90), free to
     # switch to an open inner layer through the endpoint via (issue #195)
     src_candidates, _, src_rotated, src_layer = _find_open_positions_multilayer(
         center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, src_alt_layers,
         setback_src, src_pad_gap_half, "source",
-        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs,
+        offset_check=src_offset_check
     )
     if not src_candidates and src_dir_synth and not src_flip:
         # Synthesized direction blocked - try escaping from the opposite side
@@ -1737,7 +1834,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         src_candidates, _, src_rotated, src_layer = _find_open_positions_multilayer(
             center_src_x, center_src_y, src_dir_x, src_dir_y, src_layer, src_alt_layers,
             setback_src, src_pad_gap_half, "source",
-            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs,
+            offset_check=src_offset_check
         )
     if not src_candidates:
         blocked = _collect_setback_blocked_cells(
@@ -1750,7 +1848,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     tgt_candidates, _, tgt_rotated, tgt_layer = _find_open_positions_multilayer(
         center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, tgt_alt_layers,
         setback_tgt, tgt_pad_gap_half, "target",
-        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+        layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs,
+        offset_check=tgt_offset_check
     )
     if not tgt_candidates and tgt_dir_synth and not tgt_flip:
         # Synthesized direction blocked - try escaping from the opposite side
@@ -1758,7 +1857,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
         tgt_candidates, _, tgt_rotated, tgt_layer = _find_open_positions_multilayer(
             center_tgt_x, center_tgt_y, tgt_dir_x, tgt_dir_y, tgt_layer, tgt_alt_layers,
             setback_tgt, tgt_pad_gap_half, "target",
-            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs
+            layer_names, spacing_mm, config, obstacles, connector_obstacles, coord, neighbor_stubs,
+            offset_check=tgt_offset_check
         )
     if not tgt_candidates:
         blocked = _collect_setback_blocked_cells(
