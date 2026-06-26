@@ -403,7 +403,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
+                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
                     continue;
                 }
 
@@ -548,7 +548,7 @@ impl GridRouter {
                     }
 
                     // Check if destination layer is blocked at this position
-                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
+                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
                         continue;
                     }
 
@@ -774,7 +774,7 @@ impl GridRouter {
                 let ngx = current.gx + dx;
                 let ngy = current.gy + dy;
 
-                if obstacles.is_blocked_with_margin(ngx, ngy, current.layer as usize, track_margin) {
+                if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy, current.layer as usize, track_margin as f64) {
                     tracker.track(ngx, ngy, current.layer);
                     continue;
                 }
@@ -873,7 +873,7 @@ impl GridRouter {
                 for layer in 0..obstacles.num_layers as u8 {
                     if layer == current.layer { continue; }
 
-                    if obstacles.is_blocked_with_margin(current.gx, current.gy, layer as usize, track_margin) {
+                    if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy, layer as usize, track_margin as f64) {
                         tracker.track(current.gx, current.gy, layer);
                         continue;
                     }

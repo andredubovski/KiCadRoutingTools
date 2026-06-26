@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.16.2**
+**Current Version: 0.17.0**
 
 ## Features
 
@@ -306,6 +306,7 @@ src/
 
 ## Version History
 
+- **0.17.0**: Wide-track clearance during A* now uses an exact swept-capsule check instead of a Chebyshev square around only the destination cell. New `GridObstacleMap.segment_blocked(gx1, gy1, gx2, gy2, layer, r)` measures the true Euclidean point-to-segment distance from every nearby blocked cell to the A* move's swept segment (the extra half-width `r`, in grid cells, of a wide track swept along the step). `route_multi` / `route_with_frontier` call it for the neighbor and layer-change checks (`track_margin` is reused as the radius; `track_margin == 0` falls back to the plain destination-cell `is_blocked`, so base-width routing is byte-identical). The old `is_blocked_with_margin` (1) over-covered corners (square vs disc) and (2) never checked the *swept body* of a 45° move, so a diagonal step could slip a blocked cell sub-cell between its endpoints — the residual wide-net grazes in #173, and the reason #156's point-disc margin was a no-win (a disc at the endpoint still misses the swept segment). Fixes wide power/impedance-net and plane-connection diagonal grazes. `is_blocked_with_margin` is retained (still used by `visual_router` with margin 0).
 - **0.16.2**: `PoseRouter` (the coupled differential-pair centerline router) now takes an optional `layer_costs` argument (per-layer cost multipliers, 1000 = 1.0x), mirroring `GridRouter`. The A* scales each step's base move cost by the current layer's multiplier and adds a via layer-transition cost (cheaper-layer vias discounted, costlier penalized), so diff pairs can be biased onto preferred layers. Empty/omitted `layer_costs` (the default) leaves every layer at 1.0x — behavior is unchanged. Wires up `route_diff.py --layer-costs` (issue #193).
 - **0.16.1**: Added the `identify_blocking_obstacles(blocked, segments, vias, pads, expansion_grid, via_expansion_grid, num_layers)` free function - a Rust port of `single_ended_routing._identify_blocking_obstacles` (the rip-up blocking analysis). Given the blocked frontier cells and foreign segment/via/pad geometry (as grid-integer numpy arrays), it returns `net_id -> count` of how many of each net's elements overlap the frontier (each element counted at most once, matching the Python break-on-first-hit). Exact integer grid math, so byte-identical to the Python it replaces. Python calls it when available and falls back to the pure-Python implementation on older binaries.
 - **0.16.0**: Added `GridObstacleMap.open_via_cells_within(cx, cy, radius)`, which returns every non-via-blocked grid cell within Chebyshev `radius` of a center, excluding the center, sorted nearest-first by squared Euclidean distance. This lets the Python via-site search (`find_via_position` in `route_planes.py`) replace its per-cell `is_via_blocked()` spiral - one batched FFI query instead of O(radius^2) calls - which matters for the wide-radius plane-tap via search (the forced last-resort plane-pad repair).
