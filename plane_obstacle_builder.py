@@ -13,12 +13,13 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import iter_pad_blocked_cells
+from routing_utils import iter_pad_blocked_cells, segment_blocked_cells_array
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
                           block_via_cells_near_drills,
                           _rasterize_polygon, _points_inside_polygon,
-                          _points_edge_distance, _block_cells_on_layers)
+                          _points_edge_distance, _block_cells_on_layers,
+                          _batch_cells_one_layer, _batch_vias)
 
 import sys
 import os
@@ -38,36 +39,6 @@ def _precompute_circle_offsets(radius_sq: float) -> np.ndarray:
             if ex * ex + ey * ey <= radius_sq:
                 offsets.append((ex, ey))
     return np.array(offsets, dtype=np.int32)
-
-
-def _bresenham_centers(gx1: int, gy1: int, gx2: int, gy2: int) -> List[Tuple[int, int]]:
-    """Walk a Bresenham line and return all grid center points."""
-    centers = []
-    dx = abs(gx2 - gx1)
-    dy = abs(gy2 - gy1)
-    sx = 1 if gx1 < gx2 else -1
-    sy = 1 if gy1 < gy2 else -1
-    x, y = gx1, gy1
-    if dx > dy:
-        err = dx / 2
-        while x != gx2:
-            centers.append((x, y))
-            err -= dy
-            if err < 0:
-                y += sy
-                err += dx
-            x += sx
-    else:
-        err = dy / 2
-        while y != gy2:
-            centers.append((x, y))
-            err -= dx
-            if err < 0:
-                x += sx
-                err += dy
-            y += sy
-    centers.append((gx2, gy2))
-    return centers
 
 
 def _batch_block_circles_via(obstacles: GridObstacleMap, centers: List[Tuple[int, int]],
@@ -361,19 +332,25 @@ def build_via_obstacle_map(
 
     obstacles = GridObstacleMap(num_layers)
 
-    # Precompute expansion for via-via clearance (squared, in grid units)
-    # Add half grid step cushion to account for grid discretization
+    # Half grid step cushion to account for grid discretization.
     grid_cushion = config.grid_step / 2
-    via_via_expansion_mm = config.via_size + config.clearance + grid_cushion
-    via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
-    via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
 
-    # Add existing vias as obstacles (including same net - can't place via too close to another)
-    # Batched: pre-compute circle template, collect all centers, expand with numpy
+    # Add existing vias as obstacles (including same net - can't place a new via
+    # too close to another). The via-to-via clearance is the EXISTING via's
+    # radius + the NEW via's radius + clearance, so it must use each existing
+    # via's ACTUAL size (issue #173, parity with route.py's add_vias_list_as_
+    # obstacles). The old form used config.via_size for both radii, so a larger
+    # existing via (e.g. a 0.5mm plane via vs a 0.3mm repair via) was under-
+    # blocked and a new via could land within clearance of it. Group by actual
+    # via size so each size gets its own keep-out disc.
     t0 = time.time()
-    circle_offsets = _precompute_circle_offsets(via_via_radius_sq)
-    via_centers = [(coord.to_grid(via.x, via.y)) for via in pcb_data.vias]
-    _batch_block_circles_via(obstacles, via_centers, circle_offsets)
+    centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
+    for via in pcb_data.vias:
+        centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
+    for vsize, via_centers in centers_by_size.items():
+        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        circle_offsets = _precompute_circle_offsets((via_via_expansion_mm / config.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, via_centers, circle_offsets)
     if verbose:
         print(f"  Vias: {len(pcb_data.vias)} vias in {time.time() - t0:.2f}s")
 
@@ -434,14 +411,14 @@ def build_via_obstacle_map(
 
 def _add_segment_via_obstacle(obstacles: GridObstacleMap, seg: Segment,
                                coord: GridCoord, expansion_mm: float):
-    """Add a segment as via blocking obstacle using batched numpy operations."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    radius_sq = (expansion_mm / coord.grid_step) ** 2
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_via(obstacles, centers, circle_offsets)
+    """Add a segment as via-blocking obstacle: an exact point-to-segment
+    (capsule) keep-out from the TRUE float segment, shared with route.py's
+    obstacle builder (issue #173). The previous bresenham stamp snapped the
+    endpoints to the grid and walked integer cells, so an off-grid/diagonal
+    segment's via keep-out under-covered sub-cell and a later via grazed it."""
+    vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                       seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_vias(obstacles, vias)
 
 
 def _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode, layer_idx=None):
@@ -749,6 +726,10 @@ def build_routing_obstacle_map(
     # Single layer routing
     num_layers = 1
     layer_idx = 0
+    # Use THIS layer's routing width for keep-out math (issue #173 parity with
+    # route.py's per-layer via/track expansion); == config.track_width unless
+    # per-layer widths are set (impedance routing).
+    route_track_w = config.get_track_width(route_layer)
 
     # Calculate grid dimensions for info
     board_bounds = pcb_data.board_info.board_bounds
@@ -779,7 +760,7 @@ def build_routing_obstacle_map(
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
                     pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                    margin = config.track_width / 2 + pad_clr
+                    margin = route_track_w / 2 + pad_clr
                     if getattr(pad, 'polygons', None):
                         _block_custom_pad_polys(obstacles, pad, coord, margin,
                                                 via_mode=False, layer_idx=layer_idx)
@@ -811,12 +792,11 @@ def build_routing_obstacle_map(
         if seg.layer != route_layer:
             continue
         # Clearance needed: our track half-width + existing segment half-width + clearance.
-        # Round the expansion UP (ceil): flooring leaves the blocked halo short of the
-        # real clearance envelope, so connection traces route within clearance of signal
-        # copper (#146 — the dominant plane-vs-signal DRC source on dense boards).
-        seg_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
-        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+        # The exact capsule keep-out measures from the real segment, so the blocked
+        # halo matches the true clearance envelope without the grid-rounding that used
+        # to leave connection traces within clearance of signal copper (#146/#173).
+        seg_expansion_mm = route_track_w / 2 + seg.width / 2 + config.clearance
+        _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
         print(f"  Segments: {seg_count} tracks in {time.time() - t0:.2f}s")
@@ -833,7 +813,7 @@ def build_routing_obstacle_map(
         # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
-        r_mm = via.size / 2 + config.track_width / 2 + config.clearance + config.grid_step / 2
+        r_mm = via.size / 2 + route_track_w / 2 + config.clearance + config.grid_step / 2
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
         for ex in range(-rg, rg + 1):
@@ -864,12 +844,11 @@ def build_routing_obstacle_map(
 
 
 def _add_segment_routing_obstacle(obstacles: GridObstacleMap, seg: Segment,
-                                    coord: GridCoord, layer_idx: int, expansion_grid: int):
-    """Add a segment as a routing obstacle on a specific layer using batched numpy operations."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
+                                    coord: GridCoord, layer_idx: int, expansion_mm: float):
+    """Add a segment as a routing obstacle on a specific layer: an exact
+    point-to-segment (capsule) keep-out from the TRUE float segment, shared with
+    route.py's obstacle builder (issue #173). Replaces the bresenham stamp that
+    snapped endpoints to the grid and under-covered off-grid/diagonal copper."""
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                        seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_cells_one_layer(obstacles, cells, layer_idx)

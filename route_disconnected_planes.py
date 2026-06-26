@@ -445,6 +445,10 @@ def route_planes(
             routing_layers=routing_layers,
             pcb_data=pcb_data,
             config=config,
+            # Base keep-outs use the min connection width; the widen step then
+            # passes the extra half-width to the router, which now does an exact
+            # swept-capsule clearance check (issues #156/#173), so a wide (e.g.
+            # 0.4mm) connection's diagonal no longer grazes foreign copper.
             track_width=min_track_width,
             track_via_clearance=track_via_clearance,
             hole_to_hole_clearance=hole_to_hole_clearance

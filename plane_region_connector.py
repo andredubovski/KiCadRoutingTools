@@ -14,13 +14,15 @@ import numpy as np
 
 from kicad_parser import PCBData, Via, Segment, Pad, POSITION_DECIMALS
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect
+from routing_utils import (point_in_pad_rect, pad_rect_halfspan, filter_cells_in_pad_rect,
+                           segment_blocked_cells_array)
 from geometry_utils import UnionFind
 from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
-                          add_rule_area_keepout_obstacles)
+                          add_rule_area_keepout_obstacles,
+                          _batch_cells_one_layer, _batch_vias)
 from plane_obstacle_builder import (
-    _precompute_circle_offsets, _bresenham_centers,
+    _precompute_circle_offsets,
     _batch_block_circles_via, _batch_block_circles_cell
 )
 
@@ -1101,25 +1103,40 @@ def build_base_obstacles(
         Tuple of (obstacle_map, layer_map)
     """
     coord = GridCoord(config.grid_step)
+    # Half-cell discretization cushion (matches build_via_obstacle_map /
+    # build_routing_obstacle_map): the keep-out cells are grid-snapped, but the
+    # router's own connection/merge geometry can land OFF grid between cells, so
+    # without this margin an off-grid connector segment grazes foreign copper
+    # sub-cell (issue #173). Far smaller than the old flat 0.8mm over-block.
+    cushion = config.grid_step / 2
 
     num_layers = len(routing_layers)
     layer_map = {layer: idx for idx, layer in enumerate(routing_layers)}
 
     obstacles = GridObstacleMap(num_layers)
 
-    # Block other nets' vias as hard obstacles on ALL layers (vias are through-hole)
-    via_radius = coord.to_grid_dist_safe(track_via_clearance)
-    other_via_centers = []
+    # Block other nets' vias (issue #173 parity with route.py): a foreign via
+    # blocks TRACK routing within foreign_via_radius + our_track_half + clearance
+    # on every layer, and new-VIA placement within foreign_via_radius +
+    # our_via_radius + clearance -- both scaling with the foreign via's ACTUAL
+    # size. The old code used a single flat track_via_clearance constant (0.8mm)
+    # for all vias, which over-blocked typical vias, ignored their real size, and
+    # added no copper via-via placement clearance. our_track_half uses track_width
+    # (== min connection width): the region router routes at the min width against
+    # this base map and adds its own extra margin when it widens.
+    foreign_centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
             continue
-        gx, gy = coord.to_grid(via.x, via.y)
-        other_via_centers.append((gx, gy))
-
-    if other_via_centers:
-        via_circle_offsets = _precompute_circle_offsets(via_radius * via_radius)
+        foreign_centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
+    for vsize, centers in foreign_centers_by_size.items():
+        track_keepout_mm = vsize / 2 + track_width / 2 + config.clearance + cushion
+        track_offs = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
-            _batch_block_circles_cell(obstacles, other_via_centers, via_circle_offsets, layer_idx)
+            _batch_block_circles_cell(obstacles, centers, track_offs, layer_idx)
+        via_keepout_mm = vsize / 2 + config.via_size / 2 + config.clearance + cushion
+        via_offs = _precompute_circle_offsets((via_keepout_mm / coord.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, centers, via_offs)
 
     # Add proximity costs around other nets' vias (on all layers)
     proximity_radius_grid = coord.to_grid_dist(proximity_radius)
@@ -1174,13 +1191,11 @@ def build_base_obstacles(
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
-        seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance
-        seg_expansion_grid = max(1, coord.to_grid_dist_safe(seg_expansion_mm))
-        _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_grid)
+        seg_expansion_mm = track_width / 2 + seg.width / 2 + config.clearance + cushion
+        _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
-        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
-        via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
-        _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_grid)
+        via_seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + cushion
+        _block_segment_via_obstacle(obstacles, seg, coord, via_seg_expansion_mm)
 
     # Block pads from non-plane nets on their respective layers
     # (plane net pads are excluded here - they're anchors; other plane nets' pads
@@ -1204,7 +1219,7 @@ def build_base_obstacles(
             # Block rectangular area around pad with clearance for track routing.
             # Honor a per-pad local clearance override (fiducial keep-clear etc.).
             pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-            pad_expansion_mm = track_width / 2 + pad_clr
+            pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)
             max_gx, _ = coord.to_grid(pad.global_x + half_w, 0)
@@ -1219,8 +1234,9 @@ def build_base_obstacles(
                 for layer_idx in pad_layers_on:
                     layer_col = np.full((rect_cells.shape[0], 1), layer_idx, dtype=np.int32)
                     obstacles.add_blocked_cells_batch(np.hstack([rect_cells, layer_col]))
-            # Also block vias around pad - need more clearance for via size
-            via_expansion_mm = config.via_size / 2 + track_via_clearance
+            # Also block vias around pad - new via radius + clearance from pad edge
+            # (issue #173 parity: was config.via_size/2 + the flat 0.8 constant).
+            via_expansion_mm = config.via_size / 2 + config.clearance + cushion
             via_half_w, via_half_h = pad_rect_halfspan(pad, via_expansion_mm)
             via_min_gx, _ = coord.to_grid(pad.global_x - via_half_w, 0)
             via_max_gx, _ = coord.to_grid(pad.global_x + via_half_w, 0)
@@ -1259,36 +1275,47 @@ def add_route_to_obstacles(
     """Add a completed route (segments and vias) to the obstacle map for subsequent routes to avoid."""
     coord = GridCoord(config.grid_step)
     num_layers = len(layer_map)
+    cushion = config.grid_step / 2  # half-cell discretization margin (issue #173)
 
-    # Block segments on their layers and also block vias along segments
-    route_expansion_mm = track_width + clearance
-    route_expansion_grid = max(1, coord.to_grid_dist_safe(route_expansion_mm))
-    via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance
-    via_seg_expansion_grid = max(1, coord.to_grid_dist_safe(via_seg_expansion_mm))
+    # Block segments on their layers and also block vias along segments.
+    # Exact capsule keep-out from the TRUE float route points (issue #173),
+    # shared with route.py's obstacle builder -- no grid snapping of the
+    # newly-routed connection geometry, which is exactly the off-grid copper
+    # that the old bresenham stamp under-covered sub-cell.
+    route_expansion_mm = track_width + clearance + cushion
+    via_seg_expansion_mm = config.via_size / 2 + track_width / 2 + clearance + cushion
 
     for i in range(len(route_points) - 1):
         p1, p2 = route_points[i], route_points[i + 1]
         # Only block if on same layer (segments)
         if p1[2] == p2[2]:
             layer_idx = layer_map.get(p1[2], 0)
-            gx1, gy1 = coord.to_grid(p1[0], p1[1])
-            gx2, gy2 = coord.to_grid(p2[0], p2[1])
-            _block_line_cells(obstacles, gx1, gy1, gx2, gy2, layer_idx, route_expansion_grid)
+            cells = segment_blocked_cells_array(p1[0], p1[1], p2[0], p2[1],
+                                                route_expansion_mm, coord.grid_step)
+            _batch_cells_one_layer(obstacles, cells, layer_idx)
             # Also block vias along this segment
-            _block_line_vias(obstacles, gx1, gy1, gx2, gy2, via_seg_expansion_grid)
+            vias = segment_blocked_cells_array(p1[0], p1[1], p2[0], p2[1],
+                                               via_seg_expansion_mm, coord.grid_step)
+            _batch_vias(obstacles, vias)
 
-    # Block vias on all layers (through-hole) for track routing clearance
-    via_radius = coord.to_grid_dist_safe(via_clearance)
-    # Block via placement with hole-to-hole clearance (prevents new vias too close to these)
+    # Newly-placed connection vias (all config.via_size) block TRACK routing at
+    # via_size/2 + our_track_half + clearance, new-VIA placement at copper
+    # clearance (via_size + clearance), and drill placement at hole-to-hole.
+    # (issue #173 parity: was a flat via_clearance constant for track + hole-to-
+    # hole only, with no copper via-via placement clearance.)
+    track_keepout_mm = config.via_size / 2 + track_width / 2 + clearance + cushion
+    via_copper_keepout_mm = config.via_size + clearance + cushion
     hole_clearance_radius = coord.to_grid_dist_safe(hole_to_hole_clearance + config.via_drill)
 
     if via_positions:
         via_grid_centers = [coord.to_grid(vx, vy) for vx, vy in via_positions]
         # Block track routing around vias on all layers
-        via_cell_offsets = _precompute_circle_offsets(via_radius * via_radius)
+        via_cell_offsets = _precompute_circle_offsets((track_keepout_mm / coord.grid_step) ** 2)
         for layer_idx in range(num_layers):
             _batch_block_circles_cell(obstacles, via_grid_centers, via_cell_offsets, layer_idx)
-        # Block via placement with proper hole-to-hole clearance
+        # Block new-via placement: copper clearance AND drill hole-to-hole.
+        via_copper_offsets = _precompute_circle_offsets((via_copper_keepout_mm / coord.grid_step) ** 2)
+        _batch_block_circles_via(obstacles, via_grid_centers, via_copper_offsets)
         hole_offsets = _precompute_circle_offsets(hole_clearance_radius * hole_clearance_radius)
         _batch_block_circles_via(obstacles, via_grid_centers, hole_offsets)
 
@@ -1442,48 +1469,25 @@ def _block_segment_obstacle(
     seg: Segment,
     coord: GridCoord,
     layer_idx: int,
-    expansion_grid: int
+    expansion_mm: float
 ):
-    """Block cells along a segment in the obstacle map."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-    _block_line_cells(obstacles, gx1, gy1, gx2, gy2, layer_idx, expansion_grid)
+    """Block cells along a segment: exact point-to-segment (capsule) keep-out
+    from the TRUE float segment, shared with route.py's obstacle builder (issue
+    #173). The previous bresenham stamp snapped the endpoints to the grid and
+    under-covered off-grid/diagonal copper sub-cell."""
+    cells = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                        seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_cells_one_layer(obstacles, cells, layer_idx)
 
 
 def _block_segment_via_obstacle(
     obstacles: GridObstacleMap,
     seg: Segment,
     coord: GridCoord,
-    expansion_grid: int
+    expansion_mm: float
 ):
-    """Block via placement along a segment (vias span all layers)."""
-    gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-    gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-    _block_line_vias(obstacles, gx1, gy1, gx2, gy2, expansion_grid)
-
-
-def _block_line_vias(
-    obstacles: GridObstacleMap,
-    gx1: int, gy1: int,
-    gx2: int, gy2: int,
-    expansion_grid: int
-):
-    """Block via placement along a line with given expansion radius."""
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_via(obstacles, centers, circle_offsets)
-
-
-def _block_line_cells(
-    obstacles: GridObstacleMap,
-    gx1: int, gy1: int,
-    gx2: int, gy2: int,
-    layer_idx: int,
-    expansion_grid: int
-):
-    """Block cells along a line with given expansion radius."""
-    radius_sq = expansion_grid * expansion_grid
-    circle_offsets = _precompute_circle_offsets(radius_sq)
-    centers = _bresenham_centers(gx1, gy1, gx2, gy2)
-    _batch_block_circles_cell(obstacles, centers, circle_offsets, layer_idx)
+    """Block via placement along a segment (vias span all layers): exact capsule
+    keep-out from the TRUE float segment (issue #173)."""
+    vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                       seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+    _batch_vias(obstacles, vias)

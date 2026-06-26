@@ -1333,26 +1333,37 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                     })
 
-    # Same-net segment crossings are not DRC failures: same-net copper is allowed
+    # Same-net COPPER overlaps are not DRC failures: same-net copper is allowed
     # to overlap (KiCad's own DRC permits it -- it only enforces clearance between
-    # DIFFERENT nets). They are at most cosmetic clutter, so report them as
-    # warnings and keep them out of the violation count / exit status. (Same-net
-    # DRILL-hole checks stay violations -- those are real fab constraints.)
-    warnings = [v for v in violations if v['type'] == 'segment-crossing-same-net']
-    violations = [v for v in violations if v['type'] != 'segment-crossing-same-net']
+    # DIFFERENT nets). This covers both same-net segment crossings AND same-net
+    # via-to-via copper clearance (two vias on the same net may touch -- e.g. a
+    # plane stitching via next to a tap via). They are at most cosmetic clutter,
+    # so report them as warnings and keep them out of the violation count / exit
+    # status. (Same-net DRILL hole-to-hole checks -- 'via-drill-hole',
+    # 'pad-drill-via-drill-same-net' -- stay violations: drill spacing is a real
+    # fab constraint independent of net.)
+    _samenet_copper = ('segment-crossing-same-net', 'via-via-same-net')
+    seg_warns = [v for v in violations if v['type'] == 'segment-crossing-same-net']
+    viavia_warns = [v for v in violations if v['type'] == 'via-via-same-net']
+    warnings = [v for v in violations if v['type'] in _samenet_copper]
+    violations = [v for v in violations if v['type'] not in _samenet_copper]
 
     def _warn_note():
         if warnings:
             print(f"\nWARNINGS ({len(warnings)}, not DRC failures):")
-            print(f"  same-net self-crossing: {len(warnings)} (same-net copper overlap; "
-                  f"permitted by KiCad DRC)")
+            if seg_warns:
+                print(f"  same-net self-crossing: {len(seg_warns)} (same-net copper overlap; "
+                      f"permitted by KiCad DRC)")
+            if viavia_warns:
+                print(f"  same-net via-via: {len(viavia_warns)} (same-net copper overlap; "
+                      f"permitted by KiCad DRC -- drill hole-to-hole checked separately)")
 
     # Report violations
     if quiet:
         if violations:
             print(f"FAILED ({len(violations)} violations)")
         else:
-            print("OK" + (f" ({len(warnings)} same-net-crossing warning(s))" if warnings else ""))
+            print("OK" + (f" ({len(warnings)} same-net copper warning(s))" if warnings else ""))
             return violations
 
     # Print detailed results (always for non-quiet, or when violations in quiet mode)
