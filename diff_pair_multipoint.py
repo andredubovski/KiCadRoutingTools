@@ -192,21 +192,33 @@ def terminal_separation(terminal: Tuple[Pad, Pad]) -> float:
 # ~1 setback fanning in and ~1 fanning out - so coupling buys nothing and only
 # tangles the pair through clustered connector pads (castor_pollux /MCU/CONN_D, a
 # USB connector). Such a leg is routed single-ended instead. 5x the connector
-# setback is the floor. (Physics: even a 10 GHz / 10 Gb/s edge is electrically
-# short over ~1-3 mm, so a few-mm connector fan-in never needs coupling.)
+# setback is the geometric floor.
 DIFF_PAIR_MIN_COUPLED_SETBACKS = 5.0
+
+# Absolute electrical floor (mm): below ~lambda/10 at 5 GHz on FR4 a pair is
+# electrically short, so SE vs coupled is indistinguishable no matter how tight
+# the geometric fan-in is. v = c/sqrt(eps_eff) ~= 145-173 mm/ns on FR4
+# (stripline..microstrip), f = 5 GHz -> lambda ~= 29-35 mm -> lambda/10 ~= 3 mm.
+# This catches tight-pitch pairs (width+gap <= 0.3 mm) whose 5x-setback floor is
+# under 3 mm; wider pairs are still governed by the larger geometric floor.
+# (Assumes a <=5 GHz design; a much faster board would want a smaller floor.)
+DIFF_PAIR_MIN_COUPLED_FLOOR_MM = 3.0
 
 
 def diff_pair_min_coupled_length(config: GridRouteConfig) -> float:
     """Minimum leg length (mm) below which coupling gains nothing -> single-end.
 
-    = DIFF_PAIR_MIN_COUPLED_SETBACKS * connector setback (the centerline setback
-    if configured, else 4x the pair half-spacing - the same setback the corridor
-    capsules use)."""
+    = max(DIFF_PAIR_MIN_COUPLED_SETBACKS * connector setback,
+          DIFF_PAIR_MIN_COUPLED_FLOOR_MM)
+    where the setback is the centerline setback if configured, else 4x the pair
+    half-spacing (the same setback the corridor capsules use). The geometric term
+    keeps short fan-ins from tangling; the absolute lambda/10-at-5GHz floor keeps
+    electrically-short pairs single-ended even at very tight pitch."""
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
     setback = (config.diff_pair_centerline_setback
                if config.diff_pair_centerline_setback is not None else spacing_mm * 4)
-    return DIFF_PAIR_MIN_COUPLED_SETBACKS * setback
+    return max(DIFF_PAIR_MIN_COUPLED_SETBACKS * setback,
+               DIFF_PAIR_MIN_COUPLED_FLOOR_MM)
 
 
 def leg_electrically_short(term_a: Tuple[Pad, Pad], term_b: Tuple[Pad, Pad],

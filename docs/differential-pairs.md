@@ -177,6 +177,46 @@ routed as a **chain** of 2-point legs (`diff_pair_multipoint.py`):
    constraints depend on routing order, so a reversed chain can succeed
    where the forward one wraps itself into a corner.
 
+### Electrically-Short Pairs (Single-Ended Deferral)
+
+A coupled pair only earns its keep over an *electrically long* run. A leg
+shorter than a few millimetres has no real coupled middle section — you spend
+~1 setback fanning in and ~1 fanning out — so coupling buys nothing and only
+tangles the pair through clustered connector pads (e.g. a USB connector's
+D+/D-). Such legs are routed **single-ended** instead: the router defers them,
+and the downstream `route.py` single-ended pass connects them as plain tracks.
+
+A leg is electrically short when `min(P-run, N-run) < threshold`, where
+(`diff_pair_min_coupled_length`):
+
+```
+threshold = max( 5 × setback,        # geometric: keep short fan-ins from tangling
+                 3.0 mm )            # electrical: λ/10 at 5 GHz on FR4
+setback   = centerline_setback (if set) else 4 × (track_width + diff_pair_gap)/2
+```
+
+- A **2-terminal** pair whose single leg is short is deferred whole.
+- A **multi-point** pair defers short legs individually; if *every* leg is
+  short the whole pair is left for single-ended.
+
+**Why the 3 mm absolute floor.** The geometric term alone (`5 × setback =
+10 × (width+gap)` in the auto case) drops to only ~2 mm at tight pitch, which
+is *below* the length at which coupling matters electrically. Below ~λ/10 at
+the design's top frequency a pair is electrically short — SE vs coupled is
+indistinguishable (no meaningful reflection, skew-induced common-mode, or
+radiation difference). On FR4, `v = c/√εr_eff ≈ 145–173 mm/ns`
+(stripline…microstrip), so at **5 GHz**, `λ = v/f ≈ 29–35 mm` and
+`λ/10 ≈ 3 mm`. The floor therefore governs all pairs with
+`width + gap ≤ 0.3 mm` (most real diff pairs); only wider pairs
+(e.g. 0.2/0.2 → 4 mm) are bounded by the larger geometric term. The floor
+assumes a ≤5 GHz design; a much faster board would warrant a smaller value.
+
+This rule is shared by the CLI (`route_diff.py`) and the GUI. In the GUI's
+Differential tab, the **"Hide short routes"** option (on by default) uses the
+same test to drop these pairs from the differential pair list, and keeps their
+nets visible on the Basic tab — even under "Hide differential" — so they get
+routed single-ended.
+
 ### Pose-Based Centerline Routing
 
 The centerline is routed using orientation-aware A* search with state space (x, y, θ, layer):
