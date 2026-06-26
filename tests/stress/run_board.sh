@@ -49,7 +49,7 @@ Rules that matter most:
   (e.g. --layers F.Cu In1.Cu In2.Cu B.Cu) so deep balls escape.
 - GND (+ main power rail on 4+ layers) as planes; exclude plane nets from routing.
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
-- Run commands in the FOREGROUND. Hard 20-min/command cap; ~45-min board budget.
+- Run commands in the FOREGROUND. Hard 3-hour/command cap; ~3.5-hour board budget.
 
 When fully done:
   1. Write the results JSON to $RESULT (full RUNBOOK schema).

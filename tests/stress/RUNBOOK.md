@@ -42,7 +42,7 @@ stderr, the per-tool `*.log` files update live, and after the run
 
 **State signals** (what the queue and `stress_status.sh` use):
 - DONE: results JSON exists.
-- RUNNING: a process matches the run-dir path, OR the run dir was touched <45 min
+- RUNNING: a process matches the run-dir path, OR the run dir was touched <3 h
   ago (covers the gap between a worker's commands AND a long single signal-route
   step on a big board that writes no intermediate files). Naive checks mislead — pgrep
   on tool names is noisy and case-sensitive (KiCad's interpreter is `Python`,
@@ -303,19 +303,21 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
     suggestion lines verbatim into the `suggestions` field. The original is the
     ground truth for a manufacturable board; treat large via/length/width/
     layer-balance gaps as router-improvement findings, not just board facts.
-12. Budget: ~45 min wall-clock for the whole board, and a HARD 20-minute cap
-    per command: if a single tool invocation passes 20 min — even with its log
+12. Budget: ~3.5 h wall-clock for the whole board, and a HARD 3-hour cap
+    per command: if a single tool invocation passes 3 h — even with its log
     still growing — kill it, record the elapsed time + command as a runtime
     finding, and continue with the previous step's output. Aggressive params
     (--max-iterations 1000000 with --max-ripup 10 at fine grids) can grind
-    for hours; that is a finding, not progress. NEVER end your turn while
+    for hours; a board that's still making progress is fine, but one that
+    cycles 1M-iteration A* exhaustions with no net newly connected (issue #211:
+    ulx3s) is wedged, not slow. NEVER end your turn while
     a routing command is still running — you will be terminated and the run
     orphaned. Run commands in the FOREGROUND (timeout up to 600000 ms). If a
     command exceeds the 10-min foreground cap, keep waiting in foreground:
     repeatedly run `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
     sleep 10; done` (each up to 10 min) until the process exits, then read its
     log and continue. Big/dense boards (FPGA/USB3-class: daisho, large BGAs)
-    can legitimately spend 30-60+ min in a single signal-route step — that is
+    can legitimately spend 30-90+ min in a single signal-route step — that is
     slow progress, NOT a hang. Only kill a command once it shows no log growth
     AND no output-file size change for >45 min, and record it as a hang.
 13. If a tool crashes (traceback), capture the full traceback in the JSON

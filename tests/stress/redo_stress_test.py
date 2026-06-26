@@ -47,16 +47,41 @@ def _tree_rss_kb(pid):
     return total
 
 
-def run_with_peak_rss(argv, cwd, interval=0.5):
+def run_with_peak_rss(argv, cwd, interval=0.5, timeout=None):
     """Run a command (inheriting stdout/stderr) while sampling its process-tree
-    RSS; return (returncode, peak_rss_kb). Lets the replay record per-step peak
-    memory so an engine change's memory effect is comparable, not just its time."""
+    RSS; return (returncode, peak_rss_kb, timed_out). Lets the replay record
+    per-step peak memory so an engine change's memory effect is comparable, not
+    just its time.
+
+    If timeout (seconds) is given and the command runs past it, kill the process
+    tree and return timed_out=True. The original LLM run has a per-command cap
+    (run_board.sh's 3-hour/command budget); the replay had none, so a board that
+    wedges in rip-up (issue #211: ulx3s' 40-min+ non-terminating final route)
+    could hang a whole sweep forever. A generous cap (default 3h) lets slow-but-
+    finishing boards complete while still bailing a true non-termination."""
     p = subprocess.Popen(argv, cwd=cwd)
     peak = 0
+    start = time.time()
+    timed_out = False
     while p.poll() is None:
         peak = max(peak, _tree_rss_kb(p.pid))
+        if timeout is not None and time.time() - start > timeout:
+            timed_out = True
+            # Kill the children first (the heavy router workers), then the wrapper.
+            for k in subprocess.run(["pgrep", "-P", str(p.pid)],
+                                    capture_output=True, text=True).stdout.split():
+                try:
+                    os.kill(int(k), 9)
+                except (ValueError, ProcessLookupError):
+                    pass
+            try:
+                p.kill()
+            except ProcessLookupError:
+                pass
+            p.wait()
+            break
         time.sleep(interval)
-    return p.returncode, peak
+    return p.returncode, peak, timed_out
 
 
 def parse_manifest(path):
@@ -156,6 +181,11 @@ def main():
     ap.add_argument("--timings-out", metavar="PATH",
                     help="Write per-command wall-clock timings to PATH (JSON) for "
                          "comparison across code versions")
+    ap.add_argument("--timeout", type=float, default=10800, metavar="SECONDS",
+                    help="Per-command wall-clock cap (default 10800 = 3h). A command "
+                         "that runs past it is killed (process tree) and counted as a "
+                         "failure, so a non-terminating board (issue #211) can't wedge "
+                         "the whole replay forever. Pass 0 to disable the cap.")
     args = ap.parse_args()
 
     remaps = []
@@ -212,17 +242,23 @@ def main():
         if cwd and not os.path.isdir(cwd):
             os.makedirs(cwd, exist_ok=True)
         cmd_t0 = time.time()
-        rc, peak_kb = run_with_peak_rss(argv, cwd)
+        timeout = args.timeout if args.timeout and args.timeout > 0 else None
+        rc, peak_kb, timed_out = run_with_peak_rss(argv, cwd, timeout=timeout)
         dt = time.time() - cmd_t0
         timings.append({"index": i, "seconds": round(dt, 3), "returncode": rc,
-                        "peak_rss_mb": round(peak_kb / 1024, 1), "argv": argv})
-        print(f"    -> {dt:.2f}s" + (f"  exit {rc}" if rc != 0 else ""))
-        if rc != 0:
+                        "peak_rss_mb": round(peak_kb / 1024, 1),
+                        "timed_out": timed_out, "argv": argv})
+        suffix = f"  exit {rc}" if rc != 0 else ""
+        if timed_out:
+            suffix = f"  TIMED OUT after {timeout:.0f}s (killed)"
+        print(f"    -> {dt:.2f}s" + suffix)
+        if rc != 0 or timed_out:
             failures += 1
-            # check tools return non-zero when they find issues -- not a real error
-            real = not is_check_cmd(argv)
+            # check tools return non-zero when they find issues -- not a real error;
+            # a timeout is always a real (non-termination) failure.
+            real = timed_out or not is_check_cmd(argv)
             if real:
-                print("    (non-check command failed)")
+                print("    (timed out)" if timed_out else "    (non-check command failed)")
             if real and not args.continue_on_error:
                 print(f"\nStopping at command {i}; rerun with --continue-on-error to push through.")
                 return 2

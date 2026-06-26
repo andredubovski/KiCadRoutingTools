@@ -63,7 +63,7 @@ Operational limits (baked into the scripts / learned the hard way):
   4-in-flight works on an 8 GB machine and the per-job watchdog backstops any
   spike. (Lower the concurrency arg if you see swapping.)
 - Each worker runs its routing commands in the foreground under a hard
-  20-min/command cap and ~45-min board budget (RUNBOOK rule 12). The queue
+  3-hour/command cap and ~3.5-hour board budget (RUNBOOK rule 12). The queue
   manager and `stress_status.sh` track liveness from disk (results JSON +
   run-dir activity), so dropped/stale notifications can't mislead them.
 
