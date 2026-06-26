@@ -358,7 +358,8 @@ def try_phase3_ripup(
     base_obstacles, gnd_net_id, phase3_ripped_nets,
     global_tap_offset=0, global_tap_total=0, global_tap_failed=0,
     obstacle_cache=None,
-    reroute_depth: int = 0
+    reroute_depth: int = 0,
+    ancestor_net_ids: frozenset = frozenset()
 ):
     """
     Try progressive rip-up and retry for failed Phase 3 tap routes.
@@ -377,10 +378,17 @@ def try_phase3_ripup(
     if not all_blocked_cells:
         return None
 
+    # Cycle guard (glasgow Z1): never rip a net that is an ANCESTOR in the current
+    # rip-up chain (the root net being routed, or any net whose rip-up cascade led
+    # here). Ripping an ancestor re-routes it from under its own in-progress retry
+    # -- a circular net -> ... -> net rip that orphans copper and ships the root
+    # split. exclude_net_ids removes them from blocker selection at every depth.
+    exclude_ids = {net_id} | ancestor_net_ids
+
     # Analyze blocking
     blockers = analyze_frontier_blocking(
         all_blocked_cells, pcb_data, config, routed_net_paths,
-        exclude_net_ids={net_id},
+        exclude_net_ids=exclude_ids,
         obstacle_cache=obstacle_cache
     )
 
@@ -407,7 +415,7 @@ def try_phase3_ripup(
             print(f"    Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
             fresh_blockers = analyze_frontier_blocking(
                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                exclude_net_ids={net_id},
+                exclude_net_ids=exclude_ids,
                 obstacle_cache=obstacle_cache
             )
             print_blocking_analysis(fresh_blockers, prefix="      ")
@@ -543,7 +551,8 @@ def try_phase3_ripup(
                         ripped_items, pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-                        reroute_depth=reroute_depth + 1
+                        reroute_depth=reroute_depth + 1,
+                        ancestor_net_ids=exclude_ids
                     )
 
                 # IMPORTANT: Remove the temporarily added tap segments before returning.
@@ -633,7 +642,8 @@ def try_phase3_ripup(
                         pcb_data, config, state, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
                         results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-                        reroute_depth=reroute_depth + 1
+                        reroute_depth=reroute_depth + 1,
+                        ancestor_net_ids=exclude_ids
                     )
                     if guard:
                         remove_segments_list_from_obstacles(state.working_obstacles, orig_tap_segs, config)
@@ -676,7 +686,8 @@ def _reroute_phase3_ripped_nets(
     phase3_ripped_nets, pcb_data, config, state, routed_net_ids, remaining_net_ids,
     all_unrouted_net_ids, routed_net_paths, routed_results, diff_pair_by_net_id,
     results, track_proximity_cache, layer_map, base_obstacles, gnd_net_id,
-    reroute_depth: int = 0
+    reroute_depth: int = 0,
+    ancestor_net_ids: frozenset = frozenset()
 ):
     """
     Re-route nets that were ripped during Phase 3 tap routing.
@@ -810,7 +821,8 @@ def _reroute_phase3_ripped_nets(
                                 all_unrouted_net_ids, routed_net_paths, routed_results,
                                 diff_pair_by_net_id, results, track_proximity_cache, layer_map,
                                 base_obstacles, gnd_net_id, [],  # unused parameter
-                                reroute_depth=reroute_depth + 1
+                                reroute_depth=reroute_depth + 1,
+                                ancestor_net_ids=ancestor_net_ids
                             )
 
                             if retry_result is not None:
