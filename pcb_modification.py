@@ -244,6 +244,29 @@ def _nearest_pad_point(px, py, pad):
     return (tx, ty), math.hypot(px - tx, py - ty)
 
 
+def _duplicate_connector(px: float, py: float, tx: float, ty: float,
+                         segs, tol: float = 0.02) -> bool:
+    """True if a same-net segment in ``segs`` already directly joins (px,py) and
+    (tx,ty) on this layer.
+
+    snap_stub_gaps treats a degree-1 endpoint as a loose stub even when a via /
+    TH pad anchors it to another layer, so it can try to bridge that endpoint to
+    copper it is ALREADY joined to -- adding a segment coincident with an existing
+    one. That duplicate is a degenerate 2-edge cycle, which prune_redundant_cycles
+    then "breaks" by deleting load-bearing copper, silently disconnecting the pad
+    (issue #209, free_dap +3V3 IC2.13). Such a connector is always redundant (the
+    join already exists), so suppressing it can never disconnect anything -- unlike
+    skipping the endpoint outright, which can drop a genuinely load-bearing snap."""
+    for s in segs:
+        a = (abs(s.start_x - px) < tol and abs(s.start_y - py) < tol and
+             abs(s.end_x - tx) < tol and abs(s.end_y - ty) < tol)
+        b = (abs(s.start_x - tx) < tol and abs(s.start_y - ty) < tol and
+             abs(s.end_x - px) < tol and abs(s.end_y - py) < tol)
+        if a or b:
+            return True
+    return False
+
+
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                    max_gap_factor: float = 1.5) -> int:
     """Close small gaps where a routed dead end stopped just short of same-net
@@ -326,6 +349,13 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                     if best is None or not (1e-4 < best[0] <= limit):
                         continue  # already touching, no target, or gap too big
                     tx, ty = best[1]
+
+                    # Don't add a connector coincident with an existing same-net
+                    # segment (issue #209): the endpoint only looked loose because
+                    # a via/TH pad anchors it to another layer, so the join already
+                    # exists. The duplicate would seed a degenerate cycle.
+                    if _duplicate_connector(px, py, tx, ty, segs):
+                        continue
 
                     # Clearance check: the connector must keep `clearance` from
                     # every OTHER net's copper.
@@ -736,16 +766,46 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
         return net_segs, []
     base_comps = base.get('num_components') or 1
     base_disc = len(base.get('disconnected_pads') or [])
+    # Pad coverage points, mirroring sweep_dead_ends' via-support model exactly.
+    pad_cover = []
+    for p in (net_pads or []):
+        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
+        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
+        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+        pad_cover.append((px, py, ps))
+
+    def supported_vias(seglist):
+        # A via survives sweep_dead_ends only if a kept same-net segment endpoint
+        # lands within 0.05mm of it, or a pad covers it (see sweep_dead_ends).
+        out = set()
+        for i, v in enumerate(net_vias or []):
+            if any(math.hypot(v.x - sg.start_x, v.y - sg.start_y) < 0.05 or
+                   math.hypot(v.x - sg.end_x, v.y - sg.end_y) < 0.05 for sg in seglist) \
+               or any(math.hypot(v.x - cx, v.y - cy) < cs / 2 + 0.05
+                      for cx, cy, cs in pad_cover):
+                out.add(i)
+        return out
+
     cur = list(net_segs)
+    cur_supported = supported_vias(cur)
     safe_removed = []
     for s in sorted(removed, key=lambda s: (not grazes(s),
                     -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
         trial = [x for x in cur if x is not s]
         t = check_net_connectivity(net_id, trial, net_vias, net_pads)
-        if t.get('connected') and (t.get('num_components') or 1) <= base_comps \
-           and len(t.get('disconnected_pads') or []) <= base_disc:
-            cur = trial
-            safe_removed.append(s)
+        if not (t.get('connected') and (t.get('num_components') or 1) <= base_comps
+                and len(t.get('disconnected_pads') or []) <= base_disc):
+            continue
+        # Don't strip the last segment anchoring a via: check_net_connectivity
+        # credits via-copper overlap and reports "still connected", but
+        # sweep_dead_ends would then cull the now-unsupported via and disconnect
+        # the net (issue #209). Reject any removal that drops a via's support.
+        trial_supported = supported_vias(trial)
+        if trial_supported < cur_supported:
+            continue
+        cur = trial
+        cur_supported = trial_supported
+        safe_removed.append(s)
     return cur, safe_removed
 
 

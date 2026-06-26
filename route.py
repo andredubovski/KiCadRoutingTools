@@ -806,6 +806,47 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         results[:] = [r for r in results if id(r) in _authoritative]
         print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
 
+    # ---- Issue #209 fix C: catch cleanup passes that disconnect a completed route ----
+    # Snapshot each in-scope multi-pad net's connectivity on the WRITE-LIST copper
+    # (original + routed new copper -- the same basis the output is written from)
+    # BEFORE the post-routing cleanup passes (snap / phantom / cycle-prune /
+    # dead-end sweep / neck). If a pass turns a connected net (or pad) disconnected,
+    # that is a cleanup bug -- surface it loudly and in the JSON summary rather than
+    # ship a silently-broken net (free_dap +3V3 IC2.13).
+    from check_connected import check_net_connectivity as _cnc209
+
+    def _writelist_copper_209():
+        _s = {nid: list(lst) for nid, lst in _orig_seg_by_net.items()}
+        _v = {nid: list(lst) for nid, lst in _orig_via_by_net.items()}
+        for _r in results:
+            for _seg in _r.get('new_segments') or []:
+                _s.setdefault(_seg.net_id, []).append(_seg)
+            for _via in _r.get('new_vias') or []:
+                _v.setdefault(_via.net_id, []).append(_via)
+        return _s, _v
+
+    def _seg_sig_209(s):
+        a, b = (round(s.start_x, 3), round(s.start_y, 3)), (round(s.end_x, 3), round(s.end_y, 3))
+        return (min(a, b), max(a, b), s.layer)
+
+    _zbn_209 = {}
+    for _z in getattr(pcb_data, 'zones', []) or []:
+        _zbn_209.setdefault(_z.net_id, []).append(_z)
+    _pre_s_209, _pre_v_209 = _writelist_copper_209()
+    _pre_conn_209 = {}
+    for _nid in sweep_scope_ids:
+        _pads209 = pcb_data.pads_by_net.get(_nid, [])
+        if len(_pads209) < 2:
+            continue
+        _r209 = _cnc209(_nid, _pre_s_209.get(_nid, []), _pre_v_209.get(_nid, []),
+                        _pads209, _zbn_209.get(_nid, []), tolerance=0.02)
+        _pre_conn_209[_nid] = (
+            bool(_r209.get('connected')),
+            len(_r209.get('disconnected_pads') or []),
+            {_seg_sig_209(s) for s in _pre_s_209.get(_nid, [])},
+            {(round(v.x, 3), round(v.y, 3)) for v in _pre_v_209.get(_nid, [])},
+        )
+
     # Close small gaps where a route stopped a fraction of a track width short of
     # its same-net pad/via/trace (issue #84): extend the stub with a short
     # connector when it clears other nets, so the copper physically touches
@@ -857,6 +898,47 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Merge any original input-file loop edges into the writer's strip list.
     if cycle_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
+
+    # Issue #209 fix C: re-check the snapshotted nets against the post-cleanup
+    # write-list and report any net a cleanup pass disconnected, listing the
+    # dropped copper. A non-empty list here is a cleanup BUG (the routed net was
+    # connected and a graph-preserving pass severed it), not a routing failure.
+    cleanup_disconnected = []
+    if _pre_conn_209:
+        _post_s_209, _post_v_209 = _writelist_copper_209()
+        for _nid, (_was_conn, _was_disc, _pre_segsig, _pre_viasig) in _pre_conn_209.items():
+            _pads209 = pcb_data.pads_by_net.get(_nid, [])
+            _r209 = _cnc209(_nid, _post_s_209.get(_nid, []), _post_v_209.get(_nid, []),
+                            _pads209, _zbn_209.get(_nid, []), tolerance=0.02)
+            _now_disc = len(_r209.get('disconnected_pads') or [])
+            if not ((_was_conn and not _r209.get('connected')) or _now_disc > _was_disc):
+                continue
+            _net_name = pcb_data.nets[_nid].name if _nid in pcb_data.nets else f"Net {_nid}"
+            _post_segsig = {_seg_sig_209(s) for s in _post_s_209.get(_nid, [])}
+            _post_viasig = {(round(v.x, 3), round(v.y, 3)) for v in _post_v_209.get(_nid, [])}
+            cleanup_disconnected.append({
+                'net_name': _net_name,
+                'net_id': _nid,
+                'disconnected_pads': [
+                    {'x': round(p[0], 3), 'y': round(p[1], 3),
+                     'component_ref': p[3] if len(p) > 3 else '?'}
+                    for p in (_r209.get('disconnected_pads') or [])],
+                'dropped_segments': [
+                    {'start': list(sa[0]), 'end': list(sa[1]), 'layer': sa[2]}
+                    for sa in (_pre_segsig - _post_segsig)],
+                'dropped_vias': [{'x': vx, 'y': vy} for (vx, vy) in (_pre_viasig - _post_viasig)],
+            })
+        if cleanup_disconnected:
+            print(f"\n{RED}WARNING: post-routing cleanup DISCONNECTED "
+                  f"{len(cleanup_disconnected)} completed route(s) "
+                  f"(this is a cleanup bug, not a routing failure):{RESET}")
+            for _cd in cleanup_disconnected:
+                print(f"  {RED}{_cd['net_name']}: dropped "
+                      f"{len(_cd['dropped_segments'])} segment(s) + "
+                      f"{len(_cd['dropped_vias'])} via(s) -> "
+                      f"{len(_cd['disconnected_pads'])} pad(s) now unconnected{RESET}")
+                for _dv in _cd['dropped_vias']:
+                    print(f"      dropped via @ ({_dv['x']:.3f}, {_dv['y']:.3f})")
 
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
@@ -1037,7 +1119,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         'failed': failed,
         'total_time': round(total_time, 2),
         'total_iterations': total_iterations,
-        'total_vias': total_vias
+        'total_vias': total_vias,
+        # Issue #209 fix C: nets a post-routing cleanup pass disconnected (a
+        # cleanup bug). Empty in the normal case; non-empty flags dropped copper.
+        'cleanup_disconnected': cleanup_disconnected,
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
