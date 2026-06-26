@@ -518,66 +518,78 @@ def precompute_via_placement_obstacles(
     """
     import math
     coord = GridCoord(config.grid_step)
+    # build_via_obstacle_map / build_routing_obstacle_map add a half-cell
+    # discretization cushion to the via-block margin; removal must match (#208).
+    grid_cushion = config.grid_step / 2
 
     # Collect blocked positions as numpy chunks (one per segment/via stamp), then
-    # concatenate. Duplicate counts are preserved - the obstacle map uses
-    # reference counting, so removal must match exactly what was added. Each stamp
-    # is the Bresenham line broadcast against a circular offset mask (circle_offsets
-    # reproduces the legacy ex/ey<=r^2 loops cell-for-cell, in the same order), so
-    # the cell multiset is identical to the old scalar double loops (issue #35 pattern).
+    # concatenate. Duplicate counts are preserved - the obstacle maps are REFERENCE
+    # COUNTED, so a net's removal must remove EXACTLY the cell multiset its add
+    # stamped, or ripping it drives shared cells' counts to zero and wrongly
+    # unblocks copper a present net still needs (issue #208). So these stamps mirror
+    # the add side cell-for-cell: build_via_obstacle_map and build_routing_obstacle_map
+    # both use the exact capsule (segment_blocked_cells_array) for segments -- NOT the
+    # bresenham-line + circle this used to use, which stamped a disc at every line
+    # cell and over-counted a near cell ~7x, so removal over-decremented by ~7x.
     via_chunks: List["np.ndarray"] = []
     cell_chunks: Dict[str, List["np.ndarray"]] = {layer: [] for layer in all_copper_layers}
+    track_w_by_layer = {layer: config.get_track_width(layer) for layer in all_copper_layers}
 
-    # Process this net's segments - they block via placement
+    # Process this net's segments - they block via placement (all layers) and
+    # routing (own layer).
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
-        # Via-segment clearance (via can't overlap segment on any layer)
-        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance
-        seg_expansion_sq = (seg_expansion_mm / config.grid_step) ** 2
-        seg_expansion_int = int(math.ceil(math.sqrt(seg_expansion_sq)))
-
-        # Routing clearance for this segment's layer (circular test: use float
-        # squared radius + ceil scan bound so we don't under-reserve by ~1 cell)
-        route_expansion_mm = config.track_width / 2 + seg.width / 2 + config.clearance
-        route_expansion_sq = (route_expansion_mm / config.grid_step) ** 2
-        route_expansion_grid = max(1, int(math.ceil(math.sqrt(route_expansion_sq))))
-
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        line = _bresenham_line_points(gx1, gy1, gx2, gy2)  # (L, 2) int32
-
-        # Via positions: stamp the via keep-out disc at every line cell.
-        via_offs = circle_offsets(seg_expansion_int, seg_expansion_sq)
-        via_chunks.append((line[:, None, :] + via_offs[None, :, :]).reshape(-1, 2))
-
-        # Routing cells on this segment's layer (circular, matching build_routing_obstacle_map)
+        # Via map: capsule at via_size/2 + seg/2 + clearance + cushion (== _add_segment_via_obstacle).
+        via_margin = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
+        via_chunks.append(segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_margin, config.grid_step))
+        # Routing map: capsule at the per-layer track width, NO cushion (== _add_segment_routing_obstacle).
         if seg.layer in cell_chunks:
-            route_offs = circle_offsets(route_expansion_grid, route_expansion_sq)
-            cell_chunks[seg.layer].append((line[:, None, :] + route_offs[None, :, :]).reshape(-1, 2))
+            route_margin = track_w_by_layer[seg.layer] / 2 + seg.width / 2 + config.clearance
+            cell_chunks[seg.layer].append(segment_blocked_cells_array(
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y, route_margin, config.grid_step))
 
-    # Process this net's vias - they block via placement and routing on all layers
-    via_via_expansion_mm = config.via_size + config.clearance
-    via_via_radius_sq = (via_via_expansion_mm / config.grid_step) ** 2
-    via_via_radius_int = int(math.ceil(math.sqrt(via_via_radius_sq)))
-
-    via_route_expansion_sq = ((config.via_size / 2 + config.track_width / 2 + config.clearance) / config.grid_step) ** 2
-    via_route_expansion = max(1, int(math.ceil(math.sqrt(via_route_expansion_sq))))
-
-    via_via_offs = circle_offsets(via_via_radius_int, via_via_radius_sq)
-    via_route_offs = circle_offsets(via_route_expansion, via_route_expansion_sq)
-
+    # Process this net's vias - they block via placement and routing on all layers.
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         gx, gy = coord.to_grid(via.x, via.y)
         center = np.array([[gx, gy]], dtype=np.int32)  # (1, 2)
-        # Block via positions (via-via clearance)
-        via_chunks.append(center + via_via_offs)
-        # Block routing cells on all layers (via spans all layers)
-        route_block = center + via_route_offs
+        # Via map: per-size via-via disc + cushion at the grid-snapped centre
+        # (== build_via_obstacle_map's per-size circle, keyed on this via's size).
+        vv_mm = via.size / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        vv_sq = (vv_mm / config.grid_step) ** 2
+        via_chunks.append(center + circle_offsets(max(1, int(math.ceil(math.sqrt(vv_sq)))), vv_sq))
+        # Via map: drill hole-to-hole keepout, stamped IN ADDITION to the via-via
+        # disc by _add_drill_hole_via_obstacles (== block_via_cells_near_drills, a
+        # float-centre disc, strict <). Removing it too keeps the via map exactly in
+        # sync -- without it the ripped via leaves a stale drill keepout (#208).
+        h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+        if h2h > 0 and via.drill > 0:
+            req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
+            req_sq = req * req
+            de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin (matches source)
+            doff = np.arange(-de, de + 1)
+            dxg, dyg = np.meshgrid(doff, doff, indexing="ij")
+            cx = (gx + dxg) * config.grid_step
+            cy = (gy + dyg) * config.grid_step
+            dmask = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < req_sq
+            via_chunks.append(
+                np.column_stack([(gx + dxg)[dmask], (gy + dyg)[dmask]]).astype(np.int32))
+        # Routing map: float-centre real-distance disc + half-cell, per-layer track
+        # width (== build_routing_obstacle_map's via loop). The via spans all layers.
         for layer in all_copper_layers:
-            cell_chunks[layer].append(route_block)
+            r_mm = via.size / 2 + track_w_by_layer[layer] / 2 + config.clearance + config.grid_step / 2
+            rg = coord.to_grid_dist_safe(r_mm)
+            r_sq = r_mm * r_mm
+            off = np.arange(-rg, rg + 1)
+            exg, eyg = np.meshgrid(off, off, indexing="ij")
+            ddx = (gx + exg) * config.grid_step - via.x
+            ddy = (gy + eyg) * config.grid_step - via.y
+            mask = (ddx * ddx + ddy * ddy) <= r_sq
+            cell_chunks[layer].append(
+                np.column_stack([(gx + exg)[mask], (gy + eyg)[mask]]).astype(np.int32))
 
     # Concatenate chunks into the final arrays (keep duplicates for reference counting)
     if via_chunks:
