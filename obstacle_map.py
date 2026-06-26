@@ -93,16 +93,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
-    # Vias span all layers, so use max track width for track blocking
-    max_track_width = config.get_max_track_width()
     for via in pcb_data.vias:
         if via.net_id in nets_to_route_set:
             continue
         # Compute expansion based on actual via size:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
         # For track blocking by vias: via half-size + max routing track half-width + clearance
-        via_track_mm = via_size / 2 + max_track_width / 2 + effective_clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, effective_clearance, extra_clearance)
         # For via-to-via: via size + routing via size + clearance
         via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
@@ -830,8 +827,8 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
 
     # Convert exclude endpoints to grid coordinates with some radius
     # Use max track width for exclusion radius
-    max_track_width = config.get_max_track_width()
     exclude_grid_cells = set(exclude_cells) if exclude_cells else set()
+    max_track_width = config.get_max_track_width()
     exclude_radius = max(2, coord.to_grid_dist(max_track_width * 2))  # 2x track width radius
     if exclude_endpoints:
         for ex, ey in exclude_endpoints:
@@ -972,13 +969,11 @@ def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     num_layers = len(config.layers)
 
     # Add vias - use actual via size and max track width (vias span all layers)
-    max_track_width = config.get_max_track_width()
     for via in pcb_data.vias:
         if via.net_id != net_id:
             continue
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
@@ -1008,11 +1003,9 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
     num_layers = len(config.layers)
 
     # Add vias - use actual via size and max track width (vias span all layers)
-    max_track_width = config.get_max_track_width()
     for via in vias:
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
@@ -1124,14 +1117,11 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     cells_to_remove = []  # (gx, gy, layer_idx) tuples
     vias_to_remove = []   # (gx, gy) tuples
 
-    # Remove vias - use actual via size and max track width (same as add function)
-    max_track_width = config.get_max_track_width()
     for via in vias:
         gx, gy = coord.to_grid(via.x, via.y)
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
 
-        via_track_mm = via_size / 2 + max_track_width / 2 + config.clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, config.clearance, extra_clearance)
         via_via_mm = via_size / 2 + config.via_size / 2 + config.clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real
@@ -1146,11 +1136,11 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         off_cells = math.hypot(via.x - gx * coord.grid_step,
                                via.y - gy * coord.grid_step) / coord.grid_step
 
-        # Track blocking - same for all layers
-        radius = via_track_expansion_grid + diagonal_margin + off_cells
-        effective_track_block_sq = radius ** 2
-        track_block_range = int(math.ceil(radius))
+        # Track blocking - PER LAYER (mirror _add_via_obstacle's per-layer list).
         for layer_idx in range(num_layers):
+            radius = via_track_expansion_grid[layer_idx] + diagonal_margin + off_cells
+            effective_track_block_sq = radius ** 2
+            track_block_range = int(math.ceil(radius))
             for ex in range(-track_block_range, track_block_range + 1):
                 for ey in range(-track_block_range, track_block_range + 1):
                     if ex*ex + ey*ey <= effective_track_block_sq:
@@ -1343,6 +1333,19 @@ def _add_segment_obstacle(obstacles: GridObstacleMap, seg, coord: GridCoord,
     vias = segment_blocked_cells_array(seg.start_x, seg.start_y,
                                        seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
     _batch_vias(obstacles, vias, blocked_vias)
+
+
+def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
+                                   coord: GridCoord, clearance: float,
+                                   extra_clearance: float = 0.0):
+    """Per-layer via->track keep-out radius (cells): a via blocks tracks on EACH
+    layer at THAT layer's routing width. Replaces a single max_track_width value,
+    which over-covered thinner layers and double-counted the router's per-net
+    track_margin for wide nets. Matches the cache (_collect_via_obstacles) and the
+    segment stamp (which already key off the per-layer width)."""
+    return [max(1, coord.to_grid_dist_safe(
+                via_size / 2 + config.get_track_width(layer) / 2 + clearance + extra_clearance))
+            for layer in config.layers]
 
 
 def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
@@ -1625,14 +1628,11 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
                               blocked_cells, blocked_vias)
 
     # Add vias as obstacles (excluding nets we'll route)
-    # Use actual via size and max track width (vias span all layers)
-    max_track_width = config.get_max_track_width()
     for via in pcb_data.vias:
         if via.net_id in nets_to_route_set:
             continue
         via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
-        via_track_mm = via_size / 2 + max_track_width / 2 + effective_clearance + extra_clearance
-        via_track_expansion_grid = max(1, coord.to_grid_dist_safe(via_track_mm))
+        via_track_expansion_grid = _via_track_expansion_per_layer(via_size, config, coord, effective_clearance, extra_clearance)
         via_via_mm = via_size / 2 + config.via_size / 2 + effective_clearance
         # True via-via clearance radius in cells as a FLOAT (no floor): the disc
         # threshold is radius**2, so this blocks exactly the cells within the real

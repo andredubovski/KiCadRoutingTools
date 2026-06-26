@@ -29,7 +29,8 @@ from routing_config import GridRouteConfig, GridCoord
 from obstacle_map import (GridObstacleMap, build_layer_map,
                           add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
                           add_vias_list_as_obstacles, remove_vias_list_from_obstacles,
-                          _add_segment_obstacle, _add_via_obstacle)
+                          _add_segment_obstacle, _add_via_obstacle,
+                          _via_track_expansion_per_layer)
 from obstacle_cache import _collect_segment_obstacles, _collect_via_obstacles
 
 LAYERS = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
@@ -69,9 +70,8 @@ def _blocked_sets(m, coord, x_lo, y_lo, x_hi, y_hi):
     return cells, vias
 
 
-def test_add_remove_empty(verbose):
+def test_add_remove_empty(verbose, config):
     """A: add then remove leaves the map byte-empty (no leak, no underflow)."""
-    config = _config()
     fails = []
     for name, seg in SEGS.items():
         m = GridObstacleMap(len(LAYERS))
@@ -100,9 +100,8 @@ def test_add_remove_empty(verbose):
     return fails
 
 
-def test_base_cache_parity(verbose):
+def test_base_cache_parity(verbose, config):
     """B: build_base primitive and cache primitive stamp the same cells."""
-    config = _config()
     coord = GridCoord(config.grid_step)
     lm = build_layer_map(LAYERS)
     fails = []
@@ -142,22 +141,19 @@ def test_base_cache_parity(verbose):
         if not (cb != cc or vb != vc) and verbose:
             print(f"  seg/{name}: base==cache ({len(cb)} track, {len(vb)} via cells)  OK")
 
-    # via-as-obstacle parity. Uniform track width here, so build_base's MAX-width
-    # single value equals the cache's per-layer list. (For per-LAYER/impedance
-    # widths build_base uses max_track_width -- a conservative over-cover, not a
-    # graze; documented on #199, intentionally not asserted bit-identical.)
-    max_tw = config.get_max_track_width()
+    # via-as-obstacle parity: build_base now uses the SAME per-layer track keep-out
+    # as the cache (no max_track_width over-cover), so they're bit-identical even
+    # for per-layer/impedance widths.
     inv = 1.0 / config.grid_step
     for name, via in VIAS.items():
         vs = via.size
-        via_track_grid = max(1, coord.to_grid_dist_safe(vs / 2 + max_tw / 2 + config.clearance))
+        via_track_per_layer = _via_track_expansion_per_layer(vs, config, coord, config.clearance)
         via_via_grid = max(1.0, (vs / 2 + config.via_size / 2 + config.clearance) * inv)
-        layer_widths = [config.get_net_track_width(via.net_id, l) for l in LAYERS]
         via_track_list = [max(1, coord.to_grid_dist_safe(vs / 2 + lw / 2 + config.clearance))
-                          for lw in layer_widths]
+                          for lw in [config.get_net_track_width(via.net_id, l) for l in LAYERS]]
 
         mb = GridObstacleMap(len(LAYERS))
-        _add_via_obstacle(mb, via, coord, len(LAYERS), via_track_grid, via_via_grid, diagonal_margin=0.25)
+        _add_via_obstacle(mb, via, coord, len(LAYERS), via_track_per_layer, via_via_grid, diagonal_margin=0.25)
 
         mc = GridObstacleMap(len(LAYERS))
         bc, bv = [], []
@@ -183,11 +179,20 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
+    uniform = _config()
+    impedance = _config()
+    # WIDE per-layer spread: a thin 0.1 layer beside a wide 0.4 one. The old
+    # single max_track_width via keep-out over-covered the thin layers by enough
+    # cells to survive grid rounding (verified: it diverges from the cache here),
+    # so this case genuinely exercises the per-layer fix.
+    impedance.layer_widths = {"F.Cu": 0.1, "In1.Cu": 0.4, "In2.Cu": 0.1, "B.Cu": 0.1}
     fails = []
-    print("A: add/remove ref-count symmetry (#198)")
-    fails += test_add_remove_empty(args.verbose)
-    print("B: build_base vs cache parity (#199)")
-    fails += test_base_cache_parity(args.verbose)
+    for label, config in [("uniform width", uniform), ("per-layer/impedance widths", impedance)]:
+        print(f"=== {label} ===")
+        print("A: add/remove ref-count symmetry (#198)")
+        fails += test_add_remove_empty(args.verbose, config)
+        print("B: build_base vs cache parity (#199)")
+        fails += test_base_cache_parity(args.verbose, config)
 
     if fails:
         print("\nFAIL:\n  " + "\n  ".join(fails))
