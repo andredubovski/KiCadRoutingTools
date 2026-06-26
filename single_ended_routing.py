@@ -1190,7 +1190,7 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     res = _route_main_connection(router, obstacles, config, sources, targets, track_margin,
                                  pcb_data, net_id, print_prefix, direction_labels,
                                  single_direction, waypoints)
-    if res[0] is not None or os.environ.get('DISABLE_VIA_ESCAPE'):
+    if res[0] is not None:
         return res + ([],)
     layer_names = config.layers
     if len(layer_names) < 2:
