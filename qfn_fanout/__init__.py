@@ -86,7 +86,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               check_line_clearance, point_to_segment_distance)
     from bga_fanout.reroute import _seg_hits_pad
+    from bga_fanout.geometry import clamp_via_to_pad
+    from list_nets import fab_floors
     from routing_config import GridRouteConfig
+
+    # Fab floors for the via-in-pad clamp (#202): when a chosen via sits ON its
+    # pad, size it to the pad edge so it can't bulge into a neighbouring net.
+    fab = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4)
+    clamp_n = floor_n = 0
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
     # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
@@ -250,7 +257,15 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 tracks.append({'start': (px, py), 'end': (vx, vy),
                                'width': track_width, 'layer': footprint.layer,
                                'net_id': pi.pad.net_id})
-            vias.append({'x': vx, 'y': vy, 'size': via_size, 'drill': via_drill,
+                v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
+            else:
+                # via-in-pad: clamp to the pad edge so it never bulges past it (#202)
+                v_size, v_drill, status = clamp_via_to_pad(via_size, via_drill, pi.pad, fab)
+                if status == 'clamped':
+                    clamp_n += 1
+                elif status == 'floor':
+                    floor_n += 1
+            vias.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
                          'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
 
     print(f"  Underpad via-drop: {len(vias)} vias placed, {len(dropped)} dropped "
@@ -259,6 +274,12 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
           f"{f', {n_alt} side(s) used an alternative stagger' if n_alt else ''})")
     if dropped:
         print(f"    dropped (no clear via offset): {dropped}")
+    if clamp_n:
+        print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    if floor_n:
+        print(f"    WARNING: {floor_n} pad(s) smaller than the fab via floor "
+              f"({fab['fine_via_diameter']:.2f}mm dia); via held at the floor and "
+              f"still bulges past the pad edge")
     return tracks, vias, dropped
 
 

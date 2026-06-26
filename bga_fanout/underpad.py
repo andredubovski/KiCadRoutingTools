@@ -29,6 +29,8 @@ from typing import Dict, List, Optional, Tuple
 
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
+from bga_fanout.geometry import clamp_via_to_pad
+from list_nets import fab_floors
 
 
 # Cardinal + diagonal steps; straight moves are cheaper so routes stay straight.
@@ -248,6 +250,22 @@ def generate_underpad_escape(footprint: Footprint,
     via_keep = via_r + track_width / 2 + clearance + margin
     trk_keep = track_width + clearance + margin  # other centerlines stay this far
 
+    # Issue #202: size each via-in-pad to fit its OWN pad up front, so the via
+    # never bulges past the pad edge AND the keep-out reserved below uses the
+    # real (smaller) via -- letting neighbouring escapes route past it. Done
+    # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
+    fab = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4)
+    clamp_stats = {'clamped': 0, 'floor': 0}
+
+    def via_for_pad(p):
+        """Clamped (size, drill, keepout_radius) for a via dropped in pad p."""
+        cs, cd, status = clamp_via_to_pad(via_size, via_drill, p, fab)
+        if status == 'clamped':
+            clamp_stats['clamped'] += 1
+        elif status == 'floor':
+            clamp_stats['floor'] += 1
+        return cs, cd, cs / 2 + track_width / 2 + clearance + margin
+
     # Static obstacles ---------------------------------------------------------
     # EVERY footprint pad blocks copper - including unconnected (net 0) balls,
     # which still occupy F.Cu. SMD blocks only F.Cu; through-hole blocks all
@@ -404,10 +422,13 @@ def generate_underpad_escape(footprint: Footprint,
                                'layer': layers[li], 'net_id': net_id})
         for (ix, iy) in via_cells:
             # snap to the pad centre only if the via is still in the pad cell
-            vx, vy = (p.global_x, p.global_y) if (ix, iy) == (sx, sy) else occ.xy(ix, iy)
-            occ.block_all(vx, vy, via_keep)
-            vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
-                                'drill': via_drill,
+            in_pad = (ix, iy) == (sx, sy)
+            vx, vy = (p.global_x, p.global_y) if in_pad else occ.xy(ix, iy)
+            # via-in-pad: clamp to the pad (#202); off-pad transition vias keep size
+            v_size, v_drill, vkeep = via_for_pad(p) if in_pad else (via_size, via_drill, via_keep)
+            occ.block_all(vx, vy, vkeep)
+            vias_to_add.append({'x': vx, 'y': vy, 'size': v_size,
+                                'drill': v_drill,
                                 'layers': [layers[0], layers[-1]], 'net_id': net_id})
             nvia += 1
 
@@ -507,9 +528,10 @@ def generate_underpad_escape(footprint: Footprint,
                         tracks.append({'start': a, 'end': b, 'width': track_width,
                                        'layer': layers[L], 'net_id': pad.net_id})
                     if use_via:
-                        occ.block_all(pad.global_x, pad.global_y, via_keep)
+                        v_size, v_drill, vkeep = via_for_pad(pad)
+                        occ.block_all(pad.global_x, pad.global_y, vkeep)
                         vias_to_add.append({'x': pad.global_x, 'y': pad.global_y,
-                                            'size': via_size, 'drill': via_drill,
+                                            'size': v_size, 'drill': v_drill,
                                             'layers': [layers[0], layers[-1]],
                                             'net_id': pad.net_id})
                         nvia += 1
@@ -579,9 +601,10 @@ def generate_underpad_escape(footprint: Footprint,
                             tracks.append({'start': a, 'end': b, 'width': track_width,
                                            'layer': layers[L], 'net_id': pad.net_id})
                         if use_via:
-                            occ.block_all(pad.global_x, pad.global_y, via_keep)
+                            v_size, v_drill, vkeep = via_for_pad(pad)
+                            occ.block_all(pad.global_x, pad.global_y, vkeep)
                             vias_to_add.append({'x': pad.global_x, 'y': pad.global_y,
-                                                'size': via_size, 'drill': via_drill,
+                                                'size': v_size, 'drill': v_drill,
                                                 'layers': [layers[0], layers[-1]],
                                                 'net_id': pad.net_id})
                             nvia += 1
@@ -677,4 +700,11 @@ def generate_underpad_escape(footprint: Footprint,
         print(f"  Under-pad escape: {len(signal_pads)-len(failed)}/{len(signal_pads)} "
               f"signals escaped, {nvia} vias, {len(plane_pads)} plane balls skipped"
               f"{already}{pairs_msg}, {len(failed)} failed")
+        if clamp_stats['clamped']:
+            print(f"  Under-pad: clamped {clamp_stats['clamped']} via-in-pad(s) to "
+                  f"fit their pad edge (#202)")
+        if clamp_stats['floor']:
+            print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
+                  f"the fab via floor ({fab['fine_via_diameter']:.2f}mm dia); via held "
+                  f"at the floor and still bulges past the pad edge")
     return tracks, vias_to_add, failed

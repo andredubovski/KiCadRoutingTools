@@ -5,9 +5,57 @@ Functions for calculating 45-degree stubs, exit points, and jog endpoints.
 """
 
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
+
+
+def clamp_via_to_pad(via_size: float, via_drill: float, pad,
+                     fab: Dict) -> Tuple[float, float, str]:
+    """Issue #202: shrink a via-in-pad so it never bulges past the pad edge.
+
+    A via dropped at a pad centre whose diameter exceeds the pad's smallest
+    dimension bulges past the pad copper. A neighbouring different-net trace that
+    legitimately cleared the (smaller) pad then grazes the (larger) via -- a real
+    VIA-SEGMENT DRC error baked into the board before any signal routing runs
+    (the dominant via-seg source on keks: 163 grazes from Ø0.5 vias in 0.41 mm
+    pads).
+
+    Clamp the via to the pad's min dimension (a circular via inscribes a
+    rect/oval pad at min(size_x, size_y); for a circle pad that is the diameter),
+    but NEVER below the fab via floor -- a pad smaller than the smallest
+    manufacturable via keeps that floor via (it still bulges) rather than ship an
+    unmanufacturable one. The drill follows to hold the annular ring at the fab
+    floor.
+
+    The clamp belongs at via PLACEMENT (not a post-pass) so the escape's own
+    keep-out modelling uses the real, smaller via and neighbouring fanout tracks
+    can route past it.
+
+    Returns (size, drill, status): 'fits' (unchanged), 'clamped' (shrunk to fit),
+    or 'floor' (pad < fab floor, via clamped to the floor but still bulges).
+    """
+    pad_min = min(pad.size_x, pad.size_y)
+    if via_size <= pad_min + 1e-9:
+        return via_size, via_drill, 'fits'
+
+    floor_dia = fab['fine_via_diameter']
+    floor_drill = fab['fine_via_drill']
+    # The fab's SMALLEST manufacturable annular ring -- the one the fine via pair
+    # itself uses ((0.30-0.15)/2 = 0.075 on 4-layer), NOT the larger standard ring
+    # fab['annular'] (which would force the drill below the floor and needlessly
+    # over-shrink a via that fits the pad fine).
+    min_annular = (floor_dia - floor_drill) / 2.0
+
+    if pad_min < floor_dia - 1e-9:
+        # Even the smallest manufacturable via bulges past this pad.
+        return floor_dia, floor_drill, 'floor'
+
+    new_size = round(pad_min, 4)
+    # Keep the configured drill, only thinning it as far as the ring needs, and
+    # never below the fab drill floor.
+    new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
+    return new_size, round(new_drill, 4), 'clamped'
 
 
 def create_45_stub(pad_x: float, pad_y: float,

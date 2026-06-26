@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from net_queries import matches_net_filter
+from list_nets import fab_floors
 from kicad_writer import add_tracks_and_vias_to_pcb
 from bga_fanout.types import (
     create_track,
@@ -43,6 +44,7 @@ from bga_fanout.geometry import (
     create_45_stub,
     calculate_exit_point,
     calculate_jog_end,
+    clamp_via_to_pad,
 )
 from bga_fanout.escape import (
     find_escape_channel,
@@ -638,6 +640,13 @@ def manage_vias(
     vias_to_add: List[Dict] = []
     vias_to_remove: List[Dict] = []
 
+    # Fab floors for the via-in-pad clamp (#202): floor is a board property
+    # (2- vs 4-layer), so key off the board's total copper count.
+    copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    fab = fab_floors(copper)
+    clamped_count = 0
+    floor_pads = 0
+
     # Check distance threshold: via is "at pad" if within via radius + small tolerance
     via_proximity_threshold = via_size / 2 + 0.1
 
@@ -658,18 +667,32 @@ def manage_vias(
         else:
             # Routing on inner/bottom layer - via needed only for SMD pads
             if not is_through_hole and not existing_via:
-                if not would_overlap_existing_via(pad_x, pad_y, via_size):
+                # Size the via to fit its pad up front (#202) so it never bulges
+                # past the pad edge into a neighbouring different-net trace.
+                v_size, v_drill, status = clamp_via_to_pad(
+                    via_size, via_drill, route.pad, fab)
+                if status == 'clamped':
+                    clamped_count += 1
+                elif status == 'floor':
+                    floor_pads += 1
+                if not would_overlap_existing_via(pad_x, pad_y, v_size):
                     vias_to_add.append({
                         'x': pad_x,
                         'y': pad_y,
-                        'size': via_size,
-                        'drill': via_drill,
+                        'size': v_size,
+                        'drill': v_drill,
                         'layers': ['F.Cu', 'B.Cu'],
                         'net_id': route.net_id
                     })
 
     if vias_to_add:
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
+    if clamped_count:
+        print(f"  Clamped {clamped_count} via-in-pad(s) to fit their pad edge (#202)")
+    if floor_pads:
+        print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
+              f"({fab['fine_via_diameter']:.2f}mm dia); via held at the floor and "
+              f"still bulges past the pad edge")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
 
