@@ -129,6 +129,12 @@ class NetSelectionPanel(wx.Panel):
         self._diff_pairs = {}  # base_name -> (p_net_id, n_net_id) when in diff mode
         self._on_selection_changed = None  # Callback when selection changes
         self._on_tabbed_view_changed = None  # Callback when tabbed view is created/destroyed
+        # Optional: keep electrically-short diff-pair nets visible even when
+        # "Hide differential" is on, so they can be routed single-ended. Set by
+        # the main dialog to wire the Differential tab's "Hide short routes".
+        self._short_nets_provider = None      # () -> set of net_ids
+        self._hide_short_enabled_fn = None    # () -> bool
+        self._short_nets = set()              # net_ids kept visible under hide_diff
 
         # Net class separation
         self._separate_by_netclass = False
@@ -410,11 +416,29 @@ class NetSelectionPanel(wx.Panel):
         if self._auto_hide_differential and not self._differential_mode:
             hide_diff = True
 
+        # Electrically-short pairs are deferred to single-ended routing, so when
+        # "Hide short routes" is on they stay visible here even under hide_diff.
+        self._short_nets = set()
+        if (hide_diff and not self._differential_mode
+                and self._hide_short_enabled_fn and self._short_nets_provider
+                and self._hide_short_enabled_fn()):
+            try:
+                self._short_nets = self._short_nets_provider() or set()
+            except Exception:
+                self._short_nets = set()
+
         # Populate either single list or tabbed lists
         if self._separate_by_netclass and self._tabbed_net_lists:
             self._populate_tabbed_lists(filtered_nets, hide_checked, hide_diff)
         else:
             self._populate_single_list(filtered_nets, hide_checked, hide_diff)
+
+    def set_short_net_filter(self, short_nets_provider, hide_short_enabled_fn):
+        """Wire the Differential tab's 'Hide short routes': short (deferred) pair
+        nets are kept visible under 'Hide differential' so they route single-ended.
+        short_nets_provider() -> set of net_ids; hide_short_enabled_fn() -> bool."""
+        self._short_nets_provider = short_nets_provider
+        self._hide_short_enabled_fn = hide_short_enabled_fn
 
     def _populate_single_list(self, filtered_nets, hide_checked, hide_diff):
         """Populate the single CheckListBox."""
@@ -424,9 +448,11 @@ class NetSelectionPanel(wx.Panel):
             if hide_checked and self._check_fn and not self._suspend_check:
                 if self._check_fn(net_id):
                     continue
-            # Check if should be hidden (differential)
+            # Check if should be hidden (differential) - but keep short pairs,
+            # which are routed single-ended
             if hide_diff and self._is_differential_net(name):
-                continue
+                if net_id not in self._short_nets:
+                    continue
             idx = self.net_list.Append(name)
             # Restore checked state
             if name in self._checked_nets:
@@ -446,9 +472,11 @@ class NetSelectionPanel(wx.Panel):
             if hide_checked and self._check_fn and not self._suspend_check:
                 if self._check_fn(net_id):
                     continue
-            # Check if should be hidden (differential)
+            # Check if should be hidden (differential) - but keep short pairs,
+            # which are routed single-ended
             if hide_diff and self._is_differential_net(name):
-                continue
+                if net_id not in self._short_nets:
+                    continue
             class_name = self._net_to_class.get(name, 'Default')
             if class_name in nets_by_class:
                 nets_by_class[class_name].append((name, net_id))

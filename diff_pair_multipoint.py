@@ -223,6 +223,30 @@ def leg_electrically_short(term_a: Tuple[Pad, Pad], term_b: Tuple[Pad, Pad],
     return min(p_dist, n_dist) < threshold
 
 
+def diff_pair_is_short(pcb_data: PCBData, p_net_id: int, n_net_id: int,
+                       track_width: float, diff_pair_gap: float,
+                       centerline_setback: float = None) -> bool:
+    """True if a pair would be wholly deferred to single-ended as electrically
+    short -- the same test route_diff applies before routing (diff_pair_loop:
+    a 2-terminal pair whose single leg is electrically short is left for the
+    single-ended pass). Used by the GUI to hide short pairs from the diff-pair
+    list and to keep them visible on the single-ended list. Conservative for
+    multi-point pairs (3+ terminals): those may still couple some legs, so they
+    are never reported short here. Reuses leg_electrically_short so the GUI and
+    the router agree on what counts as short.
+
+    centerline_setback mirrors the GUI control: None or <= 0 means auto."""
+    from types import SimpleNamespace
+    terminals = get_diff_pair_terminals(pcb_data, p_net_id, n_net_id)
+    if len(terminals) != 2:
+        return False
+    cfg = SimpleNamespace(
+        track_width=track_width, diff_pair_gap=diff_pair_gap,
+        diff_pair_centerline_setback=(centerline_setback
+                                      if centerline_setback else None))
+    return leg_electrically_short(terminals[0], terminals[1], cfg)
+
+
 def classify_terminals(terminals: List[Tuple[Pad, Pad]], config: GridRouteConfig
                        ) -> Tuple[List[Tuple[Pad, Pad]], List[Tuple[Pad, Pad]]]:
     """Split terminals into (coupled, uncoupled).

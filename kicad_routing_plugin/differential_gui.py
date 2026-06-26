@@ -82,6 +82,8 @@ class DiffPairSelectionPanel(wx.Panel):
         self._check_fn = None
         self._suspend_check = False  # Temporarily disable check_fn during restore
         self._component_filter_value = ""
+        self._hide_short = False      # hide electrically-short (deferred) pairs
+        self._short_check_fn = None   # fn(p_net_id, n_net_id) -> bool
 
         self._create_ui(instructions, show_hide_checkbox, show_component_dropdown)
         self._load_diff_pairs()
@@ -258,6 +260,11 @@ class DiffPairSelectionPanel(wx.Panel):
             if hide_connected and self._check_fn and not self._suspend_check:
                 if self._check_fn(p_net_id) and self._check_fn(n_net_id):
                     continue
+            # Check if should be hidden (electrically short -> deferred to
+            # single-ended, so coupling it does nothing)
+            if self._hide_short and self._short_check_fn:
+                if self._short_check_fn(p_net_id, n_net_id):
+                    continue
             idx = self.pair_list.Append(display_name)
             if display_name in self._checked_pairs:
                 self.pair_list.Check(idx, True)
@@ -289,6 +296,15 @@ class DiffPairSelectionPanel(wx.Panel):
     def set_check_function(self, fn):
         """Set connectivity check function."""
         self._check_fn = fn
+
+    def set_short_check_function(self, fn):
+        """Set the short-pair test: fn(p_net_id, n_net_id) -> bool."""
+        self._short_check_fn = fn
+
+    def set_hide_short(self, enabled):
+        """Enable/disable hiding electrically-short (deferred) pairs, then refresh."""
+        self._hide_short = bool(enabled)
+        self._update_pair_list()
 
     def suspend_check(self):
         """Temporarily disable connectivity checking during settings restore."""
@@ -397,12 +413,24 @@ class DifferentialTab(wx.Panel):
         self.get_claude_params = get_claude_params
         self._routing_thread = None
         self._cancel_requested = False
+        # Called when "Hide short routes" or a param affecting it changes, so the
+        # main dialog can refresh the Basic tab's single-ended net list too.
+        self.on_hide_short_changed = None
+        self._short_cache = {}  # (params_key, p_net_id, n_net_id) -> bool
 
         self._create_ui()
 
         # Set up connectivity check
         if self.get_connectivity_check:
             self.pair_panel.set_check_function(self.get_connectivity_check())
+        # Wire short-pair hiding (default on)
+        self.pair_panel.set_short_check_function(self._is_short_pair)
+        self.pair_panel.set_hide_short(self.hide_short_check.GetValue())
+        # Pair Width / Gap / Centerline Setback change the short threshold, so a
+        # change must re-evaluate which pairs are short.
+        for ctrl in (self.diff_pair_width, self.diff_pair_gap, self.centerline_setback):
+            ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_short_param_changed)
+            ctrl.Bind(wx.EVT_TEXT, self._on_short_param_changed)
 
     def _create_ui(self):
         """Create the tab UI."""
@@ -544,6 +572,16 @@ class DifferentialTab(wx.Panel):
         self.intra_match_check.SetToolTip("Add meanders to shorter track of each pair for P/N matching")
         options_sizer.Add(self.intra_match_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.hide_short_check = wx.CheckBox(self, label="Hide short routes")
+        self.hide_short_check.SetValue(True)
+        self.hide_short_check.SetToolTip(
+            "Hide electrically-short pairs that the router defers to single-ended "
+            "routing (coupling a sub-few-mm run gains nothing). They drop out of "
+            "the differential pair list here, and stay visible on the Basic tab "
+            "(so they get routed single-ended) even when 'Hide differential' is on.")
+        self.hide_short_check.Bind(wx.EVT_CHECKBOX, self._on_hide_short_changed)
+        options_sizer.Add(self.hide_short_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         right_sizer.Add(options_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Status
@@ -578,6 +616,59 @@ class DifferentialTab(wx.Panel):
         main_sizer.Add(right_sizer, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(main_sizer)
+
+    def _short_params(self):
+        """Current (track_width, gap, centerline_setback) driving the short test."""
+        return (self.diff_pair_width.GetValue(),
+                self.diff_pair_gap.GetValue(),
+                self.centerline_setback.GetValue())
+
+    def _is_short_pair(self, p_net_id, n_net_id):
+        """Whether this pair would be deferred to single-ended as electrically
+        short, given the current Pair Width / Gap / Centerline Setback. Cached
+        per (params, pair)."""
+        from diff_pair_multipoint import diff_pair_is_short
+        width, gap, setback = self._short_params()
+        key = ((round(width, 6), round(gap, 6), round(setback, 6)), p_net_id, n_net_id)
+        if key not in self._short_cache:
+            try:
+                self._short_cache[key] = diff_pair_is_short(
+                    self.pcb_data, p_net_id, n_net_id, width, gap, setback)
+            except Exception:
+                self._short_cache[key] = False
+        return self._short_cache[key]
+
+    def is_hide_short_enabled(self):
+        """True when short (deferred) pairs should be hidden from diff lists and
+        kept on the single-ended list."""
+        return self.hide_short_check.GetValue()
+
+    def get_short_pair_net_ids(self):
+        """Net ids (P and N) of every pair that is currently electrically short.
+        Used by the Basic tab to keep these single-ended nets visible even when
+        'Hide differential' is on."""
+        ids = set()
+        for _display, _base, p_net_id, n_net_id in self.pair_panel.all_pairs:
+            if self._is_short_pair(p_net_id, n_net_id):
+                ids.add(p_net_id)
+                ids.add(n_net_id)
+        return ids
+
+    def _on_hide_short_changed(self, event):
+        """Toggle hiding short pairs; refresh this list and the Basic tab list."""
+        self.pair_panel.set_hide_short(self.hide_short_check.GetValue())
+        if self.on_hide_short_changed:
+            self.on_hide_short_changed()
+
+    def _on_short_param_changed(self, event):
+        """A param affecting the short threshold changed - drop the cache and
+        refresh both lists if short hiding is active."""
+        event.Skip()
+        self._short_cache.clear()
+        if self.hide_short_check.GetValue():
+            self.pair_panel.refresh()
+            if self.on_hide_short_changed:
+                self.on_hide_short_changed()
 
     def _on_ask_claude_diff_pairs(self):
         """Run /identify-diff-pairs headless and update the pair selection

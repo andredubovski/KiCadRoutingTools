@@ -1404,6 +1404,13 @@ class RoutingDialog(wx.Dialog):
                 'effort': self.claude_tab.get_effort_value(),
             }
         )
+        # Wire the Differential tab's "Hide short routes" to the Basic net list:
+        # short (deferred) pairs stay visible there under "Hide differential" so
+        # they get routed single-ended, and toggling it refreshes that list.
+        self.net_panel.set_short_net_filter(
+            self.differential_tab.get_short_pair_net_ids,
+            self.differential_tab.is_hide_short_enabled)
+        self.differential_tab.on_hide_short_changed = lambda: self.net_panel.refresh()
         return self.differential_tab
 
     def _create_advanced_tab(self):
@@ -1491,6 +1498,11 @@ class RoutingDialog(wx.Dialog):
     def _on_main_tab_changed(self, event):
         """Handle main notebook tab change - validate settings when switching tabs."""
         event.Skip()  # Allow normal tab switching
+
+        # Switching to the Basic tab (index 0): refresh the net list so short
+        # (deferred) pairs reflect the current Differential-tab params/toggle.
+        if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
+            self.net_panel.refresh()
 
         # Check if switching to Planes tab (index 4)
         if event.GetSelection() == 4:
