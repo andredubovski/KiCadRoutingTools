@@ -95,6 +95,45 @@ def is_check_cmd(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
 
 
+def seed_input_boards(manifest, cmds, dest_dir):
+    """Copy 'input-only' relative .kicad_pcb files into the replay dest dir.
+
+    Some runs start from a board the agent renamed/copied into the run dir (e.g.
+    `<board>_input.kicad_pcb`) WITHOUT that copy being a recorded command, then
+    reference it by a RELATIVE path. On replay into a fresh dir those files don't
+    exist, so the very first command fails and the whole chain breaks (e.g.
+    usb_sniffer). Such files are 'input-only': referenced as an argument but never
+    produced as any command's output. Copy them from the manifest's own dir (the
+    original run dir) into dest so relative-path inputs resolve.
+
+    Absolute-path inputs (the source board under boards_unrouted*/) already resolve
+    and are skipped. Returns the list of basenames seeded."""
+    def kpcb(argv):
+        return [t for t in argv if t.endswith(".kicad_pcb")]
+    produced, referenced = set(), set()
+    for _cwd, argv in cmds:
+        if is_check_cmd(argv):
+            continue
+        toks = kpcb(argv)
+        if toks:
+            produced.add(os.path.basename(toks[-1]))  # last .kicad_pcb = output
+        for t in toks:
+            referenced.add(t)
+    src_dir = os.path.dirname(os.path.abspath(manifest))
+    seeded = []
+    for t in sorted(referenced):
+        base = os.path.basename(t)
+        if os.path.isabs(t) or base in produced:
+            continue  # absolute inputs resolve already; produced files get written
+        src = os.path.join(src_dir, base)
+        dst = os.path.join(dest_dir, base)
+        if os.path.exists(src) and not os.path.exists(dst):
+            import shutil
+            shutil.copy2(src, dst)
+            seeded.append(base)
+    return seeded
+
+
 def main():
     ap = argparse.ArgumentParser(description="Replay a recorded stress-test manifest (no LLM).")
     ap.add_argument("manifest", help="Path to redo_commands.sh manifest")
@@ -138,6 +177,15 @@ def main():
     print(f"Replaying {len(cmds)} recorded command(s) from {args.manifest}")
     if remaps:
         print("Remaps: " + ", ".join(f"{o} -> {n}" for o, n in remaps))
+
+    # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
+    # so the first command finds them -- without this the chain breaks (issue: a
+    # relative seed file the original run dir had but no recorded command produces).
+    dest_dirs = [args.workdir] if args.workdir else [n for _o, n in remaps]
+    for d in dest_dirs:
+        seeded = seed_input_boards(args.manifest, cmds, d)
+        if seeded:
+            print(f"Seeded input board(s) into {d}: {', '.join(seeded)}")
 
     failures = 0
     timings = []   # per-command (index, seconds, returncode, argv) for later comparison
