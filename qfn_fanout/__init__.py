@@ -395,12 +395,24 @@ def generate_qfn_fanout(footprint: Footprint,
     # Max diagonal length for corner pads = chip_width / 3
     max_diagonal_length = max(layout.width, layout.height) / 3
 
+    # Per-side outermost pad offset (issue #200): normalizes the fan-angle ramp
+    # so the corner pad on each side reaches a true 45 deg (the last pad is
+    # inset from the bbox corner, so a bbox-half normalization would stop short).
+    side_max_off: Dict[str, float] = {}
+    for pi in pad_infos:
+        ex, ey = pi.escape_direction
+        tan_x, tan_y = -ey, ex
+        off = abs((pi.pad.global_x - layout.center_global_x) * tan_x +
+                  (pi.pad.global_y - layout.center_global_y) * tan_y)
+        side_max_off[pi.side] = max(side_max_off.get(pi.side, 0.0), off)
+
     for pad_info in pad_infos:
         # Straight stub length = pad_width / 2 + extension (to clear the pad before bending)
         # pad_width is the dimension perpendicular to the chip edge (escape direction)
         straight_length = pad_info.pad_width / 2 + extension
         corner_pos, stub_end = calculate_fanout_stub(
-            pad_info, layout, straight_length, max_diagonal_length, grid_step
+            pad_info, layout, straight_length, max_diagonal_length, grid_step,
+            angle_ref_off=side_max_off.get(pad_info.side, 0.0)
         )
 
         stub = FanoutStub(
@@ -520,12 +532,12 @@ def generate_qfn_fanout(footprint: Footprint,
 
     print(f"  Generated {len(tracks)} track segments ({len(stubs)} stubs x 2 segments)")
 
-    # Fine-pitch escape warning (issue #97): the 45-degree fan keeps adjacent
-    # stubs parallel at pitch/sqrt(2) forever - fanning separates tips along
-    # the diagonal, not laterally. At common defaults (clearance 0.25) the
-    # router cannot launch from or pass between these stubs and every net
-    # fails with 'no rippable blockers found'. Tell the user the workable
-    # parameters up front instead.
+    # Fine-pitch escape warning (issue #97): the corner stubs reach a full
+    # 45 deg fan, so the tightest adjacent pair sits about pitch/sqrt(2) apart
+    # (inner stubs diverge wider, issue #200). At common defaults (clearance
+    # 0.25) the router cannot launch from or pass between these stubs and every
+    # net fails with 'no rippable blockers found'. Tell the user the workable
+    # parameters up front instead. (pitch/sqrt2 is the conservative lower bound.)
     if layout.pad_pitch and layout.pad_pitch < 0.8:
         lateral = layout.pad_pitch / math.sqrt(2)
         # Escape at the stub's own width: route_track/2 + clearance +
@@ -605,7 +617,6 @@ def main():
                              '(via-in-pad), so a via boxed in on the outward side can '
                              'stagger inward toward the chip instead of being dropped. '
                              'The via still must clear other-net pads, vias and tracks.')
-
     args = parser.parse_args()
 
     print(f"Parsing {args.pcb}...")
