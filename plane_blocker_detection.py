@@ -185,6 +185,21 @@ def find_route_blocker_from_frontier(
     blocked_set = set(blocked_cells)
     protected = protected_net_ids or set()
 
+    # Frontier bbox prefilter (#225): every membership test below is on layer 0,
+    # so only layer-0 frontier cells can ever match, and a segment/via contributes
+    # only if its clearance-expanded window overlaps that frontier. The router's
+    # blocked frontier is local, but this function used to walk EVERY board track
+    # and via (with a per-cell window scan), costing ~27s of rip-up handling on
+    # daisho. Skipping copper whose expanded bbox can't reach the frontier is an
+    # exact necessary-condition cull -- the counts (and the chosen blocker) are
+    # unchanged. No layer-0 frontier cell -> nothing can match (was: empty tally).
+    _l0x = [gx for (gx, gy, l) in blocked_set if l == 0]
+    if not _l0x:
+        return None
+    _l0y = [gy for (gx, gy, l) in blocked_set if l == 0]
+    bb_min_x, bb_max_x = min(_l0x), max(_l0x)
+    bb_min_y, bb_max_y = min(_l0y), max(_l0y)
+
     # Count how many blocked cells each net is responsible for (including protected)
     net_block_count: Dict[int, int] = {}
 
@@ -210,6 +225,13 @@ def find_route_blocker_from_frontier(
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
 
+        # Skip segments whose expanded window can't reach the frontier bbox.
+        if (max(gx1, gx2) + expansion_grid < bb_min_x or
+                min(gx1, gx2) - expansion_grid > bb_max_x or
+                max(gy1, gy2) + expansion_grid < bb_min_y or
+                min(gy1, gy2) - expansion_grid > bb_max_y):
+            continue
+
         count = 0
         for gx, gy in walk_line(gx1, gy1, gx2, gy2):
             # Check expansion around this point
@@ -233,6 +255,10 @@ def find_route_blocker_from_frontier(
         via_expansion_grid = max(1, coord.to_grid_dist(via_r + config.track_width / 2 + config.clearance))
 
         gx, gy = coord.to_grid(via.x, via.y)
+        # Skip vias whose expanded window can't reach the frontier bbox.
+        if (gx + via_expansion_grid < bb_min_x or gx - via_expansion_grid > bb_max_x or
+                gy + via_expansion_grid < bb_min_y or gy - via_expansion_grid > bb_max_y):
+            continue
         count = 0
         for ex in range(-via_expansion_grid, via_expansion_grid + 1):
             for ey in range(-via_expansion_grid, via_expansion_grid + 1):

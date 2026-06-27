@@ -13,7 +13,7 @@ import numpy as np
 
 from kicad_parser import PCBData, Pad, Segment
 from routing_config import GridRouteConfig, GridCoord
-from routing_utils import iter_pad_blocked_cells, segment_blocked_cells_array
+from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, segment_blocked_cells_array
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
                           block_via_cells_near_drills,
@@ -468,11 +468,19 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     else:
         corner_radius = 0
 
-    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
-                                                   off_x=pad.global_x - gx * coord.grid_step,
-                                                   off_y=pad.global_y - gy * coord.grid_step,
-                                                   rotation_deg=pad.rect_rotation):
-        obstacles.add_blocked_via(cell_gx, cell_gy)
+    # Vectorized: pad_blocked_cells_array is the bit-identical twin of
+    # iter_pad_blocked_cells (verified in tests/test_pad_offset_keepout.py), and
+    # one add_blocked_vias_batch replaces a per-cell Python loop + per-cell Rust
+    # call. This is the route.py obstacle-builder path (obstacle_map.py), which
+    # the plane via map had not yet picked up (#225 -- ~38M scalar cell calls per
+    # GND build on daisho).
+    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                    config.grid_step, corner_radius,
+                                    off_x=pad.global_x - gx * coord.grid_step,
+                                    off_y=pad.global_y - gy * coord.grid_step,
+                                    rotation_deg=pad.rect_rotation)
+    if len(cells):
+        obstacles.add_blocked_vias_batch(cells)
 
 
 def _is_rectangular_outline(board_outline: List[Tuple[float, float]],
@@ -773,11 +781,17 @@ def build_routing_obstacle_map(
                         corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
                     else:
                         corner_radius = 0
-                    for cell_gx, cell_gy in iter_pad_blocked_cells(gx, gy, half_width, half_height, margin, config.grid_step, corner_radius,
-                                                                   off_x=pad.global_x - gx * coord.grid_step,
-                                                                   off_y=pad.global_y - gy * coord.grid_step,
-                                                                   rotation_deg=pad.rect_rotation):
-                        obstacles.add_blocked_cell(cell_gx, cell_gy, layer_idx)
+                    # Vectorized (bit-identical twin + batch), mirroring route.py's
+                    # obstacle builder; the plane routing map had kept the scalar
+                    # per-cell loop (#225).
+                    cells = pad_blocked_cells_array(gx, gy, half_width, half_height, margin,
+                                                    config.grid_step, corner_radius,
+                                                    off_x=pad.global_x - gx * coord.grid_step,
+                                                    off_y=pad.global_y - gy * coord.grid_step,
+                                                    rotation_deg=pad.rect_rotation)
+                    if len(cells):
+                        layer_col = np.full((cells.shape[0], 1), layer_idx, dtype=np.int32)
+                        obstacles.add_blocked_cells_batch(np.hstack([cells, layer_col]))
                     pad_count += 1
     if verbose:
         print(f"  Pads: {pad_count} pads in {time.time() - t0:.2f}s")
@@ -816,12 +830,19 @@ def build_routing_obstacle_map(
         r_mm = via.size / 2 + route_track_w / 2 + config.clearance + config.grid_step / 2
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
-        for ex in range(-rg, rg + 1):
-            for ey in range(-rg, rg + 1):
-                ddx = (gx + ex) * config.grid_step - via.x
-                ddy = (gy + ey) * config.grid_step - via.y
-                if ddx * ddx + ddy * ddy <= r_sq:
-                    obstacles.add_blocked_cell(gx + ex, gy + ey, layer_idx)
+        # Vectorized real-centre disc (bit-identical to the scalar double loop:
+        # same (gx+ex)*step - via.x distance and <= r_sq test), one batch call (#225).
+        ex = np.arange(-rg, rg + 1, dtype=np.int32)
+        exg, eyg = np.meshgrid(ex, ex, indexing="ij")
+        ddx = (gx + exg) * config.grid_step - via.x
+        ddy = (gy + eyg) * config.grid_step - via.y
+        mask = (ddx * ddx + ddy * ddy) <= r_sq
+        if mask.any():
+            vcells = np.empty((int(mask.sum()), 3), dtype=np.int32)
+            vcells[:, 0] = exg[mask] + gx
+            vcells[:, 1] = eyg[mask] + gy
+            vcells[:, 2] = layer_idx
+            obstacles.add_blocked_cells_batch(vcells)
         via_count += 1
     if verbose:
         print(f"  Vias: {via_count} vias in {time.time() - t0:.2f}s")

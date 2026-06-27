@@ -1363,8 +1363,13 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 free=False  # Parse free from content if present
             )
             vias.append(via)
-        # Check for free flag in matched vias
-        if vias:
+        # Check for free flag in matched vias. The free_pattern below has two
+        # DOTALL `.*?` gaps, so on a board with NO free via it backtracks from
+        # every `(via` to EOF looking for a `(free yes)` that isn't there --
+        # O(vias x filesize), ~32s on daisho's 1574 vias (issue #225). Guard on a
+        # single linear scan for the token; absent it, no via is free and
+        # free_uuids is empty (identical result).
+        if vias and re.search(r'\(free\s+yes\)', content):
             free_pattern = r'\(via\s+\(at\s+[\d.-]+\s+[\d.-]+\).*?\(free\s+yes\).*?\(uuid\s+"([^"]+)"\)'
             free_uuids = {m.group(1) for m in re.finditer(free_pattern, content, re.DOTALL)}
             for via in vias:
