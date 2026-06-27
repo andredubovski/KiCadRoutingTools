@@ -8,7 +8,7 @@ during diff pair or single-ended routing, extracted from route.py.
 import time
 from typing import List, Tuple
 
-from routing_state import RoutingState, record_net_event
+from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
 from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
@@ -231,7 +231,7 @@ def run_reroute_loop(
 
                         blockers = analyze_frontier_blocking(
                             blocked_cells, pcb_data, config, routed_net_paths,
-                            exclude_net_ids={ripped_net_id},
+                            exclude_net_ids=rip_exclude_set(state, ripped_net_id),
                             target_xy=reroute_target_xy,
                             source_xy=reroute_source_xy,
                             obstacle_cache=obstacle_cache
@@ -250,7 +250,7 @@ def run_reroute_loop(
                                 print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                                 fresh_blockers = analyze_frontier_blocking(
                                     last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                    exclude_net_ids={ripped_net_id},
+                                    exclude_net_ids=rip_exclude_set(state, ripped_net_id),
                                     target_xy=reroute_target_xy,
                                     source_xy=reroute_source_xy,
                                     obstacle_cache=obstacle_cache
@@ -325,6 +325,7 @@ def run_reroute_loop(
                                 # Invalidate obstacle cache for ripped nets and record rip events
                                 for rid in ripped_ids:
                                     invalidate_obstacle_cache(obstacle_cache, rid)
+                                    record_rip_ancestry(state, ripped_net_id, rid)
                                     record_net_event(state, rid, "ripped_by", {
                                         "ripping_net_id": ripped_net_id,
                                         "ripping_net_name": ripped_net_name,

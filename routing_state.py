@@ -55,6 +55,13 @@ class RoutingState:
     # restore, so they were left ripped instead. Given a clean reroute pass
     # after Phase 3 so the collision-safe restore does not cost completion.
     collision_refused_net_ids: Set[int] = field(default_factory=set)
+    # Rip-up cycle guard across the reroute QUEUE (extends the phase3 recursion
+    # guard, commit e3e4b57, to the single-ended rip/reroute paths). Maps a net to
+    # the set of nets that ripped it (transitively) to get here; that net must not
+    # rip any of them back, which breaks the A->B->A rip-up oscillation that ends
+    # in a restore-crossing (cparti +1V8<->B_{n}ON). No clearing needed: a net only
+    # re-routes after being ripped, so its ancestry is always freshly set then.
+    rip_ancestry: Dict[int, Any] = field(default_factory=dict)
 
     # Tracking sets
     polarity_swapped_pairs: Set[str] = field(default_factory=set)
@@ -200,6 +207,27 @@ def record_net_event(state: RoutingState, net_id: int, event: str, details: Dict
         "sequence": state.route_index,
         "details": details or {}
     })
+
+
+def record_rip_ancestry(state: RoutingState, ripper_net_id: int, ripped_net_id: int):
+    """Cycle guard for the reroute queue (extends phase3's recursion guard e3e4b57).
+
+    Record that ``ripper`` ripped ``ripped`` -- so when ``ripped`` is later
+    re-routed it will not rip ``ripper`` (or ripper's own ancestors) back. Without
+    this, two nets contending for the same corridor rip each other forever and the
+    war ends in a restore-crossing the obstacle map never saw. Ancestry is the
+    ripper's chain plus the ripper itself; it REPLACES any prior value (a net only
+    re-routes after being ripped, so this is always set fresh at use time)."""
+    if ripper_net_id == ripped_net_id:
+        return
+    anc = (frozenset({ripper_net_id})
+           | state.rip_ancestry.get(ripper_net_id, frozenset())) - {ripped_net_id}
+    state.rip_ancestry[ripped_net_id] = anc
+
+
+def rip_exclude_set(state: RoutingState, net_id: int) -> Set[int]:
+    """Nets a (re)routing net must NOT rip: itself plus its rip-ancestry."""
+    return {net_id} | set(state.rip_ancestry.get(net_id, frozenset()))
 
 
 def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData') -> str:

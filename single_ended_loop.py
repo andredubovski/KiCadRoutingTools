@@ -55,7 +55,7 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     sampled.append(path[-1])
     return sampled
 
-from routing_state import RoutingState, record_net_event
+from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
 from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
@@ -473,7 +473,7 @@ def route_single_ended_nets(
 
                     blockers = analyze_frontier_blocking(
                         blocked_cells, pcb_data, config, routed_net_paths,
-                        exclude_net_ids={net_id},
+                        exclude_net_ids=rip_exclude_set(state, net_id),
                         target_xy=single_target_xy,
                         source_xy=single_source_xy,
                         obstacle_cache=obstacle_cache
@@ -501,7 +501,7 @@ def route_single_ended_nets(
                             print(f"  Re-analyzing {len(last_retry_blocked_cells)} blocked cells from N={N-1} retry:")
                             fresh_blockers = analyze_frontier_blocking(
                                 last_retry_blocked_cells, pcb_data, config, routed_net_paths,
-                                exclude_net_ids={net_id},
+                                exclude_net_ids=rip_exclude_set(state, net_id),
                                 target_xy=single_target_xy,
                                 source_xy=single_source_xy,
                                 obstacle_cache=obstacle_cache
@@ -590,6 +590,7 @@ def route_single_ended_nets(
                             # Invalidate cache for ripped nets
                             for rid in ripped_ids:
                                 invalidate_obstacle_cache(obstacle_cache, rid)
+                                record_rip_ancestry(state, net_id, rid)
                                 # Record rip event for the ripped net
                                 record_net_event(state, rid, "ripped_by", {
                                     "ripping_net_id": net_id,
