@@ -902,7 +902,9 @@ class RoutingDialog(wx.Dialog):
         for layer in self.pcb_data.board_info.copper_layers:
             default_costs.append("1.0" if layer == "F.Cu" else "3.0")
         self.layer_costs_ctrl.SetValue(" ".join(default_costs))
-        self.layer_costs_ctrl.SetToolTip("Per-layer cost multipliers (order: " + " ".join(self.pcb_data.board_info.copper_layers) + ")")
+        self.layer_costs_ctrl.SetToolTip("Per-layer cost multipliers 1.0-1000, or any negative value "
+                                         "(e.g. -1) = forbidden (obstacle/via-span only, no routed copper). "
+                                         "Order: " + " ".join(self.pcb_data.board_info.copper_layers))
         layer_sizer.Add(self.layer_costs_ctrl, 1, wx.EXPAND)
         options_inner.Add(layer_sizer, 0, wx.EXPAND | wx.ALL, 3)
 

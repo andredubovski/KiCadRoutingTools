@@ -192,9 +192,12 @@ class GridRouteConfig:
         for i in range(len(self.layers)):
             if i < len(layer_costs):
                 cost = layer_costs[i]
-                if cost == FORBIDDEN_LAYER_COST:
-                    # Forbidden: pass the sentinel through UNSCALED (do NOT do
-                    # int(-1 * 1000) -> -1000, which Rust would read as a discount).
+                if cost < 0:
+                    # Forbidden: emit the canonical sentinel UNSCALED. The Rust
+                    # router treats ANY negative entry as forbidden, so every
+                    # negative input folds to one value here -- this also avoids
+                    # int(cost * 1000) truncating a tiny negative in (-0.001, 0)
+                    # up to 0 (a zero-cost layer, NOT forbidden).
                     costs.append(FORBIDDEN_LAYER_COST)
                 else:
                     costs.append(int(cost * 1000))

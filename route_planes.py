@@ -1772,13 +1772,12 @@ def create_plane(
         else:
             layer_costs = [1.0 if layer == 'F.Cu' else 3.0 for layer in all_layers]
 
-    # Validate layer costs: -1 = forbidden (no copper placed; still an obstacle),
-    # otherwise a multiplier in [1.0, 1000].
-    from routing_constants import FORBIDDEN_LAYER_COST
+    # Validate layer costs: any negative = forbidden (no copper placed; still an
+    # obstacle), otherwise a multiplier in [1.0, 1000].
     for i, cost in enumerate(layer_costs):
-        if cost != FORBIDDEN_LAYER_COST and (cost < 1.0 or cost > 1000):
+        if cost >= 0 and (cost < 1.0 or cost > 1000):
             layer_name = all_layers[i] if i < len(all_layers) else f"layer {i}"
-            print(f"ERROR: Layer cost for {layer_name} must be -1 (forbidden) or "
+            print(f"ERROR: Layer cost for {layer_name} must be negative (forbidden) or "
                   f"between 1.0 and 1000, got {cost}")
             return (0, 0, 0)
 
@@ -2578,8 +2577,8 @@ Examples:
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
-                        help="Per-layer routing cost multipliers (1.0-1000, or -1 = forbidden: "
-                             "the layer stays an obstacle / via span but gets no routed copper). "
+                        help="Per-layer routing cost multipliers (1.0-1000, or any negative value e.g. -1 = "
+                             "forbidden: the layer stays an obstacle / via span but gets no routed copper). "
                              "Order matches --layers. Example: --layer-costs 1.0 -1 -1 3.0")
 
     # Blocker rip-up options
