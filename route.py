@@ -899,6 +899,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if cycle_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
 
+    # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
+    # write-list results and strips `segments_to_remove`. So an in-scope net's
+    # original input copper survives to the output even after route.py ripped it
+    # and did NOT restore/re-route it -- the net's authoritative final copper is
+    # what's on the board (pcb_data). For a net routed-then-ripped (cparti +1V8),
+    # that stale input copper not only lingers but can CROSS nets that routed into
+    # its vacated corridor while it was ripped. Strip every in-scope net's original
+    # input segment that is no longer on the final board. A segment route.py kept
+    # or re-routed identically is still in pcb_data (matched by signature) and is
+    # NOT stripped, so legitimate copper is untouched.
+    def _seg_sig220(s):
+        a, b = (round(s.start_x, 3), round(s.start_y, 3)), (round(s.end_x, 3), round(s.end_y, 3))
+        return (min(a, b), max(a, b), s.layer)
+    _final_sig_by_net: Dict[int, set] = {}
+    for _s in pcb_data.segments:
+        _final_sig_by_net.setdefault(_s.net_id, set()).add(_seg_sig220(_s))
+    _stale_input_segs = [
+        _s for _nid in sweep_scope_ids
+        for _s in _orig_seg_by_net.get(_nid, [])
+        if _seg_sig220(_s) not in _final_sig_by_net.get(_nid, ())
+    ]
+    if _stale_input_segs:
+        dead_end_input_segments = list(dead_end_input_segments) + _stale_input_segs
+        print(f"Stripped {len(_stale_input_segs)} stale input segment(s) of "
+              f"ripped/re-routed nets not on the final board (#220)")
+
     # Issue #209 fix C: re-check the snapshotted nets against the post-cleanup
     # write-list and report any net a cleanup pass disconnected, listing the
     # dropped copper. A non-empty list here is a cleanup BUG (the routed net was
