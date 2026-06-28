@@ -1578,6 +1578,20 @@ def generate_bga_fanout(footprint: Footprint,
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
+    # Fab-floor clamp (issue #223): an escape stub thinner than the board's
+    # minimum manufacturable track width is un-routable at the stated fab class
+    # (usb_sniffer's /T_USB_* bus was emitted at 0.100mm against a 0.127mm
+    # 2-layer floor -> a whole bus of TRACK-WIDTH violations). The width is a
+    # parameter, not a search outcome, so clamp it up to the fab floor here --
+    # mirroring the same clamp route.py / check_drc.py already apply.
+    from list_nets import fab_floors
+    ncu = len(pcb_data.board_info.copper_layers) if pcb_data.board_info.copper_layers else 2
+    fab_min_track = fab_floors(ncu)['track_width']
+    if track_width < fab_min_track - 1e-9:
+        print(f"  Track width {track_width:.4f}mm is below the {ncu}-layer fab "
+              f"floor {fab_min_track:.4f}mm - clamping escape stubs up (issue #223)")
+        track_width = fab_min_track
+
     grid = analyze_bga_grid(footprint)
     if grid is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a BGA")
