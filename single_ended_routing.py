@@ -532,6 +532,42 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     print(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
 
 
+def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:
+    """Grid-cell radius for the Rust router's same-path via-spacing guard, sized
+    from the DRILL hole-to-hole minimum (same-net vias may touch copper but not
+    drills). The router's check blocks Chebyshev dist <= 2*radius (issue #230)."""
+    if config.hole_to_hole_clearance <= 0 or config.grid_step <= 0:
+        return 0
+    return max(1, int(math.ceil(
+        (config.via_drill + config.hole_to_hole_clearance) / config.grid_step / 2.0)))
+
+
+def _path_has_close_vias(path: Optional[List], config: 'GridRouteConfig') -> bool:
+    """True if the path drops two of its OWN vias closer than the drill hole-to-hole
+    minimum (a same-net VIA-DRILL-HOLE the obstacle map can't prevent within one
+    A* path). A via is a layer change at a fixed (gx, gy)."""
+    if not path or config.hole_to_hole_clearance <= 0:
+        return False
+    via_cells = []
+    for i in range(1, len(path)):
+        if path[i][0] == path[i - 1][0] and path[i][1] == path[i - 1][1] \
+                and path[i][2] != path[i - 1][2]:
+            via_cells.append((path[i][0], path[i][1]))
+    if len(via_cells) < 2:
+        return False
+    min_cc = (config.via_drill + config.hole_to_hole_clearance) / config.grid_step
+    min_cc_sq = min_cc * min_cc
+    seen = set()
+    for gx, gy in via_cells:
+        if (gx, gy) in seen:
+            continue
+        seen.add((gx, gy))
+        for ox, oy in seen:
+            if (ox, oy) != (gx, gy) and (gx - ox) ** 2 + (gy - oy) ** 2 < min_cc_sq:
+                return True
+    return False
+
+
 def _probe_route_with_frontier(
     router: 'GridRouter',
     obstacles: 'GridObstacleMap',
@@ -544,6 +580,43 @@ def _probe_route_with_frontier(
     pcb_data: PCBData = None,
     current_net_id: int = -1,
     single_direction: bool = False
+) -> Tuple[Optional[List], int, List, List, bool, int, int]:
+    """Two-pass wrapper: route with the same-path via-spacing guard OFF (fast),
+    and only re-route the same leg with the guard ON if the result actually drops
+    two same-net vias closer than the drill floor (#230). The vast majority of
+    legs never trip it, so they pay nothing; only the rare offender pays one extra
+    route. Falls back to the first (DRC-flawed but connected) path if the guarded
+    re-route fails to connect at all."""
+    result = _probe_route_with_frontier_once(
+        router, obstacles, forward_sources, forward_targets, config,
+        print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+        single_direction, via_exclusion_radius=0)
+    path = result[0]
+    if path is not None and _path_has_close_vias(path, config):
+        ver = _via_drill_exclusion_radius(config)
+        if ver > 0:
+            retry = _probe_route_with_frontier_once(
+                router, obstacles, forward_sources, forward_targets, config,
+                print_prefix, direction_labels, track_margin, pcb_data, current_net_id,
+                single_direction, via_exclusion_radius=ver)
+            if retry[0] is not None:
+                return retry  # re-routed with manufacturable via spacing
+    return result
+
+
+def _probe_route_with_frontier_once(
+    router: 'GridRouter',
+    obstacles: 'GridObstacleMap',
+    forward_sources: List,
+    forward_targets: List,
+    config: 'GridRouteConfig',
+    print_prefix: str = "",
+    direction_labels: Tuple[str, str] = ("forward", "backward"),
+    track_margin: int = 0,
+    pcb_data: PCBData = None,
+    current_net_id: int = -1,
+    single_direction: bool = False,
+    via_exclusion_radius: int = 0
 ) -> Tuple[Optional[List], int, List, List, bool, int, int]:
     """
     Probe routing with fail-fast on stuck directions.
@@ -576,6 +649,7 @@ def _probe_route_with_frontier(
     """
     first_label, second_label = direction_labels
     probe_iterations = config.max_probe_iterations
+    _ver = via_exclusion_radius
 
     # Track iterations per direction (first/second maps to forward/backward based on labels)
     first_total_iters = 0
@@ -583,7 +657,7 @@ def _probe_route_with_frontier(
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin)
+        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     first_probe_iters = iterations
     first_total_iters = first_probe_iters
     first_blocked = blocked_cells
@@ -621,7 +695,7 @@ def _probe_route_with_frontier(
         # Forward probe reached max - do full search
         print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         path, full_iters, full_blocked = router.route_with_frontier(
-            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
+            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
         first_total_iters += full_iters
         total_iterations += full_iters
 
@@ -634,7 +708,7 @@ def _probe_route_with_frontier(
 
     # Probe backward direction (bidirectional mode)
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin)
+        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     second_probe_iters = iterations
     second_total_iters = second_probe_iters
     second_blocked = blocked_cells
@@ -679,7 +753,7 @@ def _probe_route_with_frontier(
     print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin)
+        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     first_total_iters += full_iters
     total_iterations += full_iters
 
@@ -693,7 +767,7 @@ def _probe_route_with_frontier(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin)
+        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
     second_total_iters += backward_full_iters
     total_iterations += backward_full_iters
 
