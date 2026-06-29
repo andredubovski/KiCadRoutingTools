@@ -13,7 +13,8 @@ from kicad_parser import PCBData, Segment, Via
 from routing_config import GridRouteConfig
 from routing_utils import point_to_pad_rect_dist
 from connectivity import get_stub_segments, get_stub_direction
-from geometry_utils import segments_intersect_2d, point_to_segment_distance_seg
+from geometry_utils import (segments_intersect_2d, point_to_segment_distance_seg,
+                            segment_to_segment_distance_seg)
 from typing import Set
 
 # Layer swap tolerance constants
@@ -667,6 +668,100 @@ def stub_clear_of_foreign_pads(segments: List[Segment], dest_layer: str, net_id:
     return True, ""
 
 
+def connected_stub_segments_on_layer(pcb_data: PCBData, net_id: int, layer: str,
+                                     seed_segments: List[Segment],
+                                     tolerance: float = STUB_POSITION_TOLERANCE) -> List[Segment]:
+    """All same-net segments on `layer` in the connected component of `seed_segments`.
+
+    `get_stub_info().segments` can return just the pad nub (it walks from the
+    source endpoint, which for a source stub IS the pad, so it stops immediately),
+    while a layer switch drags the WHOLE source-side trace onto the new layer as
+    the router re-routes from the moved source. To validate the swap against
+    foreign copper we need that whole trace, so BFS the net's layer copper from
+    the seed endpoints. Returns the connected segment objects (incl. the seeds).
+    """
+    layer_segs = [s for s in pcb_data.segments
+                  if s.net_id == net_id and s.layer == layer]
+    if not layer_segs:
+        return list(seed_segments)
+
+    def near(ax, ay, bx, by):
+        return abs(ax - bx) < tolerance and abs(ay - by) < tolerance
+
+    seed_ids = {id(s) for s in seed_segments}
+    component = [s for s in layer_segs if id(s) in seed_ids] or list(layer_segs[:1])
+    in_comp = {id(s) for s in component}
+    frontier = list(component)
+    while frontier:
+        seg = frontier.pop()
+        for endpt in ((seg.start_x, seg.start_y), (seg.end_x, seg.end_y)):
+            for other in layer_segs:
+                if id(other) in in_comp:
+                    continue
+                if (near(other.start_x, other.start_y, *endpt) or
+                        near(other.end_x, other.end_y, *endpt)):
+                    in_comp.add(id(other))
+                    component.append(other)
+                    frontier.append(other)
+    return component
+
+
+def stub_clear_of_foreign_tracks(segments: List[Segment], dest_layer: str, net_id: int,
+                                 pcb_data: PCBData, config: GridRouteConfig,
+                                 exclude_net_ids: Set[int]) -> Tuple[bool, str]:
+    """Check stub segments moved onto dest_layer clear other-net routed copper
+    (tracks + vias) that already lives on that layer.
+
+    The other swap validators look at foreign PADS (stub_clear_of_foreign_pads),
+    the other swap STUBS being analysed (validate_*_no_overlap), and a single
+    setback point beyond the stub tip (validate_*_setback_clear) -- but NONE of
+    them test the moved stub's body against another net's *already-routed track*
+    on the destination layer. So a stub swapped onto a busy layer can land right
+    across a completed foreign trace (issue #238: DQ4's source stub swapped
+    In2.Cu->B.Cu crossed R_ODT_CA_A's finished B.Cu route -> tracks_crossing DRC).
+
+    Mirrors stub_clear_of_foreign_pads but over pcb_data.segments (foreign tracks
+    on dest_layer) and pcb_data.vias (through-hole, so all-layer like the obstacle
+    map). Own net and any swap-partner nets are excluded. Returns (clear, reason).
+    """
+    exclude = set(exclude_net_ids) | {net_id}
+    clear_dist = config.track_width / 2 + config.clearance
+    for seg in segments:
+        sminx, smaxx = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
+        sminy, smaxy = min(seg.start_y, seg.end_y), max(seg.start_y, seg.end_y)
+        bminx, bmaxx = sminx - 1.5, smaxx + 1.5
+        bminy, bmaxy = sminy - 1.5, smaxy + 1.5
+        # Foreign routed tracks living on the destination layer.
+        for other in pcb_data.segments:
+            if other.layer != dest_layer or other.net_id in exclude:
+                continue
+            if (max(other.start_x, other.end_x) < bminx or
+                    min(other.start_x, other.end_x) > bmaxx or
+                    max(other.start_y, other.end_y) < bminy or
+                    min(other.start_y, other.end_y) > bmaxy):
+                continue
+            d = segment_to_segment_distance_seg(seg, other)
+            if d < clear_dist:
+                net = pcb_data.nets.get(other.net_id)
+                nm = net.name if net else f"net {other.net_id}"
+                return False, (f"stub on {dest_layer} would graze {nm} track "
+                               f"(gap {d:.3f}mm)")
+        # Foreign vias -- through-hole, so they block every layer (matches the
+        # obstacle map's all-layer via treatment).
+        for via in pcb_data.vias:
+            if via.net_id in exclude:
+                continue
+            if not (bminx <= via.x <= bmaxx and bminy <= via.y <= bmaxy):
+                continue
+            d = point_to_segment_distance_seg(via.x, via.y, seg) - (via.size or 0) / 2
+            if d < clear_dist:
+                net = pcb_data.nets.get(via.net_id)
+                nm = net.name if net else f"net {via.net_id}"
+                return False, (f"stub on {dest_layer} would graze {nm} via "
+                               f"(gap {d:.3f}mm)")
+    return True, ""
+
+
 def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
                   all_stubs_by_layer: Dict[str, List[Tuple[str, List[Segment]]]],
                   pcb_data: PCBData, config: GridRouteConfig,
@@ -750,6 +845,18 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
             partner_excl | {stub.net_id})
         if not pad_clear:
             return False, pad_reason
+
+    # Check 6: the moved stub body must also clear other-net routed TRACKS/VIAS
+    # already on dest_layer (issue #238). The coupled partner's segments are
+    # exempt (legitimate parallel running); only foreign routed copper bites.
+    pair_excl = partner_excl | {stub_p.net_id, stub_n.net_id}
+    for stub in (stub_p, stub_n):
+        moved_segs = connected_stub_segments_on_layer(
+            pcb_data, stub.net_id, stub.layer, stub.segments)
+        track_clear, track_reason = stub_clear_of_foreign_tracks(
+            moved_segs, dest_layer, stub.net_id, pcb_data, config, pair_excl)
+        if not track_clear:
+            return False, track_reason
 
     return True, ""
 
@@ -1033,6 +1140,20 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
         set(swap_partner_net_ids or set()))
     if not pad_clear:
         return False, pad_reason
+
+    # Check 5: the moved stub body must also clear other-net routed TRACKS/VIAS
+    # already on dest_layer (issue #238: swapping onto a busy layer crossed a
+    # finished foreign trace -- foreign pads/swap-stubs/setback don't cover this).
+    # Validate the WHOLE connected source-side trace, not just the pad nub
+    # get_stub_info returns -- a source switch re-routes that whole trace onto
+    # dest_layer.
+    moved_segs = connected_stub_segments_on_layer(
+        pcb_data, stub.net_id, stub.layer, stub.segments)
+    track_clear, track_reason = stub_clear_of_foreign_tracks(
+        moved_segs, dest_layer, stub.net_id, pcb_data, config,
+        set(swap_partner_net_ids or set()))
+    if not track_clear:
+        return False, track_reason
 
     return True, ""
 
