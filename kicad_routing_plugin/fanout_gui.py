@@ -1204,6 +1204,8 @@ class FanoutTab(wx.Panel):
 
         # Get shared parameters from Basic tab (includes layers)
         shared = self.get_shared_params() if self.get_shared_params else {}
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(shared)
         track_width = shared.get('track_width', defaults.BGA_TRACK_WIDTH)
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
@@ -1279,6 +1281,8 @@ class FanoutTab(wx.Panel):
 
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(shared)
         track_width = shared.get('track_width', defaults.QFN_TRACK_WIDTH)
         clearance = shared.get('clearance', defaults.BGA_CLEARANCE)
 

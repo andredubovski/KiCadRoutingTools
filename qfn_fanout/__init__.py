@@ -87,13 +87,15 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                               check_line_clearance, point_to_segment_distance)
     from bga_fanout.reroute import _seg_hits_pad
     from bga_fanout.geometry import clamp_via_to_pad
-    from list_nets import fab_floors
+    from list_nets import fab_floor_ladder, fab_floor_min, warn_fab_escalation
     from routing_config import GridRouteConfig
 
     # Fab floors for the via-in-pad clamp (#202): when a chosen via sits ON its
-    # pad, size it to the pad edge so it can't bulge into a neighbouring net.
-    fab = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4)
-    clamp_n = floor_n = 0
+    # pad, size it to the pad edge so it can't bulge into a neighbouring net. Pass
+    # the active fab-tier ladder so the clamp escalates standard->advanced (#237).
+    _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    floors = fab_floor_ladder(_copper)
+    clamp_n = floor_n = escalated_n = 0
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
     # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
@@ -260,11 +262,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
             else:
                 # via-in-pad: clamp to the pad edge so it never bulges past it (#202)
-                v_size, v_drill, status = clamp_via_to_pad(via_size, via_drill, pi.pad, fab)
+                v_size, v_drill, status, rung = clamp_via_to_pad(via_size, via_drill, pi.pad, floors)
                 if status == 'clamped':
                     clamp_n += 1
                 elif status == 'floor':
                     floor_n += 1
+                if rung > 0:
+                    escalated_n += 1
             vias.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
                          'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
 
@@ -276,10 +280,12 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    if escalated_n:
+        warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:
         print(f"    WARNING: {floor_n} pad(s) smaller than the fab via floor "
-              f"({fab['fine_via_diameter']:.2f}mm dia); via held at the floor and "
-              f"still bulges past the pad edge")
+              f"({fab_floor_min(_copper)['via_diameter']:.2f}mm dia); via held at the "
+              f"floor and still bulges past the pad edge")
     return tracks, vias, dropped
 
 
@@ -644,7 +650,18 @@ def main():
                              '(via-in-pad), so a via boxed in on the outward side can '
                              'stagger inward toward the chip instead of being dropped. '
                              'The via still must clear other-net pads, vias and tracks.')
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    enforce_fab_floors(
+        count_copper_layers_in_file(args.pcb),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
 
     print(f"Parsing {args.pcb}...")
     pcb_data = parse_kicad_pcb(args.pcb)

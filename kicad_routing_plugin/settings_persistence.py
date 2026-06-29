@@ -58,6 +58,9 @@ def get_dialog_settings(dialog):
         'turn_cost': dialog.turn_cost.GetValue(),
         'direction_preference_cost': dialog.direction_preference_cost.GetValue(),
         'ordering_strategy': dialog.ordering_strategy.GetSelection(),
+        'fab_tier': dialog.fab_tier.GetSelection(),
+        'fab_overrides_path': dialog.fab_overrides_path.GetValue(),
+        'fab_overrides_recent': list(dialog.fab_overrides_path.GetStrings()),
         'bga_proximity_radius': dialog.bga_proximity_radius.GetValue(),
         'bga_proximity_cost': dialog.bga_proximity_cost.GetValue(),
         'stub_proximity_radius': dialog.stub_proximity_radius.GetValue(),
@@ -302,6 +305,12 @@ def restore_dialog_settings(dialog, settings):
         dialog.direction_preference_cost.SetValue(settings['direction_preference_cost'])
     if 'ordering_strategy' in settings:
         dialog.ordering_strategy.SetSelection(settings['ordering_strategy'])
+    if 'fab_overrides_recent' in settings:
+        dialog.fab_overrides_path.Set(list(settings['fab_overrides_recent']))
+    if 'fab_overrides_path' in settings:
+        dialog.fab_overrides_path.SetValue(settings['fab_overrides_path'])
+    if 'fab_tier' in settings:
+        dialog.fab_tier.SetSelection(settings['fab_tier'])
     if 'bga_proximity_radius' in settings:
         dialog.bga_proximity_radius.SetValue(settings['bga_proximity_radius'])
     if 'bga_proximity_cost' in settings:

@@ -11,7 +11,7 @@ from bga_fanout.types import BGAGrid, Channel
 
 
 def clamp_via_to_pad(via_size: float, via_drill: float, pad,
-                     fab: Dict) -> Tuple[float, float, str]:
+                     floors) -> Tuple[float, float, str, int]:
     """Issue #202: shrink a via-in-pad so it never bulges past the pad edge.
 
     A via dropped at a pad centre whose diameter exceeds the pad's smallest
@@ -32,30 +32,39 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
     keep-out modelling uses the real, smaller via and neighbouring fanout tracks
     can route past it.
 
-    Returns (size, drill, status): 'fits' (unchanged), 'clamped' (shrunk to fit),
-    or 'floor' (pad < fab floor, via clamped to the floor but still bulges).
+    ``floors`` is the fab-tier floor LADDER (nominal first, then escalation rungs;
+    see fab_tiers.fab_floor_ladder): each rung is a flat floor dict. The via is
+    clamped to the first rung whose via fits the pad; if the pad is smaller than
+    even the deepest rung's via, it's held at that deepest floor (still bulges).
+
+    Returns (size, drill, status, rung): status 'fits' (unchanged), 'clamped'
+    (shrunk to fit), or 'floor' (pad < deepest fab floor). ``rung`` is the floor
+    index used (0 = nominal/standard; >0 = escalated to a more-costly tier).
     """
     pad_min = min(pad.size_x, pad.size_y)
     if via_size <= pad_min + 1e-9:
-        return via_size, via_drill, 'fits'
+        return via_size, via_drill, 'fits', 0
 
-    floor_dia = fab['fine_via_diameter']
-    floor_drill = fab['fine_via_drill']
-    # The fab's SMALLEST manufacturable annular ring -- the one the fine via pair
-    # itself uses ((0.30-0.15)/2 = 0.075 on 4-layer), NOT the larger standard ring
-    # fab['annular'] (which would force the drill below the floor and needlessly
-    # over-shrink a via that fits the pad fine).
-    min_annular = (floor_dia - floor_drill) / 2.0
+    # First rung whose smallest manufacturable via fits this pad.
+    for rung, fab in enumerate(floors):
+        floor_dia = fab['via_diameter']
+        floor_drill = fab['via_drill']
+        if pad_min < floor_dia - 1e-9:
+            continue
+        # The fab's SMALLEST manufacturable annular ring for THIS rung -- the one its
+        # via pair uses ((0.45-0.20)/2 standard, (0.25-0.15)/2 advanced), NOT the
+        # larger fab['annular'] (which would force the drill below the floor and
+        # needlessly over-shrink a via that fits the pad fine).
+        min_annular = (floor_dia - floor_drill) / 2.0
+        new_size = round(pad_min, 4)
+        # Keep the configured drill, only thinning it as far as the ring needs, and
+        # never below this rung's drill floor.
+        new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
+        return new_size, round(new_drill, 4), 'clamped', rung
 
-    if pad_min < floor_dia - 1e-9:
-        # Even the smallest manufacturable via bulges past this pad.
-        return floor_dia, floor_drill, 'floor'
-
-    new_size = round(pad_min, 4)
-    # Keep the configured drill, only thinning it as far as the ring needs, and
-    # never below the fab drill floor.
-    new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
-    return new_size, round(new_drill, 4), 'clamped'
+    # Even the deepest rung's via bulges past this pad: hold it at that floor.
+    deepest = len(floors) - 1
+    return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest
 
 
 def create_45_stub(pad_x: float, pad_y: float,

@@ -18,7 +18,7 @@ Options:
                        fine-pitch taps); falls back to 0.2 if no project is found.
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
   --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm
-                                  (default: 0.25, the JLC fab floor — same as routing)
+                                  (default: 0.20, the JLC fab floor — same as routing)
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
@@ -49,8 +49,8 @@ python check_drc.py routed.kicad_pcb
 # Override the grading clearance explicitly
 python check_drc.py routed.kicad_pcb --clearance 0.15
 
-# Override clearance and hole-to-hole explicitly (hole-to-hole defaults to the 0.25 fab floor)
-python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.25
+# Override clearance and hole-to-hole explicitly (hole-to-hole defaults to the 0.20 fab floor)
+python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
 
 # Check specific nets only
 python check_drc.py routed.kicad_pcb --nets "*DATA*"
@@ -70,8 +70,8 @@ The DRC checker validates:
 8. **Hole-to-hole clearance** - Drill holes (via drills and through-hole pad drills) maintain edge-to-edge clearance, even on the same net (manufacturing constraint)
 9. **Board edge clearance** - Tracks and vias maintain clearance from the real `Edge.Cuts` outline (outer ring **plus interior cutouts/slots**), so copper routed into a cutout — which sits inside the bounding box — is caught. Falls back to the bounding box when the parser finds no usable outline. With `--check-pad-edge`, pads are checked too.
 10. **Same-net crossings** - Detects tracks crossing on the same layer within a net
-11. **Track width** - Segments are at least the fab-floor minimum track width (JLC: 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
-12. **Via / hole size** - Via outer diameter and drill are at least the fine-via fab floor (JLC: 0.45mm/0.20mm on 2-layer, 0.30mm/0.15mm on 4+ layer).
+11. **Track width** - Segments are at least the fab-floor minimum track width (the active `--fab-tier`'s deepest floor; standard = JLC 0.127mm on 2-layer, 0.0889mm on 4+ layer). Catches sub-fab copper a clearance-only check misses — a board's own `min_track_width` DRC rule can be lowered to match undersized tracks, so it never trips; the fab floor is the real limit.
+12. **Via / hole size** - Via outer diameter and drill are at least the deepest fab via the tier can reach — the advanced (small/fine) via the router escalates to: JLC 0.25mm/0.15mm. Pass `--fab-tier` so grading matches how the board was routed (see [Fab Tier Options](configuration.md#fab-tier-options)).
 
 Checks 11–12 are on by default; pass `--no-size-checks` to skip them, or override the floors with `--min-track-width` / `--min-via-diameter` / `--min-via-drill`. The floor is derived from the board's copper-layer count unless overridden.
 

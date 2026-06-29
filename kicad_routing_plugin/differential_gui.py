@@ -856,6 +856,8 @@ class DifferentialTab(wx.Panel):
         # leak into this board's DRC floor.
         import clearance_ledger
         clearance_ledger.reset()
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
 
         original_stdout = sys.stdout
         if self.append_log:

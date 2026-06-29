@@ -1132,16 +1132,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     # Resolve the fab-floor minimums for the track-width / via-size checks. Default
     # to the JLC manufacturing floor for the board's copper-layer count (issue #176).
     if check_sizes:
-        from list_nets import fab_floors
+        from list_nets import fab_floor_min
         copper_layers = getattr(pcb_data.board_info, 'copper_layers', None) or []
         copper_count = len(copper_layers) if copper_layers else 2
-        fab = fab_floors(copper_count)
-        # Use the FINE via floor (the smallest via the fab can make) as the hard
-        # minimum -- 0.30mm dia / 0.15mm drill on 4+ layers. Flagging at the
-        # larger standard via floor would reject legitimate fine-pitch vias.
+        # Grade against the DEEPEST floor the active fab tier can reach (fab_floor_min):
+        # for 'standard' that's the advanced rung it escalates to (0.25 dia / 0.15
+        # drill on 4+ layers), so legitimately-escalated fine vias aren't flagged;
+        # for 'advanced'/overrides it's the hard floor (issue #237).
+        fab = fab_floor_min(copper_count)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
-        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['fine_via_diameter']
-        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['fine_via_drill']
+        eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
+        eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")
@@ -1986,7 +1987,10 @@ if __name__ == "__main__":
                              'Off by default: pad-edge violations are almost always '
                              'pre-existing edge-connector pads, not router-introduced.')
 
+    from fab_tiers import add_fab_tier_args, fab_tier_from_args, set_default_fab_tier
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
 
     # Grade at the clearance the board was actually routed to. When -c is not
     # given, read the sibling .kicad_pro Default net-class clearance -- which the

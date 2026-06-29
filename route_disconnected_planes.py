@@ -533,21 +533,25 @@ def route_planes(
             if getattr(z, 'net_id', None) is not None:
                 zones_by_net.setdefault(z.net_id, []).append(z)
         # Forced last-resort via sizes, largest first, as fab-manufacturable
-        # (diameter, drill) pairs: the configured via, then the JLC standard floor,
-        # then the "fine"/advanced floor (0.30/0.15 on 4+ layers, 0.45/0.20 on 2).
-        # A fine-pitch pad flanked by other-net copper often cannot take the nominal
-        # via but fits a smaller fab-legal one; we never go below the fab floor.
-        from list_nets import fab_floors
+        # (diameter, drill) pairs: the configured via, then the active fab-tier floor
+        # ladder (nominal floor, then any escalation rung -- the more-costly advanced
+        # 0.25/0.15 via 'standard' escalates to, #237). A fine-pitch pad flanked by
+        # other-net copper often cannot take the nominal via but fits a smaller
+        # fab-legal one; we never go below the deepest fab floor.
+        from list_nets import fab_floor_ladder, warn_fab_escalation
         _ncu = len([l for l in (pcb_data.board_info.copper_layers or routing_layers)
                     if l.endswith('.Cu')]) or 2
-        _ff = fab_floors(_ncu)
-        via_pairs = []
-        for _vd, _dr in ((via_size, via_drill),
-                         (_ff['via_diameter'], _ff['via_drill']),
-                         (_ff['fine_via_diameter'], _ff['fine_via_drill'])):
+        _ladder = fab_floor_ladder(_ncu)
+        _cands = [(via_size, via_drill, False)]
+        _cands += [(f['via_diameter'], f['via_drill'], _i > 0)
+                   for _i, f in enumerate(_ladder)]
+        via_pairs, _escalated_pairs = [], set()
+        for _vd, _dr, _is_esc in _cands:
             _vd, _dr = round(_vd, 3), round(_dr, 3)
             if _dr < _vd <= via_size + 1e-9 and (_vd, _dr) not in via_pairs:
                 via_pairs.append((_vd, _dr))
+                if _is_esc:
+                    _escalated_pairs.add((_vd, _dr))
         for net_id, (net_name, net_zone_layers) in unique_nets.items():
             net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
             net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
@@ -600,6 +604,9 @@ def route_planes(
                         via_drill=dtry, verbose=verbose, fine_for_all=True,
                         distant_trace_radius=0.0, disable_reuse=True)
                     if result.success and result.via is not None:
+                        if (vtry, dtry) in _escalated_pairs:
+                            warn_fab_escalation(f"last-resort plane via for net "
+                                                f"{net_id} ({vtry}/{dtry}mm)")
                         break
                 if result.success and result.via is not None:
                     all_new_vias.append(result.via)
@@ -858,7 +865,18 @@ Examples:
                         help="When fixing DRC settings, leave thermal-relief severity "
                              "(starved_thermal) untouched instead of demoting it to a warning")
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
 
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:

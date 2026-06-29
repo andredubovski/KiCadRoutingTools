@@ -460,6 +460,42 @@ class RoutingDialog(wx.Dialog):
             setattr(self, name, ctrl)
             grid.Add(ctrl, 0, wx.EXPAND)
 
+        # Fab tier (issue #237): the JLC manufacturing floor every tab routes/grades
+        # DOWN toward. 'standard' (no extra cost) auto-escalates to 'advanced' (the
+        # more-costly 0.25/0.15 small via etc.) WITH A WARNING when a fine-pitch
+        # fan-out can't escape at the standard floor; 'advanced' is a hard floor. An
+        # optional override file overlays the selected tier (only the keys it lists)
+        # and disables escalation. One shared control read by every tab.
+        grid.Add(wx.StaticText(parent, label="Fab Tier:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.fab_tier = wx.Choice(parent, choices=["standard", "advanced"])
+        self.fab_tier.SetSelection(0)
+        self.fab_tier.SetToolTip(
+            "JLC fab capability floor. standard = no-extra-cost, escalates to advanced "
+            "(with a warning) when a fine-pitch fan-out needs it; advanced = tight "
+            "0.25/0.15 via etc. (more costly), a hard floor.")
+        self.fab_tier.Bind(wx.EVT_CHOICE, self._revalidate_fab_floors)
+        grid.Add(self.fab_tier, 0, wx.EXPAND)
+
+        # Override file: a recent-files dropdown (favourites) + Browse... file picker.
+        grid.Add(wx.StaticText(parent, label="Fab Overrides File:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        ovr_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.fab_overrides_path = wx.ComboBox(parent, choices=[], style=wx.CB_DROPDOWN)
+        # Small min width so this row doesn't force the parameter grid's value
+        # column wider than the spin controls (the ComboBox expands to fill whatever
+        # width the column gives; the Browse button stays compact).
+        self.fab_overrides_path.SetMinSize((60, -1))
+        self.fab_overrides_path.SetToolTip(
+            "Optional fab-floor override file (key=value lines, e.g. 'via_drill = 0.15') "
+            "overlaying the selected tier; pick a recently-used file from the dropdown "
+            "or Browse. Supplying one disables standard->advanced escalation.")
+        self.fab_overrides_path.Bind(wx.EVT_COMBOBOX, self._revalidate_fab_floors)
+        ovr_sizer.Add(self.fab_overrides_path, 1, wx.EXPAND | wx.RIGHT, 4)
+        self.fab_overrides_browse = wx.Button(parent, label="…", style=wx.BU_EXACTFIT)
+        self.fab_overrides_browse.SetToolTip("Browse for a fab-floor override file")
+        self.fab_overrides_browse.Bind(wx.EVT_BUTTON, self._on_browse_fab_overrides)
+        ovr_sizer.Add(self.fab_overrides_browse, 0)
+        grid.Add(ovr_sizer, 0, wx.EXPAND)
+
         # Edge clearance (checkbox + value)
         grid.Add(wx.StaticText(parent, label="Edge Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         edge_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -526,6 +562,26 @@ class RoutingDialog(wx.Dialog):
         # focus from the spin control which fires yet another event. Without this
         # guard the warning dialog reappears endlessly and the UI deadlocks (#30).
         if getattr(self, '_drc_validating', False):
+            return
+
+        # Fab floor (issue #237): independent of the DRC-obey toggle, a track /
+        # clearance / via / drill / hole value can never go below what the fab can
+        # make for the active tier. Pin to the floor and warn, don't route sub-fab.
+        floor = self._fab_floor_for_ctrl(ctrl_name)
+        ctrl = getattr(self, ctrl_name, None)
+        if floor is not None and ctrl is not None and ctrl.GetValue() < floor - 1e-9:
+            self._drc_validating = True
+            try:
+                ctrl.SetValue(floor)
+            finally:
+                self._drc_validating = False
+            label = ctrl_name.replace('_', ' ').title()
+            wx.CallAfter(
+                wx.MessageBox,
+                f"{label} cannot go below the fab floor {floor:.4f} mm for the "
+                f"selected fab tier; pinned to it. Use a Fab Overrides file to "
+                f"declare a smaller fab capability.",
+                "Fab Floor", wx.OK | wx.ICON_WARNING)
             return
 
         if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
@@ -758,6 +814,63 @@ class RoutingDialog(wx.Dialog):
             except ValueError:
                 pass
             self._append_log(f"Claude recommends {value} copper layers{note}\n")
+
+    def _on_browse_fab_overrides(self, event):
+        """Browse for a fab-floor override file; remember it as a recent favourite."""
+        cur = self.fab_overrides_path.GetValue().strip()
+        ddir = os.path.dirname(cur) if cur else ""
+        with wx.FileDialog(self, "Select fab-floor override file", defaultDir=ddir,
+                           wildcard="Override files (*.txt;*.cfg)|*.txt;*.cfg|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_CANCEL:
+                return
+            self._add_recent_fab_override(dlg.GetPath())
+
+    def _add_recent_fab_override(self, path):
+        """Put `path` at the top of the override-file dropdown (deduped, capped)."""
+        if not path:
+            return
+        items = [path] + [s for s in self.fab_overrides_path.GetStrings() if s != path]
+        del items[8:]
+        self.fab_overrides_path.Set(items)
+        self.fab_overrides_path.SetValue(path)
+        self._revalidate_fab_floors()
+
+    def _fab_floor_for_ctrl(self, ctrl_name):
+        """Fab floor (mm) for a Basic-tab spin control under the active fab tier +
+        override file, or None if the control has no fab floor / no board loaded."""
+        try:
+            from fab_tiers import fab_floor_for_param, parse_fab_overrides
+            ncu = len(self.pcb_data.board_info.copper_layers) or 2
+            tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
+            path = self.fab_overrides_path.GetValue().strip()
+            ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
+            return fab_floor_for_param(ctrl_name, ncu, tier, ovr)
+        except Exception:
+            return None
+
+    def _revalidate_fab_floors(self, event=None):
+        """Re-pin every fab-floored Basic-tab spin control after the fab tier or
+        override file changes (an override can RAISE a floor above the current value)."""
+        pinned = []
+        for name in ('track_width', 'clearance', 'via_size', 'via_drill',
+                     'hole_to_hole_clearance'):
+            ctrl = getattr(self, name, None)
+            floor = self._fab_floor_for_ctrl(name)
+            if ctrl is not None and floor is not None and ctrl.GetValue() < floor - 1e-9:
+                self._drc_validating = True
+                try:
+                    ctrl.SetValue(floor)
+                finally:
+                    self._drc_validating = False
+                pinned.append(f"{name.replace('_', ' ')} -> {floor:.4f} mm")
+        if pinned and event is not None:
+            wx.CallAfter(
+                wx.MessageBox,
+                "Pinned to the new fab floor:\n  " + "\n  ".join(pinned),
+                "Fab Floor", wx.OK | wx.ICON_INFORMATION)
+        if event is not None:
+            event.Skip()
 
     def _create_basic_options_panel(self, panel):
         """Create the basic options panel for the Basic tab."""
@@ -1257,6 +1370,8 @@ class RoutingDialog(wx.Dialog):
                 # Escape stub ends are snapped to this grid so the router gets
                 # on-grid terminals (issue #149); use the Basic tab's grid step.
                 'grid_step': self.grid_step.GetValue(),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             }
 
         return FanoutTab(
@@ -1301,6 +1416,8 @@ class RoutingDialog(wx.Dialog):
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             }
 
         def get_claude_params():
@@ -1377,6 +1494,8 @@ class RoutingDialog(wx.Dialog):
                 'direction_preference_cost': self.direction_preference_cost.GetValue(),
                 'max_ripup': self.max_ripup.GetValue(),
                 'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
+                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'debug_lines': self.debug_lines_check.GetValue(),
                 'verbose': self.verbose_check.GetValue(),
                 'enable_layer_switch': self.enable_layer_switch.GetValue(),
@@ -1833,6 +1952,8 @@ class RoutingDialog(wx.Dialog):
         self.turn_cost.SetValue(defaults.TURN_COST)
         self.direction_preference_cost.SetValue(defaults.DIRECTION_PREFERENCE_COST)
         self.ordering_strategy.SetSelection(0)
+        self.fab_tier.SetSelection(0)
+        self.fab_overrides_path.SetValue("")
         self.bga_proximity_radius.SetValue(defaults.BGA_PROXIMITY_RADIUS)
         self.bga_proximity_cost.SetValue(defaults.BGA_PROXIMITY_COST)
         self.stub_proximity_radius.SetValue(defaults.STUB_PROXIMITY_RADIUS)
@@ -2064,6 +2185,8 @@ class RoutingDialog(wx.Dialog):
             'direction_preference_cost': self.direction_preference_cost.GetValue(),
             'max_ripup': self.max_ripup.GetValue(),
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
+            'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
+            'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
             'stub_proximity_radius': self.stub_proximity_radius.GetValue(),
             'stub_proximity_cost': self.stub_proximity_cost.GetValue(),
             'power_tap_neckdown': self.power_tap_neckdown_check.GetValue(),
@@ -2444,6 +2567,8 @@ class RoutingDialog(wx.Dialog):
         # clearance doesn't leak into this board's DRC floor.
         import clearance_ledger
         clearance_ledger.reset()
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
         # Set up stdout redirection to capture routing output
         original_stdout = sys.stdout
         sys.stdout = StdoutRedirector(self._append_log, original_stdout)

@@ -1475,7 +1475,18 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--display-time", type=float, default=0.0,
                         help="Seconds to display completed route before advancing (with --visualize --auto)")
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
 
     # --output is a named alias for the positional output_file; reject giving both differently.
     if args.output is not None:

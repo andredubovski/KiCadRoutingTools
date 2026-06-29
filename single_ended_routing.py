@@ -1285,17 +1285,23 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
         return None
 
     from plane_pad_tap import tap_pad_with_escalation
-    from list_nets import fab_floors
+    from list_nets import fab_floor_ladder, warn_fab_escalation
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
-    ff = fab_floors(ncu)
-    via_pairs, seen_dia = [], set()
-    for vd, dr in ((config.via_size, config.via_drill),
-                   (ff['via_diameter'], ff['via_drill']),
-                   (ff['fine_via_diameter'], ff['fine_via_drill'])):
+    # Forced last-resort via sizes, largest first: the configured via, then the
+    # active fab-tier floor ladder (nominal floor, then any escalation rung). The
+    # advanced rung is the more-costly small via 'standard' escalates to (#237).
+    ladder = fab_floor_ladder(ncu)
+    candidates = [(config.via_size, config.via_drill, False)]
+    candidates += [(f['via_diameter'], f['via_drill'], i > 0)
+                   for i, f in enumerate(ladder)]
+    via_pairs, seen_dia, escalated_pair = [], set(), set()
+    for vd, dr, is_esc in candidates:
         vd, dr = round(vd, 3), round(dr, 3)
         if dr < vd <= config.via_size + 1e-9 and vd not in seen_dia:
             seen_dia.add(vd)
             via_pairs.append((vd, dr))
+            if is_esc:
+                escalated_pair.add((vd, dr))
     tap_res = None
     for vd, dr in via_pairs:
         # try_default=False: skip the default-parameter pass and go straight to
@@ -1311,6 +1317,8 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
             try_default=False, fine_for_all=True,
             distant_trace_radius=0.0, disable_reuse=True)
         if tap_res.success and tap_res.via is not None:
+            if (vd, dr) in escalated_pair:
+                warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
             break
     if tap_res is None or not tap_res.success or tap_res.via is None:
         cache.add(key)

@@ -2643,7 +2643,18 @@ Examples:
     parser.add_argument("--gnd-via-distance", type=float, default=2.0,
         help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    enforce_fab_floors(
+        count_copper_layers_in_file(args.input_file),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
 
     # Handle output file: use --overwrite, explicit output, or auto-generate with _routed suffix
     if args.output_file is None:

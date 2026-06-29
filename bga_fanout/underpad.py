@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 from kicad_parser import Footprint, PCBData
 from bga_fanout.types import BGAGrid
 from bga_fanout.geometry import clamp_via_to_pad
-from list_nets import fab_floors
+from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 
 
 # Cardinal + diagonal steps; straight moves are cheaper so routes stay straight.
@@ -254,16 +254,19 @@ def generate_underpad_escape(footprint: Footprint,
     # never bulges past the pad edge AND the keep-out reserved below uses the
     # real (smaller) via -- letting neighbouring escapes route past it. Done
     # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
-    fab = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4)
-    clamp_stats = {'clamped': 0, 'floor': 0}
+    _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    floors = fab_floor_ladder(_copper)
+    clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
 
     def via_for_pad(p):
         """Clamped (size, drill, keepout_radius) for a via dropped in pad p."""
-        cs, cd, status = clamp_via_to_pad(via_size, via_drill, p, fab)
+        cs, cd, status, rung = clamp_via_to_pad(via_size, via_drill, p, floors)
         if status == 'clamped':
             clamp_stats['clamped'] += 1
         elif status == 'floor':
             clamp_stats['floor'] += 1
+        if rung > 0:
+            clamp_stats['escalated'] += 1
         return cs, cd, cs / 2 + track_width / 2 + clearance + margin
 
     # Static obstacles ---------------------------------------------------------
@@ -703,8 +706,11 @@ def generate_underpad_escape(footprint: Footprint,
         if clamp_stats['clamped']:
             print(f"  Under-pad: clamped {clamp_stats['clamped']} via-in-pad(s) to "
                   f"fit their pad edge (#202)")
+        if clamp_stats['escalated']:
+            warn_fab_escalation(f"under-pad {clamp_stats['escalated']} via-in-pad(s) "
+                                f"(sub-0.45mm pads)")
         if clamp_stats['floor']:
             print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
-                  f"the fab via floor ({fab['fine_via_diameter']:.2f}mm dia); via held "
-                  f"at the floor and still bulges past the pad edge")
+                  f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
+                  f"dia); via held at the floor and still bulges past the pad edge")
     return tracks, vias_to_add, failed

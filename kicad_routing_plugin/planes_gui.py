@@ -831,6 +831,8 @@ class PlanesTab(wx.Panel):
         """Run plane operation in background thread."""
         import sys
 
+        from fab_tiers import set_fab_tier_from_config
+        set_fab_tier_from_config(config)
         original_stdout = sys.stdout
         if self.append_log:
             sys.stdout = StdoutRedirector(self.append_log, original_stdout)

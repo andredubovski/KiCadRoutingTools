@@ -53,6 +53,67 @@ python route.py in.kicad_pcb out.kicad_pcb --component U1
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
 
+### Fab Tier Options
+
+The **fab tier** is the JLCPCB manufacturing floor every routing step shrinks tracks,
+vias and clearances *down toward* when it needs to. It is shared by every CLI
+(`route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`,
+`bga_fanout.py`, `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py`,
+`list_nets.py`) and the GUI (one selector on the Basic tab). Values are sourced from
+[jlcpcb.com/capabilities](https://jlcpcb.com/capabilities).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--fab-tier` | `standard` | `standard` (no extra fab cost) or `advanced` (tighter, "more costly") |
+| `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
+
+The tier is a **floor ladder**:
+
+- **`standard`** — the cheap floor (per layer count: 2-layer track/clearance 0.127/0.127,
+  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). Routing prefers
+  it but **auto-escalates to the `advanced` floor — printing a one-line warning** — when a
+  fine-pitch fan-out genuinely cannot escape at the standard floor.
+- **`advanced`** — the JLC "more costly" floor (track/clearance 0.10/0.10 on 2-layer,
+  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor: no escalation.
+
+| Floor (per layer count) | standard | advanced |
+|---|---|---|
+| via diameter / drill | 0.45 / 0.20 | 0.25 / 0.15 |
+| track / clearance (2-layer) | 0.127 / 0.127 | 0.10 / 0.10 |
+| track / clearance (4+ layer) | 0.0889 / 0.10 | 0.0762 / 0.09 |
+| via hole-to-hole / pad hole-to-hole | 0.20 / 0.45 | 0.20 / 0.45 |
+
+**Override file** (`--fab-overrides`) — a plain, human-editable file overlaying the
+selected tier. Only the floor values it lists change; the rest come from the base tier.
+Supplying one **disables escalation** (the floor becomes exactly *base tier + file*),
+since the file states your exact fab limits. One `key = value` (or `key: value`, or
+`key value`) per line; `#` starts a comment; keys are `track_width`, `clearance`,
+`via_diameter`, `via_drill`, `hole_to_hole`, `pad_hole_to_hole`, `annular`:
+
+```
+# my_fab.txt — JLC + a tighter drill I've confirmed
+via_drill = 0.15
+clearance = 0.09
+```
+
+```bash
+# Route to the cheap floor (default); dense fan-outs warn when they escalate
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Opt the whole board into the tighter, more-costly floor
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+
+# Declare your own fab capability
+python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
+```
+
+**Floor enforcement.** The CLI **errors** if `--track-width`, `--clearance`,
+`--via-size`, `--via-drill` or `--hole-to-hole-clearance` is set below the active tier's
+floor (raise the value, or declare a smaller capability with `--fab-overrides`). The GUI
+instead **pins** the corresponding Basic-tab spin control to the floor and warns. Grade
+verification (`check_drc.py`) defaults its size/clearance floors to the same tier, so
+legitimately-escalated fine geometry is not flagged.
+
 ### Power Net Options
 
 | Option | Default | Description |
@@ -87,7 +148,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
-| `--hole-to-hole-clearance` | 0.25 | Minimum drill hole edge-to-edge clearance (mm) |
+| `--hole-to-hole-clearance` | 0.20 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
 | `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
@@ -374,7 +435,7 @@ class GridRouteConfig:
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
-    hole_to_hole_clearance: float = 0.25  # mm - drill-to-drill fab floor
+    hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
     proximity_heuristic_factor: float = 0.02  # factor for proximity-aware heuristic (0 = disabled)
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors

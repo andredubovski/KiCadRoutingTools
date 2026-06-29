@@ -498,7 +498,11 @@ def main():
                     help="Set every category currently at 'warning' severity to 'ignore' "
                          "(hides all warning markers; errors are untouched)")
     ap.add_argument("--dry-run", action="store_true", help="Show changes without writing")
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args,
+                           set_default_fab_tier, fab_floor_min)
+    add_fab_tier_args(ap)
     args = ap.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
 
     pro = find_project(args.board)
     if not os.path.isfile(pro):
@@ -514,11 +518,25 @@ def main():
     pcb_path = args.board if args.board.endswith(".kicad_pcb") else os.path.splitext(args.board)[0] + ".kicad_pcb"
     minima = scan_board_minima(pcb_path)
     clearance = args.clearance if args.clearance is not None else project_copper_clearance(proj)
+    # When a size / hole-to-hole floor isn't given explicitly, fall back to the
+    # selected fab tier's deepest floor (issue #237) so the written DRC documents
+    # the chosen fab capability; compute_targets still takes the SMALLER of this and
+    # any tighter object already on the board.
+    try:
+        from list_nets import _count_copper_layers
+        with open(pcb_path, encoding='utf-8') as _f:
+            _ncu = _count_copper_layers(_f.read())
+    except (OSError, ImportError):
+        _ncu = 2
+    _fab = fab_floor_min(_ncu)
     targets = compute_targets(
         clearance=clearance, hole_clearance=args.hole_clearance,
-        hole_to_hole=args.hole_to_hole, edge_clearance=args.edge_clearance,
-        track_width=args.track_width, via_diameter=args.via_size,
-        via_drill=args.via_drill, minima=minima)
+        hole_to_hole=args.hole_to_hole if args.hole_to_hole is not None else _fab['hole_to_hole'],
+        edge_clearance=args.edge_clearance,
+        track_width=args.track_width if args.track_width is not None else _fab['track_width'],
+        via_diameter=args.via_size if args.via_size is not None else _fab['via_diameter'],
+        via_drill=args.via_drill if args.via_drill is not None else _fab['via_drill'],
+        minima=minima)
     plan = severity_plan(keep_courtyards=args.keep_courtyards, keep_mask=args.keep_mask,
                          keep_footprint=args.keep_footprint, keep_thermal=args.keep_thermal,
                          extra_ignore=args.ignore)

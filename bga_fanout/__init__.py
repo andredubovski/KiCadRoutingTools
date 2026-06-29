@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from net_queries import matches_net_filter
-from list_nets import fab_floors
+from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
 from kicad_writer import add_tracks_and_vias_to_pcb
 from bga_fanout.types import (
     create_track,
@@ -642,11 +642,14 @@ def manage_vias(
     vias_to_remove: List[Dict] = []
 
     # Fab floors for the via-in-pad clamp (#202): floor is a board property
-    # (2- vs 4-layer), so key off the board's total copper count.
+    # (2- vs 4-layer), so key off the board's total copper count. Pass the active
+    # fab-tier ladder so the clamp escalates standard->advanced when a sub-0.45mm
+    # pad can't take the standard via (issue #237).
     copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    fab = fab_floors(copper)
+    floors = fab_floor_ladder(copper)
     clamped_count = 0
     floor_pads = 0
+    escalated_count = 0
 
     # Check distance threshold: via is "at pad" if within via radius + small tolerance
     via_proximity_threshold = via_size / 2 + 0.1
@@ -670,12 +673,14 @@ def manage_vias(
             if not is_through_hole and not existing_via:
                 # Size the via to fit its pad up front (#202) so it never bulges
                 # past the pad edge into a neighbouring different-net trace.
-                v_size, v_drill, status = clamp_via_to_pad(
-                    via_size, via_drill, route.pad, fab)
+                v_size, v_drill, status, rung = clamp_via_to_pad(
+                    via_size, via_drill, route.pad, floors)
                 if status == 'clamped':
                     clamped_count += 1
                 elif status == 'floor':
                     floor_pads += 1
+                if rung > 0:
+                    escalated_count += 1
                 if not would_overlap_existing_via(pad_x, pad_y, v_size):
                     vias_to_add.append({
                         'x': pad_x,
@@ -690,10 +695,12 @@ def manage_vias(
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
     if clamped_count:
         print(f"  Clamped {clamped_count} via-in-pad(s) to fit their pad edge (#202)")
+    if escalated_count:
+        warn_fab_escalation(f"{escalated_count} via-in-pad(s) (sub-0.45mm pads)")
     if floor_pads:
         print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
-              f"({fab['fine_via_diameter']:.2f}mm dia); via held at the floor and "
-              f"still bulges past the pad edge")
+              f"({fab_floor_min(copper)['via_diameter']:.2f}mm dia); via held at the "
+              f"floor and still bulges past the pad edge")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
 
@@ -2174,7 +2181,18 @@ def main():
                              'snapped to this grid so the router gets on-grid terminals (issue '
                              '#149); MATCH the --grid-step you pass to route.py.')
 
+    from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
+                           enforce_fab_floors, count_copper_layers_in_file)
+    add_fab_tier_args(parser)
     args = parser.parse_args()
+    set_default_fab_tier(*fab_tier_from_args(args))
+    enforce_fab_floors(
+        count_copper_layers_in_file(args.pcb),
+        track_width=getattr(args, 'track_width', None),
+        clearance=getattr(args, 'clearance', None),
+        via_size=getattr(args, 'via_size', None),
+        via_drill=getattr(args, 'via_drill', None),
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
 
     print(f"Parsing {args.pcb}...")
     pcb_data = parse_kicad_pcb(args.pcb)

@@ -29,7 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from kicad_parser import parse_kicad_pcb
-from list_nets import fab_floors
+from list_nets import fab_floors, fab_floor_min, fab_floor_ladder
 from bga_fanout import generate_bga_fanout
 from bga_fanout.geometry import clamp_via_to_pad
 from qfn_fanout import generate_qfn_fanout
@@ -44,15 +44,21 @@ def _pad(sx, sy):
 
 
 def test_clamp_math(verbose):
-    """clamp_via_to_pad: fits / clamped / floor across 2- and 4-layer floors."""
-    f4 = fab_floors(4)   # fine via 0.30 / drill 0.15
-    f2 = fab_floors(2)   # fine via 0.45 / drill 0.20
+    """clamp_via_to_pad: fits / clamped / floor along the standard-tier ladder.
+
+    The clamp now walks the fab-tier floor ladder (issue #237): standard tier =
+    [standard 0.45/0.20, advanced 0.25/0.15]. A pad below the standard via escalates
+    to the advanced rung (rung 1); a pad below even the advanced via is held at it.
+    """
+    lad = fab_floor_ladder(4)   # [0.45/0.20, 0.25/0.15] (2- and 4-layer share these vias)
     fails = []
 
-    def check(label, got, exp_size, exp_status, pad_min, configured):
-        size, drill, status = got
+    def check(label, got, exp_size, exp_status, exp_rung, pad_min, configured):
+        size, drill, status, rung = got
         if status != exp_status:
             fails.append(f"{label}: status {status} != {exp_status}")
+        if rung != exp_rung:
+            fails.append(f"{label}: rung {rung} != {exp_rung}")
         if abs(size - exp_size) > 1e-6:
             fails.append(f"{label}: size {size} != {exp_size}")
         # universal invariants: never grow, and (unless held at floor) never bulge
@@ -63,20 +69,24 @@ def test_clamp_math(verbose):
         if drill >= size:
             fails.append(f"{label}: drill {drill} >= size {size}")
         if verbose and not fails:
-            print(f"  {label}: {size}/{drill} ({status})  OK")
+            print(f"  {label}: {size}/{drill} ({status}, rung {rung})  OK")
 
-    # already fits -> unchanged
-    check("fits", clamp_via_to_pad(0.3, 0.2, _pad(0.5, 0.5), f4), 0.3, 'fits', 0.5, 0.3)
-    # keks: Ø0.5 in 0.41 pad -> shrink to 0.41 (>= 0.30 floor)
-    check("keks 0.5->0.41", clamp_via_to_pad(0.5, 0.3, _pad(0.41, 0.41), f4), 0.41, 'clamped', 0.41, 0.5)
-    # ulx3s: Ø0.5 in 0.40 pad -> 0.40
-    check("0.5->0.40", clamp_via_to_pad(0.5, 0.3, _pad(0.40, 0.40), f4), 0.40, 'clamped', 0.40, 0.5)
-    # rect/oval pad: clamp to the MIN dimension
-    check("oval min-dim", clamp_via_to_pad(0.5, 0.3, _pad(0.9, 0.42), f4), 0.42, 'clamped', 0.42, 0.5)
-    # pad below the 4-layer floor -> held at floor, still bulges
-    check("below floor (4L)", clamp_via_to_pad(0.5, 0.3, _pad(0.28, 0.28), f4), 0.30, 'floor', 0.28, 0.5)
-    # 2-layer floor is 0.45: a 0.25-wide pad can't host any real via -> floor
-    check("below floor (2L)", clamp_via_to_pad(0.5, 0.3, _pad(0.25, 0.875), f2), 0.45, 'floor', 0.25, 0.5)
+    # already fits -> unchanged, nominal rung
+    check("fits", clamp_via_to_pad(0.3, 0.2, _pad(0.5, 0.5), lad), 0.3, 'fits', 0, 0.5, 0.3)
+    # 0.46 pad still >= standard 0.45 via -> clamps at rung 0 (no escalation)
+    check("0.5->0.46 std", clamp_via_to_pad(0.5, 0.3, _pad(0.46, 0.46), lad), 0.46, 'clamped', 0, 0.46, 0.5)
+    # keks: Ø0.5 in 0.41 pad < 0.45 standard -> escalate to advanced rung, shrink to 0.41
+    check("keks 0.5->0.41", clamp_via_to_pad(0.5, 0.3, _pad(0.41, 0.41), lad), 0.41, 'clamped', 1, 0.41, 0.5)
+    # ulx3s: Ø0.5 in 0.40 pad -> 0.40 at advanced rung
+    check("0.5->0.40", clamp_via_to_pad(0.5, 0.3, _pad(0.40, 0.40), lad), 0.40, 'clamped', 1, 0.40, 0.5)
+    # rect/oval pad: clamp to the MIN dimension (advanced rung)
+    check("oval min-dim", clamp_via_to_pad(0.5, 0.3, _pad(0.9, 0.42), lad), 0.42, 'clamped', 1, 0.42, 0.5)
+    # pad below the advanced via floor (0.25) -> held at the deepest floor, still bulges
+    check("below floor", clamp_via_to_pad(0.5, 0.3, _pad(0.22, 0.22), lad), 0.25, 'floor', 1, 0.22, 0.5)
+    # advanced tier directly = single-rung [0.25/0.15] ladder, no escalation possible
+    lad_adv = fab_floor_ladder(4, 'advanced')
+    check("adv 0.5->0.40", clamp_via_to_pad(0.5, 0.3, _pad(0.40, 0.40), lad_adv), 0.40, 'clamped', 0, 0.40, 0.5)
+    check("adv below floor", clamp_via_to_pad(0.5, 0.3, _pad(0.20, 0.20), lad_adv), 0.25, 'floor', 0, 0.20, 0.5)
     return fails
 
 
@@ -85,15 +95,21 @@ def _via_in_pad_violations(pcb, fp, vias, configured_via, fab):
     violations. Invariant: a placed via never bulges past its pad beyond the
     unavoidable fab floor, and is never larger than the configured via.
     Returns (n_in_pad, n_clamped_below_cfg, violations)."""
-    floor_dia = fab['fine_via_diameter']
+    floor_dia = fab['via_diameter']   # deepest reachable fab via (fab_floor_min)
     pads = [p for p in fp.pads if getattr(p, 'drill', 0) == 0 and p.net_id]
+    # Only TRUE via-in-pad vias (centred on the pad) are governed by the clamp; an
+    # off-pad staggered via with a connecting stub legitimately extends past a tiny
+    # pad. Match by the code's OWN via-in-pad test (hypot <= POSITION_TOLERANCE),
+    # not merely landing in the pad bbox -- a 0.45 via parked a hair off a 0.25 pad
+    # is an off-pad escape, not a clamp candidate.
+    from bga_fanout.constants import POSITION_TOLERANCE
     viols, n_in_pad, n_clamped = [], 0, 0
     for v in vias:
         pad = None
         for p in pads:
             if (p.net_id == v['net_id'] and
-                    abs(p.global_x - v['x']) <= p.size_x / 2 + 1e-6 and
-                    abs(p.global_y - v['y']) <= p.size_y / 2 + 1e-6):
+                    abs(p.global_x - v['x']) <= POSITION_TOLERANCE and
+                    abs(p.global_y - v['y']) <= POSITION_TOLERANCE):
                 if pad is None or min(p.size_x, p.size_y) < min(pad.size_x, pad.size_y):
                     pad = p
         if pad is None:
@@ -119,8 +135,8 @@ def _run(fn):
 def test_methods(verbose):
     """Each via-dropping fanout method clamps its via-in-pads at placement."""
     fails = []
-    fab4 = fab_floors(4)
-    fab2 = fab_floors(2)
+    fab4 = fab_floor_min(4)   # deepest reachable fab floor (the advanced via)
+    fab2 = fab_floor_min(2)
 
     if not os.path.exists(BGA_BOARD):
         print(f"  [SKIP] BGA board absent: {BGA_BOARD}")
