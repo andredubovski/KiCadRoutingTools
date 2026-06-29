@@ -431,7 +431,9 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
 ### 4. Verify Results
 
 ```bash
-# Check for DRC violations (default clearance: 0.2mm)
+# Check for DRC violations. With no -c, grades at the clearance the routing
+# steps wrote into the sibling .kicad_pro (the smallest clearance any step
+# actually used); falls back to 0.2mm if there's no project. Pass -c to override.
 python check_drc.py kicad_files/output.kicad_pcb
 
 # Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids

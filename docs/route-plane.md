@@ -597,11 +597,16 @@ via or segment touching the pad's copper (including vias landed inside the
 pad), and the pad not sitting directly on a zone layer — and retries each
 with a stitching via + short trace. The retry uses the same parameter
 escalation as `route_planes.py`: the run parameters first, then scoped fine
-parameters (grid 0.05mm, clearance 0.15mm, track = min(pad min dimension,
-0.15mm)) when the pad is fine-pitch (a same-component neighbor pad within
-0.65mm, or pad min dimension below 0.35mm). Obstacle maps for each retry are
-built on a small window around the pad, so fine grids stay cheap on large
-boards. Per-pad outcomes are printed, and pads that still fail are listed in
+parameters when the pad is fine-pitch (a same-component neighbor pad within
+0.65mm, or pad min dimension below 0.35mm). The fine retry uses a finer grid
+(0.05mm) and steps the clearance DOWN from the run value toward the
+manufacturing floor for the board's layer count (the JLC fab floor, ~0.127mm
+2-layer / 0.10mm 4+), narrowing the tap track to the fab track floor, and stops
+at the loosest clearance that routes — there is no hard-coded "fine clearance"
+(issue #226). The clearance it actually used is recorded into the output
+`.kicad_pro` DRC floor and `JSON_SUMMARY` (`min_clearance_used`) so `check_drc`
+grades the board at it. Obstacle maps for each retry are built on a small window
+around the pad, so fine grids stay cheap on large boards. Per-pad outcomes are printed, and pads that still fail are listed in
 the summary. Use `--no-repair-pads` to only reconnect zone islands.
 
 `route_planes.py` itself applies the same fine-parameter retry to fine-pitch

@@ -12,7 +12,10 @@ Checks a routed PCB for Design Rule Check violations.
 python check_drc.py output.kicad_pcb [OPTIONS]
 
 Options:
-  --clearance FLOAT    Track-to-track clearance in mm (default: 0.2)
+  --clearance FLOAT    Track-to-track clearance in mm. Default: auto-detected from
+                       the sibling .kicad_pro Default net-class clearance (the value
+                       the routing steps recorded as actually used, incl. auto-stepped
+                       fine-pitch taps); falls back to 0.2 if no project is found.
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
   --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm (default: 0.2)
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
@@ -36,10 +39,10 @@ the listing is never silently truncated relative to the header count. Use
 ### Examples
 
 ```bash
-# Check with default clearances
+# Auto-grade at the clearance the board was routed to (read from its .kicad_pro)
 python check_drc.py routed.kicad_pcb
 
-# Check with tighter clearances
+# Override the grading clearance explicitly
 python check_drc.py routed.kicad_pcb --clearance 0.15
 
 # Check with hole-to-hole clearance (for via drill spacing)

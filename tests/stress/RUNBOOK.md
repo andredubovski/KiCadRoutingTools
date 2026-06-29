@@ -242,6 +242,14 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    hole-to-hole case of the general rule (grade at the value you routed at, never
    a stricter one): route AND grade at the floor so the two match and the result
    is genuinely manufacturable.
+   AUTO-GRADE: `check_drc.py` now reads the routed clearance from the output
+   `.kicad_pro` (the routing steps record the smallest clearance any step actually
+   used — incl. auto-stepped fine-pitch taps — as `min_clearance_used` in
+   JSON_SUMMARY and write it to the project DRC floor), so a bare `check_drc.py
+   <out>` grades at the clearance you routed at. Keep passing the explicit
+   `--clearance <floor> --hole-to-hole-clearance <floor>` for controlled A/B
+   replays where you want a fixed, reproducible grading value regardless of the
+   per-board project.
    BASELINE: before routing, run check_drc.py on the unrouted input at the same
    floor and record the count — real boards have pre-existing pad-to-pad
    proximity that is not the router's fault. Report post-route DRC as total AND delta.
