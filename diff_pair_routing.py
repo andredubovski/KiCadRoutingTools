@@ -2451,9 +2451,14 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             partner_stub = [s for s in board_segs if s.net_id == partner_net]
             partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs + partner_stub
             partner_v = [v for v in pair_vias if v.net_id != net_id] + committed_vias
+            # The partner net's pads are excluded from the diff-pair map too -
+            # re-add them as a via keep-out so the leg's transition via doesn't
+            # land on one (issue #241).
+            partner_pads = (getattr(pcb_data, 'pads_by_net', None) or {}).get(partner_net, [])
             ls, lv, it = _route_hybrid_legs(
                 pcb_data, net_id, config, leg_obs, layer_names, coord,
-                mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias)
+                mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias,
+                partner_pads=partner_pads)
             if ls is None:
                 ok = False
                 break
@@ -2562,14 +2567,22 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
 
 def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                        mid_float, term_src, term_tgt, partner_segs, partner_vias,
-                       pair_vias):
+                       pair_vias, partner_pads=None):
     """Point-to-point single-ended legs joining each terminal to the coupled
     middle's near end, routing around partner copper. Returns (segs, vias, iters)
-    or (None, None, 0) if either leg can't be routed."""
+    or (None, None, 0) if either leg can't be routed.
+
+    partner_pads: the OTHER pair-net's pads. The diff-pair obstacle map excludes
+    both pair nets, so without re-adding them as a VIA keep-out the leg would drop
+    its layer-transition via on top of a partner pad (issue #241). Track passage
+    is left open (the coupled trace legitimately runs close); only via drops are
+    kept clear."""
     from single_ended_routing import _route_leg, _path_to_segments_vias
     from obstacle_map import (add_segments_list_as_obstacles, remove_segments_list_from_obstacles,
                               add_vias_list_as_obstacles, remove_vias_list_from_obstacles,
+                              add_pads_via_keepout, remove_pads_via_keepout,
                               get_same_net_through_hole_positions)
+    partner_pads = partner_pads or []
     router = GridRouter(
         via_cost=config.via_cost_units(), h_weight=config.heuristic_weight,
         turn_cost=config.turn_cost, via_proximity_cost=int(config.via_proximity_cost),
@@ -2604,6 +2617,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
 
     add_segments_list_as_obstacles(obstacles, partner_segs, config)
     add_vias_list_as_obstacles(obstacles, partner_vias, config)
+    add_pads_via_keepout(obstacles, partner_pads, config)
     try:
         segs, vias, iters = [], [], 0
         for term, mid_pt in ((term_src, mid_float[0]), (term_tgt, mid_float[-1])):
@@ -2647,6 +2661,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
     finally:
         remove_segments_list_from_obstacles(obstacles, partner_segs, config)
         remove_vias_list_from_obstacles(obstacles, partner_vias, config)
+        remove_pads_via_keepout(obstacles, partner_pads, config)
 
 
 def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,

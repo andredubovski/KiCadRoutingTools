@@ -13,8 +13,10 @@ dropping vias straight down. That gives two complementary goals:
   * AVOID  - a cap pad must clear, by `clearance`, every real fanout via of a
              DIFFERENT net (these are the #130 violations), plus any foreign
              escape track on the cap's own copper side (escapes can land on the
-             bottom). Same-net vias are fine - a cap pad may sit right on one
-             (via-in-pad sharing).
+             bottom), plus any foreign-net COMPONENT pad (#235: a move may never
+             slide a cap pad onto a neighbour's pad -> a PAD-PAD short).
+             Same-net vias/pads are fine - a cap pad may sit right on one
+             (via-in-pad / same-net copper sharing).
   * ATTRACT - pull each cap pad toward the nearest BGA ball of its OWN net, so
              that a later GND/power via dropped at the ball also lands on the
              cap pad (one shared via connects ball + cap + plane).
@@ -121,6 +123,11 @@ class _Cap:
             half_y = hx * s + hy * c
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
         self.local_bounds = courtyard_local
+        # Rotation-only geometry is reused across every candidate position
+        # (millions of times on a dense board), so memoize it per angle and
+        # just translate per call. Keyed by rounded rotation.
+        self._rect_cache: Dict[float, Tuple[float, float, float, float]] = {}
+        self._pad_cache: Dict[float, list] = {}
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -128,24 +135,36 @@ class _Cap:
         rot = self.rot if rot is None else rot
         # local_bounds is the footprint-LOCAL courtyard; rotate by the
         # absolute placement angle (matching how static obstacle rects are
-        # built), not the delta from seed.
-        b = _rotate_local_bounds(*self.local_bounds, rot)
+        # built), not the delta from seed. The rotation is position-independent
+        # -> cache it and translate.
+        key = round(rot, 3)
+        b = self._rect_cache.get(key)
+        if b is None:
+            b = _rotate_local_bounds(*self.local_bounds, rot)
+            self._rect_cache[key] = b
         return (x + b[0], y + b[1], x + b[2], y + b[3])
 
     def pad_rects(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
         y = self.y if y is None else y
         rot = self.rot if rot is None else rot
-        delta = (rot - self.seed_rot) % 360
-        rad = math.radians(-delta)
-        c, s = math.cos(rad), math.sin(rad)
-        swap = round(delta) % 180 == 90
+        key = round((rot - self.seed_rot) % 360, 3)
+        cache = self._pad_cache.get(key)
+        if cache is None:
+            delta = (rot - self.seed_rot) % 360
+            rad = math.radians(-delta)
+            c, s = math.cos(rad), math.sin(rad)
+            swap = round(delta) % 180 == 90
+            cache = []
+            for off_x, off_y, hx, hy, net in self.pads:
+                ox = off_x * c - off_y * s
+                oy = off_x * s + off_y * c
+                HX, HY = (hy, hx) if swap else (hx, hy)
+                cache.append((ox, oy, HX, HY, net))
+            self._pad_cache[key] = cache
         out = []
-        for off_x, off_y, hx, hy, net in self.pads:
-            ox = off_x * c - off_y * s
-            oy = off_x * s + off_y * c
+        for ox, oy, HX, HY, net in cache:
             cx, cy = x + ox, y + oy
-            HX, HY = (hy, hx) if swap else (hx, hy)
             out.append((cx - HX, cy - HY, cx + HX, cy + HY, net))
         return out
 
@@ -174,7 +193,8 @@ class _Repair:
                  clearance: float, grid_step: float,
                  board_edge_clearance: float, near_margin: float,
                  capture_radius: float, default_via_size: float,
-                 cap_prefix: str, extra_locked: Set[str]):
+                 cap_prefix: str, extra_locked: Set[str],
+                 max_displacement_cap: float = 3.0):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -242,6 +262,13 @@ class _Repair:
         # per board side only: a back-side decoupling cap legitimately sits
         # under a top-side BGA (they overlap in XY but not in copper). Via
         # disks are through-vias, so they apply to caps on either side.
+        # --- avoidance: foreign-net COMPONENT pads (#235) ---
+        # The cap optimizer must not slide a cap pad onto a neighbouring
+        # component's pad of a different net -> a PAD-PAD short. Each entry is
+        # an axis-aligned pad rect plus its net and side ('F'/'B', or None for
+        # a through-hole pad that blocks both sides). Same-net pads are fine.
+        self.foreign_pads: List[
+            Tuple[float, float, float, float, int, Optional[str]]] = []
         self.caps: Dict[str, _Cap] = {}
         self.static_rects: List[Tuple[Tuple[float, float, float, float], str]] = []
         for ref, fp in pcb_data.footprints.items():
@@ -265,6 +292,96 @@ class _Repair:
             b = _rotate_local_bounds(*lb, fp.rotation)
             self.static_rects.append(((fp.x + b[0], fp.y + b[1],
                                        fp.x + b[2], fp.y + b[3]), side))
+            # record this part's copper pads as foreign-pad keep-outs
+            for p in fp.pads:
+                copper = [l for l in p.layers if str(l).endswith('.Cu')]
+                if not copper:
+                    continue  # paste/mask-only aperture
+                through = (p.drill or 0) > 0
+                pside = None if through else (
+                    'B' if any(str(l).startswith('B') for l in copper) else 'F')
+                tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
+                c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
+                hx, hy = p.size_x / 2, p.size_y / 2
+                half_x = hx * c + hy * s
+                half_y = hx * s + hy * c
+                self.foreign_pads.append(
+                    (p.global_x - half_x, p.global_y - half_y,
+                     p.global_x + half_x, p.global_y + half_y,
+                     p.net_id, pside))
+
+        # Per-cap spatially-pruned neighbour lists (perf). A cap moves at most
+        # max_displacement_cap from its seed, so anything whose seed gap already
+        # exceeds that (plus the relevant spans / clearance) can NEVER constrain
+        # it -- excluding it is exact, not an approximation. This turns the
+        # per-candidate hard_blocked / penalty loops from O(all parts) into
+        # O(handful), the dominant cost on dense boards (#213 profiling).
+        cap_geom: Dict[str, Tuple[float, float, float, Tuple]] = {}
+        for ref, cap in self.caps.items():
+            r = cap.rect()
+            cx, cy = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
+            span = math.hypot(r[2] - cx, r[3] - cy)
+            cap_geom[ref] = (cx, cy, span, r)
+
+        self.cap_foreign_pads: Dict[str, List[
+            Tuple[float, float, float, float, int, Optional[str]]]] = {}
+        # static obstacle rects (with their global index, same side) in reach
+        self.cap_static: Dict[str, List[Tuple[int, Tuple]]] = {}
+        # other movable caps (refs, same side) that could ever touch this one
+        self.cap_caps: Dict[str, List[str]] = {}
+        # foreign-net tracks on the cap's side in reach
+        self.cap_segs: Dict[str, List[Tuple]] = {}
+        # through-vias in reach (each (vx, vy, net, keepout))
+        self.cap_vias: Dict[str, List[Tuple[float, float, int, float]]] = {}
+        cap_refs = list(self.caps)
+        for ref, cap in self.caps.items():
+            ccx, ccy, span, crect = cap_geom[ref]
+            reach = max_displacement_cap + span + clearance
+            near_pads = []
+            for fp_pad in self.foreign_pads:
+                px = (fp_pad[0] + fp_pad[2]) / 2.0
+                py = (fp_pad[1] + fp_pad[3]) / 2.0
+                phalf = math.hypot(fp_pad[2] - px, fp_pad[3] - py)
+                if math.hypot(px - ccx, py - ccy) <= reach + phalf:
+                    near_pads.append(fp_pad)
+            self.cap_foreign_pads[ref] = near_pads
+
+            near_static = []
+            for idx, (sr, side) in enumerate(self.static_rects):
+                if side != cap.side:
+                    continue
+                if _rect_gap(crect, sr) <= max_displacement_cap + clearance + EPS:
+                    near_static.append((idx, sr))
+            self.cap_static[ref] = near_static
+
+            near_caps = []
+            for oref in cap_refs:
+                if oref == ref or self.caps[oref].side != cap.side:
+                    continue
+                # both caps can move, so the combined reach is 2x the budget
+                if (_rect_gap(crect, cap_geom[oref][3])
+                        <= 2 * max_displacement_cap + clearance + EPS):
+                    near_caps.append(oref)
+            self.cap_caps[ref] = near_caps
+
+            near_segs = []
+            seg_reach = max_displacement_cap + 2 * span + clearance
+            for seg in self.segments:
+                if seg[6] != cap.side:
+                    continue
+                d = _point_to_seg_dist(ccx, ccy, seg[0], seg[1], seg[2], seg[3])
+                if d <= seg_reach + seg[5]:
+                    near_segs.append(seg)
+            self.cap_segs[ref] = near_segs
+
+            near_vias = []
+            for v in self.vias:
+                # v[3] = via_radius + clearance keep-out; a via that can reach
+                # a pad must be within (move + span + keep-out) of the seed.
+                if math.hypot(v[0] - ccx, v[1] - ccy) <= (
+                        max_displacement_cap + span + v[3]):
+                    near_vias.append(v)
+            self.cap_vias[ref] = near_vias
 
         # Baseline same-side overlaps at the seed placement. Collisions are
         # scored RELATIVE to these: the repair must not introduce or worsen a
@@ -285,7 +402,13 @@ class _Repair:
                     self.base_cap[frozenset((ra, rb))] = self._overlap(
                         ra_rect, cb.rect())
         self.base_seg: Dict[str, float] = {
-            ref: self.seg_penalty(cap, cap.x, cap.y, cap.rot)
+            ref: self.seg_penalty(ref, cap, cap.x, cap.y, cap.rot)
+            for ref, cap in self.caps.items()}
+        # Baseline foreign-pad encroachment at the seed (#235): the repair may
+        # not introduce or worsen a foreign-net pad-pad overlap, but tolerates
+        # one already present at the seed (not this step's concern).
+        self.base_pad: Dict[str, float] = {
+            ref: self.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
 
     @staticmethod
@@ -299,12 +422,17 @@ class _Repair:
         """Courtyard-clearance shortfall between two rects (0 if clear)."""
         return max(0.0, self.clearance - _rect_gap(a, b))
 
-    def via_penalty(self, cap, x, y, rot):
+    def via_penalty(self, cap, x, y, rot, vias=None):
         """Sum of foreign-net via penetration depths for a cap placement
-        (how far each pad intrudes inside a different-net via's keep-out)."""
+        (how far each pad intrudes inside a different-net via's keep-out).
+
+        vias defaults to the full board list; callers with a ref pass the
+        per-cap pruned list (self.cap_vias[ref]), which is exact -- a via that
+        can penetrate a pad is necessarily within the cap's reach."""
+        vias = self.vias if vias is None else vias
         pen = 0.0
         for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            for vx, vy, vnet, keepout in self.vias:
+            for vx, vy, vnet, keepout in vias:
                 if vnet == net:
                     continue
                 d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
@@ -312,20 +440,40 @@ class _Repair:
                     pen += (keepout - d)
         return pen
 
-    def seg_penalty(self, cap, x, y, rot):
+    def seg_penalty(self, ref, cap, x, y, rot):
         """Sum of foreign-net, same-side track penetration for a placement
-        (pad modelled as its centre inflated by the pad half-diagonal)."""
+        (pad modelled as its centre inflated by the pad half-diagonal). Uses
+        the per-cap pruned, already-same-side track list."""
         pen = 0.0
+        segs = self.cap_segs[ref]
         for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
             cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
             half_diag = math.hypot((bx1 - bx0) / 2.0, (by1 - by0) / 2.0)
-            for x1, y1, x2, y2, snet, halfw, side in self.segments:
-                if snet == net or side != cap.side:
+            for x1, y1, x2, y2, snet, halfw, side in segs:
+                if snet == net:
                     continue
                 req = halfw + half_diag
                 d = _point_to_seg_dist(cx, cy, x1, y1, x2, y2)
                 if d < req - EPS:
                     pen += (req - d)
+        return pen
+
+    def pad_penalty(self, ref, cap, x, y, rot):
+        """Sum of foreign-net component-pad clearance shortfall for a cap
+        placement (#235): how far each cap pad intrudes inside a different-net
+        pad's clearance keep-out. A through-hole foreign pad blocks both sides;
+        an SMD one only its own side. Same-net pads are ignored (a shared via
+        / touching same-net copper is fine)."""
+        pen = 0.0
+        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for (px0, py0, px1, py1, pnet, pside) in self.cap_foreign_pads[ref]:
+                if pnet == net:
+                    continue
+                if pside is not None and pside != cap.side:
+                    continue  # SMD pad on the other side
+                gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < self.clearance - EPS:
+                    pen += (self.clearance - gap)
         return pen
 
     def attraction(self, cap, x, y, rot):
@@ -351,20 +499,21 @@ class _Repair:
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
             return True
-        for idx, (r, side) in enumerate(self.static_rects):
-            if side != cap.side:
-                continue
+        # only same-side parts/caps within reach can collide (pre-pruned)
+        for idx, r in self.cap_static[ref]:
             base = self.base_static.get((ref, idx), 0.0)
             if self._overlap(rect, r) > base + EPS:
                 return True
-        for other_ref, other in self.caps.items():
-            if other_ref == ref or other.side != cap.side:
-                continue
+        for other_ref in self.cap_caps[ref]:
             base = self.base_cap.get(frozenset((ref, other_ref)), 0.0)
-            if self._overlap(rect, other.rect()) > base + EPS:
+            if self._overlap(rect, self.caps[other_ref].rect()) > base + EPS:
                 return True
         # no new overlap with a foreign-net track on the cap's side
-        if self.seg_penalty(cap, x, y, rot) > self.base_seg.get(ref, 0.0) + EPS:
+        if self.seg_penalty(ref, cap, x, y, rot) > self.base_seg.get(ref, 0.0) + EPS:
+            return True
+        # no new overlap with a foreign-net component pad (#235): rejects the
+        # cap-onto-neighbour-pad short the via/attraction objective could chase.
+        if self.pad_penalty(ref, cap, x, y, rot) > self.base_pad.get(ref, 0.0) + EPS:
             return True
         return False
 
@@ -372,7 +521,7 @@ class _Repair:
         if self.hard_blocked(ref, cap, x, y, rot):
             return float('inf')
         disp = math.hypot(x - cap.seed_x, y - cap.seed_y)
-        return (VIA_WEIGHT * self.via_penalty(cap, x, y, rot)
+        return (VIA_WEIGHT * self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
                 + ATTRACT_WEIGHT * self.attraction(cap, x, y, rot)
                 + DISPLACEMENT_WEIGHT * disp)
 
@@ -392,6 +541,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             cap_prefix: str = "C,R",
                             lock_refs: Optional[List[str]] = None,
                             max_passes: int = 30,
+                            via_clear_fallback: bool = True,
                             verbose: bool = False,
                             on_move=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout vias and toward
@@ -400,6 +550,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
     new_rotation} for moved caps), 'resolved', 'unresolved' (refs still
     overlapping a foreign via), and 'bga_refs'.
+
+    via_clear_fallback (#213): when True (default), any cap the normal cost
+    descent leaves grazing a foreign via is jumped to the nearest position that
+    fully clears it (still respecting every hard clearance). It is deliberately
+    NOT exposed on the CLI / GUI -- flip this argument in code to disable.
 
     on_move, if given, is a callback invoked with the internal _Repair state
     once at the seed placement and again after every accepted cap move. It is
@@ -415,7 +570,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
 
     st = _Repair(pcb_data, pcb_file, clearance, grid_step,
                  board_edge_clearance, near_margin, capture_radius,
-                 default_via_size, cap_prefix, extra_locked)
+                 default_via_size, cap_prefix, extra_locked,
+                 max_displacement_cap=max_displacement_cap)
 
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "
@@ -431,7 +587,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
 
     # Initial violators
     violators0 = [r for r, c in st.caps.items()
-                  if st.via_penalty(c, c.x, c.y, c.rot) > EPS]
+                  if st.via_penalty(c, c.x, c.y, c.rot, st.cap_vias[r]) > EPS]
     print(f"Caps initially overlapping a foreign via: {len(violators0)}"
           + (f" ({', '.join(sorted(violators0))})" if violators0 else ""))
 
@@ -442,7 +598,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     rotate = {r: False for r in st.caps}
     # process worst violators first
     order = sorted(st.caps, key=lambda r: st.via_penalty(
-        st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot), reverse=True)
+        st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot,
+        st.cap_vias[r]), reverse=True)
 
     for pass_num in range(1, max_passes + 1):
         moves = 0
@@ -469,7 +626,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                           f"cost {best[0]:.3f}")
 
         residual = {r: st.via_penalty(st.caps[r], st.caps[r].x,
-                                      st.caps[r].y, st.caps[r].rot)
+                                      st.caps[r].y, st.caps[r].rot,
+                                      st.cap_vias[r])
                     for r in st.caps}
         still = [r for r, p in residual.items() if p > EPS]
         if not still:
@@ -493,6 +651,43 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             if verbose:
                 print(f"  escalating budget/rotation for {len(still)} cap(s)")
 
+    # Fallback (#213): a cap may still graze a foreign via because the soft cost
+    # (same-net attraction + displacement) judged the tiny penetration cheaper
+    # than a clear-but-distant spot, so the greedy descent never relocates it.
+    # A shipped PAD-VIA short is worse than a displaced decap, so for any cap
+    # still in via-conflict, jump it to the best position (within the full
+    # displacement budget) that FULLY clears every foreign via -- cost() still
+    # rejects any hard-constraint violation (board edge, courtyard, foreign
+    # track/pad #235), so this can never introduce a new short/overlap; it only
+    # overrides the soft trade-off. If no clean via-clearing spot exists the cap
+    # is left as-is and reported unresolved (needs a via re-drop, not a move).
+    if via_clear_fallback:
+        stuck = [r for r in st.caps
+                 if st.via_penalty(st.caps[r], st.caps[r].x, st.caps[r].y,
+                                   st.caps[r].rot, st.cap_vias[r]) > EPS]
+        rots_all = ROTATIONS if allow_rotations else None
+        for ref in stuck:
+            cap = st.caps[ref]
+            rots = rots_all if rots_all is not None else [cap.rot]
+            best = None  # (cost, x, y, rot)
+            for cx, cy in _candidate_positions(cap, max_displacement_cap,
+                                               step, grid_step):
+                for rot in rots:
+                    if st.via_penalty(cap, cx, cy, rot, st.cap_vias[ref]) > EPS:
+                        continue
+                    c = st.cost(ref, cap, cx, cy, rot)  # inf if hard-blocked
+                    if c == float('inf'):
+                        continue
+                    if best is None or c < best[0] - EPS:
+                        best = (c, cx, cy, rot)
+            if best is not None:
+                cap.x, cap.y, cap.rot = best[1], best[2], best[3]
+                disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
+                if verbose:
+                    print(f"  fallback: {ref} relocated to clear via at "
+                          f"disp {disp:.2f}mm -> ({cap.x:.3f},{cap.y:.3f}) "
+                          f"rot {cap.rot:g}")
+
     placements = []
     resolved = []
     for ref, cap in st.caps.items():
@@ -502,11 +697,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             placements.append({'reference': ref, 'new_x': cap.x,
                                'new_y': cap.y, 'new_rotation': cap.rot})
         if (ref in violators0
-                and st.via_penalty(cap, cap.x, cap.y, cap.rot) <= EPS):
+                and st.via_penalty(cap, cap.x, cap.y, cap.rot,
+                                   st.cap_vias[ref]) <= EPS):
             resolved.append(ref)
     unresolved = [r for r in st.caps
                   if st.via_penalty(st.caps[r], st.caps[r].x,
-                                    st.caps[r].y, st.caps[r].rot) > EPS]
+                                    st.caps[r].y, st.caps[r].rot,
+                                    st.cap_vias[r]) > EPS]
 
     print(f"Moved {len(placements)} cap(s); resolved {len(resolved)}/"
           f"{len(violators0)} initial violations; "

@@ -1602,6 +1602,65 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         _batch_vias(obstacles, via_cells, blocked_vias)
 
 
+def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
+                           extra_clearance: float = 0.0):
+    """The grid cells a via CENTER must avoid to clear `pad` (via half-size +
+    clearance from the pad copper). Mirrors the via pass in _add_pad_obstacle so
+    the keep-out geometry matches exactly. Returns an Nx2 int array, or None if the
+    pad is on no copper layer (so it can't conflict with a through-via)."""
+    expanded_layers = expand_pad_layers(pad.layers, config.layers)
+    if not any(layer.endswith('.Cu') for layer in expanded_layers):
+        return None
+    gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+    off_x = pad.global_x - gx * coord.grid_step
+    off_y = pad.global_y - gy * coord.grid_step
+    half_width = pad.size_x / 2
+    half_height = pad.size_y / 2
+    clearance = config.clearance
+    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+    if lc > clearance:
+        clearance = lc
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(half_width, half_height)
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0
+    corner_buffer = coord.grid_step * 0.75 if extra_clearance > 0 else None
+    via_margin = config.via_size / 2 + clearance + extra_clearance
+    return pad_blocked_cells_array(gx, gy, half_width, half_height, via_margin,
+                                   config.grid_step, corner_radius, corner_buffer,
+                                   off_x, off_y, rotation_deg=pad.rect_rotation)
+
+
+def add_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
+                         config: GridRouteConfig, extra_clearance: float = 0.0):
+    """Stamp a VIA-ONLY keep-out (no track keep-out) around each pad, so the
+    router won't DROP a via within clearance of it while tracks may still pass.
+
+    Issue #241: the diff-pair obstacle map excludes BOTH pair nets, so a coupled
+    pair's single-ended leg can't see the PARTNER net's pads and parks its
+    layer-transition via on one (the /SYZYGY1.C2P_CLK leg via grazing C2P_CLK_N's
+    J4.36 pad). Adding the partner pads as a via keep-out for the duration of leg
+    routing makes the leg A* place that via clear of them, while the coupled trace
+    still runs close. Ref-counted -> pair with remove_pads_via_keepout."""
+    coord = GridCoord(config.grid_step)
+    for pad in pads:
+        cells = _pad_via_keepout_cells(pad, coord, config, extra_clearance)
+        if cells is not None and len(cells):
+            obstacles.add_blocked_vias_batch(np.ascontiguousarray(cells.astype(np.int32)))
+
+
+def remove_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
+                            config: GridRouteConfig, extra_clearance: float = 0.0):
+    """Undo add_pads_via_keepout (decrements the ref-counted via keep-out)."""
+    coord = GridCoord(config.grid_step)
+    for pad in pads:
+        cells = _pad_via_keepout_cells(pad, coord, config, extra_clearance)
+        if cells is not None and len(cells):
+            obstacles.remove_blocked_vias_batch(np.ascontiguousarray(cells.astype(np.int32)))
+
+
 def build_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                        exclude_net_id: int, unrouted_stubs: Optional[List[Tuple[float, float]]] = None) -> GridObstacleMap:
     """Build Rust obstacle map from PCB data (legacy function for compatibility)."""
