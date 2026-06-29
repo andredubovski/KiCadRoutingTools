@@ -2474,6 +2474,92 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     return None
 
 
+def _seg_to_seglist_min_edge(x1, y1, x2, y2, width, layer, other_segs):
+    """Min EDGE gap (centre distance minus the two half-widths) from segment
+    (x1,y1)-(x2,y2) of the given ``width`` to any same-layer segment in
+    ``other_segs``. inf if there are none on this layer."""
+    best = math.inf
+    for o in other_segs:
+        if o.layer != layer:
+            continue
+        d = _seg_seg_distance(x1, y1, x2, y2, o.start_x, o.start_y, o.end_x, o.end_y)
+        ow = o.width if getattr(o, 'width', 0) else width
+        best = min(best, d - width / 2.0 - ow / 2.0)
+    return best
+
+
+def _seg_seg_distance(ax, ay, bx, by, cx, cy, dx, dy):
+    """Minimum Euclidean distance between segments AB and CD (endpoint sampling --
+    exact for the non-crossing case that matters for a clearance check)."""
+    def pt_seg(px, py, x1, y1, x2, y2):
+        vx, vy = x2 - x1, y2 - y1
+        l2 = vx * vx + vy * vy
+        if l2 <= 0.0:
+            return math.hypot(px - x1, py - y1)
+        t = ((px - x1) * vx + (py - y1) * vy) / l2
+        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        return math.hypot(px - (x1 + t * vx), py - (y1 + t * vy))
+    return min(pt_seg(ax, ay, cx, cy, dx, dy), pt_seg(bx, by, cx, cy, dx, dy),
+               pt_seg(cx, cy, ax, ay, bx, by), pt_seg(dx, dy, ax, ay, bx, by))
+
+
+def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, partner_segs):
+    """Collapse a hybrid leg's short grid->float "join" at the coupled-middle
+    attach end when it pinches the partner track below clearance (#215).
+
+    The leg's single-ended A* lands on the GRID cell nearest the coupled-middle
+    near-end; ``_path_to_segments_vias`` then emits a short join segment from that
+    grid stand-in out to the exact off-grid near-end (``attach_xy``). At a tight
+    P/N junction the two legs' grid stand-in vertices quantise toward each other
+    (the float near-ends are a clean diff-pair-gap apart, but their grid cells
+    round ~half a step closer), so the P and N corners at those stand-ins sit
+    below clearance even though the float near-ends do not -- the SEGMENT-SEGMENT
+    overlaps in #215.
+
+    Fix: drop the join and move the penultimate segment's far vertex onto the
+    exact float near-end, so the leg corner sits at the (farther-apart) float
+    point. This only fires when (a) the original grid corner is actually
+    sub-clearance to the partner copper -- so clean junctions are left untouched
+    and downstream pairs are not perturbed -- and (b) the relocated segment
+    provably clears the partner (and any foreign pad) by the full clearance, so
+    the tilt can never introduce a new graze. Mutates ``leg_segs`` in place."""
+    if len(leg_segs) < 2:
+        return leg_segs
+    ax, ay = attach_xy
+    join = leg_segs[-1]
+    if abs(join.end_x - ax) > 1e-6 or abs(join.end_y - ay) > 1e-6:
+        return leg_segs  # last seg doesn't terminate at the exact near-end
+    if math.hypot(join.end_x - join.start_x, join.end_y - join.start_y) > 1.5 * config.grid_step:
+        return leg_segs  # not a short grid->float join (don't relocate a real run)
+    pen = leg_segs[-2]
+    if pen.layer != join.layer:
+        return leg_segs  # via between leg body and attach -> can't merge across it
+    if abs(pen.end_x - join.start_x) > 1e-6 or abs(pen.end_y - join.start_y) > 1e-6:
+        return leg_segs  # join doesn't continue the penultimate segment
+
+    w = config.get_net_track_width(net_id, pen.layer)
+    # Only act on a REAL local violation: the grid corner (penultimate's far end)
+    # must currently sit below clearance to the partner copper.
+    before = _seg_to_seglist_min_edge(pen.start_x, pen.start_y, pen.end_x, pen.end_y,
+                                      w, pen.layer, partner_segs)
+    if before >= config.clearance - 1e-6:
+        return leg_segs  # corner already clears the partner -> nothing to fix
+    # The relocated segment must clear the partner by the FULL clearance, or we'd
+    # just trade one graze for another (the butterstick D4 tilt-into-partner case).
+    after = _seg_to_seglist_min_edge(pen.start_x, pen.start_y, ax, ay, w, pen.layer, partner_segs)
+    if after < config.clearance - 1e-6 or after <= before + 1e-9:
+        return leg_segs  # collapse doesn't help (or makes it worse)
+    if pcb_data is not None:
+        from single_ended_routing import _seg_foreign_pad_dist
+        fmargin = config.clearance + w / 2.0
+        if _seg_foreign_pad_dist(pcb_data, net_id, pen.start_x, pen.start_y,
+                                 ax, ay, pen.layer) < fmargin - 1e-6:
+            return leg_segs  # collapsed segment would graze a foreign pad
+    pen.end_x, pen.end_y = ax, ay
+    del leg_segs[-1]
+    return leg_segs
+
+
 def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                        mid_float, term_src, term_tgt, partner_segs, partner_vias,
                        pair_vias):
@@ -2554,6 +2640,7 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
                 (ax, ay, layer_names[path[0][2]]),
                 (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
                 through_hole_positions=reuse_holes, pcb_data=pcb_data)
+            _collapse_leg_attach_join(ps, (mid_pt[0], mid_pt[1]), config, pcb_data, net_id, partner_segs)
             segs += ps
             vias += pv
         return segs, vias, iters
