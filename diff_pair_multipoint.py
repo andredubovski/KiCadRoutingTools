@@ -30,7 +30,7 @@ from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
     route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross,
-    _DRC_CLEARANCE_MARGIN, _routing_copper_layers
+    _DRC_CLEARANCE_MARGIN, _routing_copper_layers, _seg_to_seglist_min_edge
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
 from stub_layer_switching import apply_bare_pad_target_via
@@ -77,6 +77,47 @@ def _crosses_committed_legs(new_segments, committed_segments) -> bool:
             if new_seg.layer == old_seg.layer and \
                     _segments_properly_cross(new_seg, old_seg):
                 return True
+    return False
+
+
+def _pn_self_overlaps(new_segments, p_net_id, n_net_id, config, pcb_data=None) -> bool:
+    """True if this leg's new P/N copper comes below clearance to the partner
+    polarity (an intra-pair SEGMENT-SEGMENT overlap, #215). A multipoint leg is a
+    standard coupled route, so it can pinch P against N at the terminal connectors
+    just like a top-level pair -- but unlike the top-level path there is no hybrid
+    swap to fall back on here, so a self-overlapping leg is rejected and the chain
+    falls through to single-ended (the right treatment for these short legs).
+
+    The partner copper includes the pair's pre-existing fanout stubs in pcb_data
+    (not just this leg's own segments): the leg's coupled middle can land on the
+    OTHER net's carried-through escape stub (butterstick USB-PHY/USBD), and the
+    diff-pair obstacle map excludes both pair nets so the router never saw it."""
+    new_p = [s for s in new_segments if s.net_id == p_net_id]
+    new_n = [s for s in new_segments if s.net_id == n_net_id]
+    if not new_p and not new_n:
+        return False
+    own = set(id(s) for s in new_segments)
+    all_p, all_n = list(new_p), list(new_n)
+    if pcb_data is not None:
+        for s in pcb_data.segments:
+            if id(s) in own:
+                continue
+            if s.net_id == p_net_id:
+                all_p.append(s)
+            elif s.net_id == n_net_id:
+                all_n.append(s)
+    if not all_p or not all_n:
+        return False
+    # Only the NEW segments need testing as the moving party -- pre-existing
+    # stub-vs-stub spacing was already DRC-valid before this leg.
+    for s in new_p:
+        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    s.width, s.layer, all_n) < config.clearance - 1e-6:
+            return True
+    for s in new_n:
+        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    s.width, s.layer, all_p) < config.clearance - 1e-6:
+            return True
     return False
 
 
@@ -831,6 +872,12 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             # A wrap-around leg can cross an earlier leg's tracks inside the
             # shared terminal's corridor exemption (issue #56)
             failed_reason = "crosses an earlier leg"
+        elif _pn_self_overlaps(result.get('new_segments', []), pair.p_net_id,
+                               pair.n_net_id, config, pcb_data):
+            # The leg's P/N pinch below clearance -- against its own connectors or
+            # the partner's carried-through fanout stub (#215); no hybrid fallback
+            # here, so reject and let it go single-ended
+            failed_reason = "P/N graze below clearance"
         elif result.get('target_base_dir') is None:
             failed_reason = "missing target direction"
 
