@@ -740,6 +740,24 @@ def main():
             }
         except Exception as _e:
             drc_grazes = {'error': str(_e)}
+
+    # Establish this fanout's clearance floor in the output .kicad_pro so the next
+    # pipeline step and check_drc grade at the clearance the fanout used -- only
+    # lowers, never tightens (issue #160).
+    import clearance_ledger as _cl
+    eff_clearance = _cl.effective(args.clearance)
+    if out_path and os.path.isfile(out_path) \
+            and not getattr(args, 'no_fix_drc_settings', False):
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(
+                out_path, input_pcb=args.pcb,
+                clearance=eff_clearance,
+                track_width=args.width,
+                via_diameter=getattr(args, 'via_size', None),
+                via_drill=getattr(args, 'via_drill', None))
+        except Exception as _e:
+            print(f"  (skipped DRC-settings fix: {_e})")
     summary = {
         'component': args.component,
         'requested': requested,
@@ -755,6 +773,9 @@ def main():
         # grazes graded at --clearance; 'total' counts ALL DRC violations on the
         # output, the segment_segment/via_*/pad_* keys are the fanout-relevant classes.
         'drc_grazes': drc_grazes,
+        # Smallest copper clearance any step actually routed at; downstream steps
+        # and check_drc grade the board at this floor.
+        'min_clearance_used': eff_clearance,
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 

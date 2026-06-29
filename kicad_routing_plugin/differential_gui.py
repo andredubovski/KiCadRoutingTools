@@ -852,6 +852,11 @@ class DifferentialTab(wx.Panel):
         import sys
         import time
 
+        # Fresh clearance ledger so a prior op's fine-pitch clearance doesn't
+        # leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
+
         original_stdout = sys.stdout
         if self.append_log:
             sys.stdout = StdoutRedirector(self.append_log, original_stdout)
@@ -1066,8 +1071,12 @@ class DifferentialTab(wx.Panel):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
                                                     apply_targets_to_board)
+                # Grade at the smallest clearance any step actually routed at, like the CLI.
+                import clearance_ledger
+                eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
+                    if cfg.get('clearance') else cfg.get('clearance')
                 targets = compute_targets(
-                    clearance=cfg.get('clearance'),
+                    clearance=eff_clearance,
                     hole_to_hole=cfg.get('hole_to_hole_clearance'),
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=cfg.get('track_width'),

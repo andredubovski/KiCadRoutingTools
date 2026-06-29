@@ -2808,15 +2808,28 @@ Examples:
     if not args.no_fix_drc_settings and not args.dry_run \
             and args.output_file and os.path.isfile(args.output_file):
         try:
+            import clearance_ledger
+            eff_clearance = clearance_ledger.effective(args.clearance)
+            if eff_clearance < args.clearance:
+                print(f"  Min clearance used: {eff_clearance:.4g} mm "
+                      f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
+                      f"grading at this floor")
             from fix_kicad_drc_settings import fix_project_for_output
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 keep_thermal=args.keep_thermal)
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Machine-readable summary so an orchestrator and the next pipeline step can
+    # read the clearance this step actually used (mirrors route.py/route_diff.py).
+    import json as _json, clearance_ledger as _cl
+    print("JSON_SUMMARY: " + _json.dumps({
+        "min_clearance_used": _cl.effective(args.clearance),
+    }))
 
 
 if __name__ == "__main__":

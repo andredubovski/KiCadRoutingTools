@@ -811,7 +811,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'failed': failed,
         'total_time': round(total_time, 2),
         'total_iterations': total_iterations,
-        'total_vias': total_vias
+        'total_vias': total_vias,
+        # Smallest copper clearance any step actually routed at (e.g. fine-pitch
+        # taps below the nominal). Grade/check_drc the board at this floor.
+        'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
@@ -1267,10 +1270,15 @@ Examples:
     if not args.no_fix_drc_settings and not args.skip_routing \
             and args.output_file and os.path.isfile(args.output_file):
         try:
+            import clearance_ledger
+            eff_clearance = clearance_ledger.effective(args.clearance)
+            if eff_clearance < args.clearance:
+                print(f"  Min clearance used: {eff_clearance:.4g} mm "
+                      f"(below nominal {args.clearance:.4g}) - grading at this floor")
             from fix_kicad_drc_settings import fix_project_for_output
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,

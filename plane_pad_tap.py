@@ -70,6 +70,23 @@ def pad_is_fine_pitch(pad: Pad, pcb_data: PCBData) -> bool:
     return False
 
 
+def note_clearance_used(pcb_data: PCBData, clearance: float) -> None:
+    """Record that a routing step used ``clearance`` mm of copper clearance, so
+    the board's running minimum (``board_info.min_clearance_used``) tracks the
+    tightest clearance any step actually routed to. Downstream the routers fold
+    this into the .kicad_pro DRC floor and JSON_SUMMARY so check_drc grades at
+    the true routed clearance rather than the looser nominal one."""
+    if clearance is None or clearance <= 0:
+        return
+    bi = pcb_data.board_info
+    cur = getattr(bi, 'min_clearance_used', None)
+    if cur is None or clearance < cur:
+        bi.min_clearance_used = clearance
+    # Bridge engine -> main (main holds a different PCBData): see clearance_ledger.
+    import clearance_ledger
+    clearance_ledger.record(clearance)
+
+
 def make_fine_tap_config(config: GridRouteConfig, pad: Pad) -> GridRouteConfig:
     """Build the scoped fine-parameter config for one pad's tap retry.
 
@@ -246,6 +263,7 @@ class TapResult:
     segments: List[Dict] = field(default_factory=list)
     reused_via_pos: Optional[Tuple[float, float]] = None
     params_label: str = ""              # 'default' or 'fine'
+    clearance_used: float = 0.0         # copper clearance this tap was routed at
     # Failure diagnostics for rip-up (route_disconnected_planes --rip-blocker-nets):
     via_blocked: bool = False           # True if NO via position could be found
     blocked_cells: List = field(default_factory=list)  # frontier from a failed via->pad route
@@ -587,6 +605,8 @@ def tap_pad_with_escalation(
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'default'
+            result.clearance_used = config.clearance
+            note_clearance_used(pcb_data, config.clearance)
             return result
         last_failure = result
 
@@ -608,6 +628,8 @@ def tap_pad_with_escalation(
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse)
         if result.success:
             result.params_label = 'fine'
+            result.clearance_used = fine_config.clearance
+            note_clearance_used(pcb_data, fine_config.clearance)
             return result
         last_failure = result
 

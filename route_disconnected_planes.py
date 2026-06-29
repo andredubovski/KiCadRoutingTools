@@ -902,7 +902,7 @@ Examples:
         for net, layer in zone_pairs:
             print(f"  {net} on {layer}")
 
-    route_planes(
+    _rdp_result = route_planes(
         input_file=args.input_file,
         output_file=args.output_file,
         net_names=net_names,
@@ -948,15 +948,32 @@ Examples:
     if not args.no_fix_drc_settings and not args.dry_run \
             and args.output_file and os.path.isfile(args.output_file):
         try:
+            import clearance_ledger
+            eff_clearance = clearance_ledger.effective(args.clearance)
+            if eff_clearance < args.clearance:
+                print(f"  Min clearance used: {eff_clearance:.4g} mm "
+                      f"(below nominal {args.clearance:.4g}; fine-pitch taps) - "
+                      f"grading at this floor")
             from fix_kicad_drc_settings import fix_project_for_output
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=args.clearance, hole_to_hole=args.hole_to_hole_clearance,
+                clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 keep_thermal=args.keep_thermal)
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+
+    # Machine-readable summary (mirrors route.py/route_diff.py) so an orchestrator
+    # and the next pipeline step can read the clearance this step actually used.
+    import json as _json, clearance_ledger as _cl
+    _routes, _regions = (_rdp_result if isinstance(_rdp_result, tuple)
+                         and len(_rdp_result) >= 2 else (0, 0))
+    print("JSON_SUMMARY: " + _json.dumps({
+        "total_routes": _routes,
+        "total_regions": _regions,
+        "min_clearance_used": _cl.effective(args.clearance),
+    }))
 
 
 if __name__ == "__main__":

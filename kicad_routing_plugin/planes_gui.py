@@ -857,6 +857,10 @@ class PlanesTab(wx.Panel):
         # Remember the routed floors so _apply_results_to_board can make the live
         # board's DRC constraints consistent with them (issue #160).
         self._plane_drc_config = dict(config)
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
         from route_planes import create_plane
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from routing_config import GridRouteConfig, GridCoord
@@ -1019,6 +1023,10 @@ class PlanesTab(wx.Panel):
         # board's DRC constraints consistent with them (issue #160), mirroring
         # route_disconnected_planes.py's auto-fix.
         self._plane_drc_config = dict(config)
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
 
         # Flatten assignments into parallel net_names and plane_layers lists
         # For each (nets_list, layers_list) assignment, create an entry for
@@ -1358,8 +1366,13 @@ class PlanesTab(wx.Panel):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
                                                     apply_targets_to_board)
+                # Grade at the smallest clearance any step actually routed at
+                # (e.g. fine-pitch taps below nominal), mirroring the CLI.
+                import clearance_ledger
+                eff_clearance = clearance_ledger.effective(cfg.get('clearance')) \
+                    if cfg.get('clearance') else cfg.get('clearance')
                 targets = compute_targets(
-                    clearance=cfg.get('clearance'),
+                    clearance=eff_clearance,
                     hole_to_hole=cfg.get('hole_to_hole_clearance'),
                     edge_clearance=cfg.get('board_edge_clearance'),
                     track_width=cfg.get('track_width'),

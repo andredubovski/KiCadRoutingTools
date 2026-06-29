@@ -1471,8 +1471,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Check PCB for DRC violations (clearance errors)')
     parser.add_argument('pcb', help='Input PCB file')
-    parser.add_argument('--clearance', '-c', type=float, default=0.2,
-                        help='Minimum clearance in mm (default: 0.2)')
+    parser.add_argument('--clearance', '-c', type=float, default=None,
+                        help='Minimum clearance in mm to grade against. If omitted, '
+                             'auto-detected from the sibling .kicad_pro Default net '
+                             'class (the value the board was routed/graded to); falls '
+                             'back to 0.2 if no project clearance is found.')
     parser.add_argument('--hole-to-hole-clearance', type=float, default=0.2,
                         help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
@@ -1501,6 +1504,32 @@ if __name__ == "__main__":
                         help='Absolute tolerance in mm for the size checks (default: 0)')
 
     args = parser.parse_args()
+
+    # Grade at the clearance the board was actually routed to. When -c is not
+    # given, read the sibling .kicad_pro Default net-class clearance -- which the
+    # routers lower to the smallest clearance used in ANY step (incl. fine-pitch
+    # tap escalation). Grading stricter than that invents phantom violations on
+    # legitimately tight copper; grading looser hides real ones. (issue follow-up
+    # to the route_disconnected_planes fine-tap grading confusion.)
+    if args.clearance is None:
+        args.clearance = 0.2
+        try:
+            import os, json
+            from fix_kicad_drc_settings import find_project, project_copper_clearance
+            pro = find_project(args.pcb)
+            if os.path.isfile(pro):
+                with open(pro) as f:
+                    pc = project_copper_clearance(json.load(f))
+                if pc:
+                    args.clearance = pc
+                    if not args.quiet:
+                        print(f"Grading at clearance {pc:.4g} mm "
+                              f"(from {os.path.basename(pro)} Default net class)")
+        except Exception as e:
+            print(f"  (could not read project clearance, using 0.2 mm: {e})")
+        if args.clearance == 0.2 and not args.quiet:
+            print("Grading at clearance 0.2 mm (no project clearance found; "
+                  "pass -c to override)")
 
     violations = run_drc(args.pcb, args.clearance, args.nets, args.debug_lines, args.quiet,
                          args.hole_to_hole_clearance, args.board_edge_clearance,

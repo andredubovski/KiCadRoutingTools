@@ -2440,6 +2440,10 @@ class RoutingDialog(wx.Dialog):
 
     def _run_routing(self, config):
         """Run the routing in a background thread."""
+        # Start a fresh clearance ledger so a prior operation's fine-pitch
+        # clearance doesn't leak into this board's DRC floor.
+        import clearance_ledger
+        clearance_ledger.reset()
         # Set up stdout redirection to capture routing output
         original_stdout = sys.stdout
         sys.stdout = StdoutRedirector(self._append_log, original_stdout)
@@ -2970,8 +2974,13 @@ class RoutingDialog(wx.Dialog):
             try:
                 from fix_kicad_drc_settings import (compute_targets, severity_plan,
                                                     apply_targets_to_board)
+                # Grade at the smallest clearance any step actually routed at
+                # (e.g. fine-pitch single-ended taps below nominal), like the CLI.
+                import clearance_ledger
+                eff_clearance = clearance_ledger.effective(config.get('clearance')) \
+                    if config.get('clearance') else config.get('clearance')
                 targets = compute_targets(
-                    clearance=config.get('clearance'),
+                    clearance=eff_clearance,
                     hole_to_hole=config.get('hole_to_hole_clearance'),
                     edge_clearance=config.get('board_edge_clearance'),
                     track_width=config.get('track_width'),

@@ -172,6 +172,12 @@ class BoardInfo:
     board_outline: List[Tuple[float, float]] = field(default_factory=list)  # Polygon vertices for non-rectangular boards
     board_cutouts: List[List[Tuple[float, float]]] = field(default_factory=list)  # Interior cutout polygons
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
+    # Smallest copper clearance any routing step actually used on this board this
+    # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
+    # None until a step records one. Routers fold this into the .kicad_pro DRC
+    # floor and JSON so check_drc grades at the true routed clearance, not the
+    # nominal one (which would flag legitimately tight copper).
+    min_clearance_used: Optional[float] = None
 
 
 @dataclass
