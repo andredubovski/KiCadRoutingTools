@@ -14,7 +14,8 @@ from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_m
 from obstacle_costs import compute_track_proximity_for_net
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
-from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints, _route_direct_coupled_middle
+from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
+                               _route_direct_coupled_middle, _seg_to_seglist_min_edge)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
@@ -25,6 +26,58 @@ from diff_pair_multipoint import (
 )
 from routing_context import build_diff_pair_obstacles, restore_ripped_net
 from terminal_colors import RED, GREEN, RESET
+
+
+def _count_pn_overlaps(p_segs, n_segs, config) -> int:
+    """Number of this pair's own P segments that sit below clearance to one of its
+    N segments (intra-pair P/N overlap, the #215 class). A cheap self-DRC used to
+    decide whether the standard coupled route pinches its own pair."""
+    cnt = 0
+    for s in p_segs:
+        if _seg_to_seglist_min_edge(s.start_x, s.start_y, s.end_x, s.end_y,
+                                    s.width, s.layer, n_segs) < config.clearance - 1e-6:
+            cnt += 1
+    return cnt
+
+
+def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstacles,
+                          routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+                          gnd_net_id, track_proximity_cache, layer_map):
+    """#215: a *successful* standard coupled route can still pinch its own P/N
+    below clearance where the terminal connectors diverge toward the pads
+    (grid-snapped connector corners). The hybrid route (clean coupled middle +
+    point-to-point single-ended legs that resolve polarity at the pads) avoids
+    that connector geometry, so when the standard route self-overlaps, re-route
+    the pair via the hybrid and take it when it is strictly cleaner.
+
+    The pair is not yet committed to pcb_data here, so the hybrid sees the same
+    obstacle/endpoint state as the last-resort call does. Returns the result to
+    commit (the original, or the hybrid when it has fewer intra-pair overlaps)."""
+    if not config.diff_pair_hybrid_escape:
+        return result
+    ns = result.get('new_segments', [])
+    p_segs = [s for s in ns if s.net_id == pair.p_net_id]
+    n_segs = [s for s in ns if s.net_id == pair.n_net_id]
+    base_ov = _count_pn_overlaps(p_segs, n_segs, config)
+    if base_ov == 0:
+        return result
+    # Single-ended-clearance map for the legs (extra_clearance=0), as the
+    # last-resort hybrid does -- the coupled map over-blocks a leg escape via.
+    leg_obstacles, _ = build_diff_pair_obstacles(
+        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+        all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
+        track_proximity_cache, layer_map, 0.0)
+    hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
+                                       config.layers, leg_obstacles=leg_obstacles)
+    if not hyb or hyb.get('failed'):
+        return result
+    hns = hyb.get('new_segments', [])
+    hyb_ov = _count_pn_overlaps([s for s in hns if s.net_id == pair.p_net_id],
+                                [s for s in hns if s.net_id == pair.n_net_id], config)
+    if hyb_ov < base_ov:
+        print(f"  HYBRID REPLACES coupled route ({base_ov} -> {hyb_ov} intra-pair P/N overlap(s))")
+        return hyb
+    return result
 
 
 def route_diff_pairs(
@@ -337,6 +390,13 @@ def route_diff_pairs(
         total_time += elapsed
 
         if result and not result.get('failed'):
+            # #215: if the standard coupled route pinches its own P/N below
+            # clearance at the terminal connectors, re-route via the hybrid
+            # (clean coupled middle + single-ended legs) and take it if cleaner.
+            result = _maybe_swap_to_hybrid(
+                result, pair, pcb_data, config, obstacles, base_obstacles,
+                routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+                gnd_net_id, track_proximity_cache, layer_map)
             # Calculate actual routed length from segments (includes connectors and via barrels)
             new_segments = result.get('new_segments', [])
             new_vias = result.get('new_vias', [])
