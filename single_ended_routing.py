@@ -2280,16 +2280,23 @@ def route_multipoint_taps(
     # -- the VTT multipoint junction double-via (hole_to_hole DRC). The ring skips
     # the via's own cell so reuse stays open.
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
-    _vv_rng = int(math.ceil(_vv_radius))
-    _vv_sq = _vv_radius * _vv_radius
 
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
         obstacles.add_free_via(vgx, vgy)
-        for ex in range(-_vv_rng, _vv_rng + 1):
-            for ey in range(-_vv_rng, _vv_rng + 1):
+        # Grow the ring by the via's sub-grid offset so a later same-net via keeps
+        # the full spacing from this via's TRUE centre, not its rounded cell --
+        # otherwise a fine-grid route drops a via a sub-cell too close (issue #70,
+        # mirroring add_same_net_via_clearance).
+        off_cells = math.hypot(v.x - vgx * coord.grid_step,
+                               v.y - vgy * coord.grid_step) / coord.grid_step
+        radius = _vv_radius + off_cells
+        rng = int(math.ceil(radius))
+        radius_sq = radius * radius
+        for ex in range(-rng, rng + 1):
+            for ey in range(-rng, rng + 1):
                 d = ex * ex + ey * ey
-                if 0 < d <= _vv_sq:
+                if 0 < d <= radius_sq:
                     obstacles.add_blocked_via(vgx + ex, vgy + ey)
 
     for _v in all_vias:
