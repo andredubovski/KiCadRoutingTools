@@ -744,9 +744,68 @@ def block_via_cells_near_drills(obstacles: GridObstacleMap,
         obstacles.add_blocked_vias_batch(np.array(cells, dtype=np.int32))
 
 
+def _pad_has_copper(pad) -> bool:
+    """True if the pad has copper on any layer (so its track clearance is enforced
+    by the copper-pad obstacle). NPTH mounting holes have only *.Mask/*.Paste and
+    return False -- they need the separate drill track keep-out (issue #233)."""
+    return any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
+
+
+def block_track_cells_near_drills(obstacles: GridObstacleMap, drill_holes,
+                                  track_width: float, clearance: float,
+                                  grid_step: float, layer_idxs):
+    """Block TRACK cells on each layer in ``layer_idxs`` within
+    ``drill/2 + track/2 + clearance`` of every drill hole, so a routed track
+    cannot cross an NPTH mounting hole or a foreign PTH barrel (issue #233).
+
+    NPTH mounting holes parse as ``drill>0`` with only a ``*.Mask`` layer, so the
+    copper-pad blocker (_add_pad_obstacle / the plane pad loop) stamps NO cell for
+    them and nothing else stops a track running straight over the hole -- a real
+    fab short, which the drill removes. This mirrors block_via_cells_near_drills
+    (exact mm-distance disc, not a floored integer disk -- issue #70/#125) but
+    stamps track cells on copper layers and uses the copper-to-hole ``clearance``
+    rather than the hole-to-hole drill minimum. A drill goes through every layer,
+    so the multi-layer signal map passes all copper layer indices; the single-layer
+    plane map passes just its own.
+    """
+    if clearance < 0 or not layer_idxs:
+        return
+    coord = GridCoord(grid_step)
+    cells = []
+    for hx, hy, drill_dia in drill_holes:
+        # A track centerline must stay this far from the real drill centre.
+        required_dist = drill_dia / 2.0 + track_width / 2.0 + clearance
+        req_sq = required_dist * required_dist
+        gx, gy = coord.to_grid(hx, hy)
+        expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
+        for ex in range(-expand, expand + 1):
+            cx = (gx + ex) * grid_step
+            for ey in range(-expand, expand + 1):
+                cy = (gy + ey) * grid_step
+                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
+                    cells.append((gx + ex, gy + ey))
+    if not cells:
+        return
+    arr = np.array(cells, dtype=np.int32)
+    for li in layer_idxs:
+        layer_col = np.full((arr.shape[0], 1), li, dtype=np.int32)
+        obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set):
-    """Block via placement near existing drill holes (hole-to-hole clearance).
+    """Keep routed copper off existing drill holes -- vias, PTH pad barrels, and
+    NPTH mounting holes alike (excluding the net(s) being routed, which must still
+    reach their own through-holes).
+
+    Two keep-outs:
+      - TRACK crossing of NPTH (no-copper) holes on ALL copper layers, uses
+        ``config.clearance`` -- a track can't be routed across a mounting hole
+        whose only layer is *.Mask (issue #233). PTH pads and vias carry copper,
+        so their track clearance is already enforced by the pad/via copper
+        obstacles (with the real pad shape, not a round-drill approximation);
+      - VIA placement (hole-to-hole drill minimum) near EVERY drill, uses
+        ``config.hole_to_hole_clearance``.
 
     Args:
         obstacles: The obstacle map to add to
@@ -754,27 +813,34 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         config: Routing configuration
         nets_to_route_set: Set of net IDs being routed (excluded from blocking)
     """
-    if config.hole_to_hole_clearance <= 0:
-        return
-
-    # Collect all existing drill holes: (x, y, drill_diameter)
-    drill_holes = []
+    drill_holes = []   # every drill -> via (hole-to-hole) keep-out
+    npth_holes = []    # no-copper holes only -> track keep-out
 
     # Add via drills (excluding nets being routed)
     for via in pcb_data.vias:
-        if via.net_id not in nets_to_route_set:
+        if via.net_id not in nets_to_route_set and via.drill > 0:
             drill_holes.append((via.x, via.y, via.drill))
 
-    # Add pad drills (through-hole pads have drills)
+    # Add pad drills (through-hole AND NPTH mounting pads carry drills)
     for net_id, pads in pcb_data.pads_by_net.items():
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
             if pad.drill > 0:
                 drill_holes.append((pad.global_x, pad.global_y, pad.drill))
+                if not _pad_has_copper(pad):
+                    npth_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
-                                config.hole_to_hole_clearance, config.grid_step)
+    # Track keep-out for NPTH holes on every copper layer (issue #233).
+    if npth_holes:
+        block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
+                                      config.clearance, config.grid_step,
+                                      list(range(len(config.layers))))
+
+    # Via keep-out (hole-to-hole drill minimum) near every drill.
+    if config.hole_to_hole_clearance > 0 and drill_holes:
+        block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
+                                    config.hole_to_hole_clearance, config.grid_step)
 
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,

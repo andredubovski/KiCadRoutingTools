@@ -16,7 +16,8 @@ from routing_config import GridRouteConfig, GridCoord
 from routing_utils import iter_pad_blocked_cells, pad_blocked_cells_array, segment_blocked_cells_array
 from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           add_user_keepout_obstacles, add_rule_area_keepout_obstacles,
-                          block_via_cells_near_drills,
+                          block_via_cells_near_drills, block_track_cells_near_drills,
+                          _pad_has_copper,
                           _rasterize_polygon, _points_inside_polygon,
                           _points_edge_distance, _block_cells_on_layers,
                           _batch_cells_one_layer, _batch_vias)
@@ -846,6 +847,24 @@ def build_routing_obstacle_map(
         via_count += 1
     if verbose:
         print(f"  Vias: {via_count} vias in {time.time() - t0:.2f}s")
+
+    # Keep plane-routing tracks off NPTH (no-copper) drill holes (issue #233).
+    # An NPTH mounting pad carries drill>0 but only a *.Mask layer, so the pad loop
+    # above stamps no cell for it; without this a plane tap / repair track routes
+    # straight across the hole. PTH pads/vias have copper, already blocked above.
+    # Single-layer map, so block layer 0 only (the drill goes through every layer).
+    t0 = time.time()
+    npth_holes = []
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id == exclude_net_id:
+            continue
+        for pad in pads:
+            if pad.drill > 0 and not _pad_has_copper(pad):
+                npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+    block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
+                                  config.clearance, config.grid_step, [layer_idx])
+    if verbose:
+        print(f"  NPTH-hole track keep-out: {len(npth_holes)} holes in {time.time() - t0:.2f}s")
 
     # Add board edge track blocking (supports non-rectangular boards)
     t0 = time.time()

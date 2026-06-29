@@ -1245,6 +1245,65 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                     })
 
+    # Check copper-to-hole clearance: a TRACK too close to an NPTH (no-copper) drill
+    # hole of a DIFFERENT net (issue #233). The drill removes the copper that crosses
+    # it -- a real fab short the via-drill-only hole check above misses (e.g. a track
+    # routed straight across a connector mounting hole). PTH pads and vias carry
+    # copper, so their track clearance is already covered by the pad-segment /
+    # via-segment checks (with the real pad shape, not a round-drill approximation),
+    # and KiCad likewise reports only the NPTH cases. Mirrors KiCad's hole_clearance.
+    if not quiet:
+        print("Checking copper-to-hole (track <-> NPTH drill) clearances...")
+    holes = []  # (x, y, drill, net_id, ref) -- NPTH (no-copper) pad holes only
+    for pad_net, pads in pads_by_net.items():
+        for pad in pads:
+            if pad.drill > 0 and not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers):
+                holes.append((pad.global_x, pad.global_y, pad.drill, pad_net,
+                              f"{pad.component_ref}.{pad.pad_number}"))
+    segs = list(pcb_data.segments)
+    if holes and segs:
+        sx1 = np.array([s.start_x for s in segs], dtype=np.float64)
+        sy1 = np.array([s.start_y for s in segs], dtype=np.float64)
+        sx2 = np.array([s.end_x for s in segs], dtype=np.float64)
+        sy2 = np.array([s.end_y for s in segs], dtype=np.float64)
+        sw = np.array([s.width for s in segs], dtype=np.float64)
+        snet = np.array([s.net_id for s in segs])
+        dx = sx2 - sx1
+        dy = sy2 - sy1
+        seglen2 = dx * dx + dy * dy
+        safe_len2 = np.where(seglen2 > 0, seglen2, 1.0)
+        tolerance = clearance * clearance_margin
+        if matching_net_ids is not None:
+            seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
+        for hx, hy, drill, hnet, ref in holes:
+            # Point(hole)-to-segment distance, vectorized over all tracks. A drill
+            # is a through-hole, so any track layer crossing it conflicts (no layer
+            # filter). The hole's own-net track legitimately connects to it -> skip.
+            t = np.clip(((hx - sx1) * dx + (hy - sy1) * dy) / safe_len2, 0.0, 1.0)
+            cxp = sx1 + t * dx
+            cyp = sy1 + t * dy
+            dist = np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
+            overlap = (drill / 2.0 + sw / 2.0 + clearance) - dist
+            viol = (overlap > tolerance) & (snet != hnet)
+            if matching_net_ids is not None:
+                viol &= seg_match | (hnet in matching_net_ids)
+            for k in np.nonzero(viol)[0].tolist():
+                seg = segs[k]
+                hole_net_name = pcb_data.nets.get(hnet, None)
+                seg_net_name = pcb_data.nets.get(seg.net_id, None)
+                hole_net_str = hole_net_name.name if hole_net_name else f"net_{hnet}"
+                seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg.net_id}"
+                violations.append({
+                    'type': 'track-hole',
+                    'net1': hole_net_str,        # the drill's net (0 = NPTH)
+                    'net2': seg_net_str,         # the crossing track's net
+                    'hole_ref': ref or 'via',
+                    'layer': seg.layer,
+                    'overlap_mm': float(overlap[k]),
+                    'hole_loc': (hx, hy),
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                })
+
     # Check board edge clearances
     board_bounds = pcb_data.board_info.board_bounds
     if board_bounds and effective_board_edge_clearance > 0:
@@ -1430,6 +1489,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
+                    elif vtype == 'track-hole':
+                        print(f"  Hole:{v['net1']} ({v['hole_ref']}) <-> Track:{v['net2']} (copper-to-hole)")
+                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Hole: ({v['hole_loc'][0]:.2f},{v['hole_loc'][1]:.2f})")
+                        print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
                     elif vtype == 'segment-board-edge':
                         print(f"  {v['net1']} too close to {v['edge']} board edge")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
