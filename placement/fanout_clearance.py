@@ -13,8 +13,10 @@ dropping vias straight down. That gives two complementary goals:
   * AVOID  - a cap pad must clear, by `clearance`, every real fanout via of a
              DIFFERENT net (these are the #130 violations), plus any foreign
              escape track on the cap's own copper side (escapes can land on the
-             bottom). Same-net vias are fine - a cap pad may sit right on one
-             (via-in-pad sharing).
+             bottom), plus any foreign-net COMPONENT pad (#235: a move may never
+             slide a cap pad onto a neighbour's pad -> a PAD-PAD short).
+             Same-net vias/pads are fine - a cap pad may sit right on one
+             (via-in-pad / same-net copper sharing).
   * ATTRACT - pull each cap pad toward the nearest BGA ball of its OWN net, so
              that a later GND/power via dropped at the ball also lands on the
              cap pad (one shared via connects ball + cap + plane).
@@ -174,7 +176,8 @@ class _Repair:
                  clearance: float, grid_step: float,
                  board_edge_clearance: float, near_margin: float,
                  capture_radius: float, default_via_size: float,
-                 cap_prefix: str, extra_locked: Set[str]):
+                 cap_prefix: str, extra_locked: Set[str],
+                 max_displacement_cap: float = 3.0):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -242,6 +245,13 @@ class _Repair:
         # per board side only: a back-side decoupling cap legitimately sits
         # under a top-side BGA (they overlap in XY but not in copper). Via
         # disks are through-vias, so they apply to caps on either side.
+        # --- avoidance: foreign-net COMPONENT pads (#235) ---
+        # The cap optimizer must not slide a cap pad onto a neighbouring
+        # component's pad of a different net -> a PAD-PAD short. Each entry is
+        # an axis-aligned pad rect plus its net and side ('F'/'B', or None for
+        # a through-hole pad that blocks both sides). Same-net pads are fine.
+        self.foreign_pads: List[
+            Tuple[float, float, float, float, int, Optional[str]]] = []
         self.caps: Dict[str, _Cap] = {}
         self.static_rects: List[Tuple[Tuple[float, float, float, float], str]] = []
         for ref, fp in pcb_data.footprints.items():
@@ -265,6 +275,42 @@ class _Repair:
             b = _rotate_local_bounds(*lb, fp.rotation)
             self.static_rects.append(((fp.x + b[0], fp.y + b[1],
                                        fp.x + b[2], fp.y + b[3]), side))
+            # record this part's copper pads as foreign-pad keep-outs
+            for p in fp.pads:
+                copper = [l for l in p.layers if str(l).endswith('.Cu')]
+                if not copper:
+                    continue  # paste/mask-only aperture
+                through = (p.drill or 0) > 0
+                pside = None if through else (
+                    'B' if any(str(l).startswith('B') for l in copper) else 'F')
+                tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
+                c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
+                hx, hy = p.size_x / 2, p.size_y / 2
+                half_x = hx * c + hy * s
+                half_y = hx * s + hy * c
+                self.foreign_pads.append(
+                    (p.global_x - half_x, p.global_y - half_y,
+                     p.global_x + half_x, p.global_y + half_y,
+                     p.net_id, pside))
+
+        # Per-cap spatially-pruned foreign-pad lists: only pads a cap could
+        # ever reach (seed + max displacement + cap span + clearance) can
+        # matter, so the pad_penalty inner loop stays small.
+        self.cap_foreign_pads: Dict[str, List[
+            Tuple[float, float, float, float, int, Optional[str]]]] = {}
+        for ref, cap in self.caps.items():
+            crect = cap.rect()
+            ccx, ccy = (crect[0] + crect[2]) / 2.0, (crect[1] + crect[3]) / 2.0
+            cap_reach = math.hypot(crect[2] - ccx, crect[3] - ccy)
+            reach = max_displacement_cap + cap_reach + clearance
+            near = []
+            for fp_pad in self.foreign_pads:
+                px = (fp_pad[0] + fp_pad[2]) / 2.0
+                py = (fp_pad[1] + fp_pad[3]) / 2.0
+                phalf = math.hypot(fp_pad[2] - px, fp_pad[3] - py)
+                if math.hypot(px - ccx, py - ccy) <= reach + phalf:
+                    near.append(fp_pad)
+            self.cap_foreign_pads[ref] = near
 
         # Baseline same-side overlaps at the seed placement. Collisions are
         # scored RELATIVE to these: the repair must not introduce or worsen a
@@ -286,6 +332,12 @@ class _Repair:
                         ra_rect, cb.rect())
         self.base_seg: Dict[str, float] = {
             ref: self.seg_penalty(cap, cap.x, cap.y, cap.rot)
+            for ref, cap in self.caps.items()}
+        # Baseline foreign-pad encroachment at the seed (#235): the repair may
+        # not introduce or worsen a foreign-net pad-pad overlap, but tolerates
+        # one already present at the seed (not this step's concern).
+        self.base_pad: Dict[str, float] = {
+            ref: self.pad_penalty(ref, cap, cap.x, cap.y, cap.rot)
             for ref, cap in self.caps.items()}
 
     @staticmethod
@@ -328,6 +380,24 @@ class _Repair:
                     pen += (req - d)
         return pen
 
+    def pad_penalty(self, ref, cap, x, y, rot):
+        """Sum of foreign-net component-pad clearance shortfall for a cap
+        placement (#235): how far each cap pad intrudes inside a different-net
+        pad's clearance keep-out. A through-hole foreign pad blocks both sides;
+        an SMD one only its own side. Same-net pads are ignored (a shared via
+        / touching same-net copper is fine)."""
+        pen = 0.0
+        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+            for (px0, py0, px1, py1, pnet, pside) in self.cap_foreign_pads[ref]:
+                if pnet == net:
+                    continue
+                if pside is not None and pside != cap.side:
+                    continue  # SMD pad on the other side
+                gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                if gap < self.clearance - EPS:
+                    pen += (self.clearance - gap)
+        return pen
+
     def attraction(self, cap, x, y, rot):
         """Sum over pads of the distance to the nearest same-net BGA ball,
         clamped to capture_radius (so a pad with no same-net ball within reach
@@ -365,6 +435,10 @@ class _Repair:
                 return True
         # no new overlap with a foreign-net track on the cap's side
         if self.seg_penalty(cap, x, y, rot) > self.base_seg.get(ref, 0.0) + EPS:
+            return True
+        # no new overlap with a foreign-net component pad (#235): rejects the
+        # cap-onto-neighbour-pad short the via/attraction objective could chase.
+        if self.pad_penalty(ref, cap, x, y, rot) > self.base_pad.get(ref, 0.0) + EPS:
             return True
         return False
 
@@ -415,7 +489,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
 
     st = _Repair(pcb_data, pcb_file, clearance, grid_step,
                  board_edge_clearance, near_margin, capture_radius,
-                 default_via_size, cap_prefix, extra_locked)
+                 default_via_size, cap_prefix, extra_locked,
+                 max_displacement_cap=max_displacement_cap)
 
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "

@@ -100,10 +100,53 @@ def test_no_vias_means_noop():
     assert result['placements'] == []
 
 
+def test_foreign_pad_blocks_move_into_short():
+    """#235: a candidate that slides a cap pad onto a foreign-net component
+    pad (a PAD-PAD short) is hard-blocked; the same pad on the cap's own net
+    is not (touching same-net copper is fine)."""
+    pcb = parse_kicad_pcb(BOARD)
+    st = _new_repair(pcb)
+    cap = st.caps[CAP]
+    # A nearby in-reach position the cap could otherwise move to.
+    tx, ty, tr = cap.seed_x + 0.3, cap.seed_y, cap.rot
+    # Where pad 1 lands at that position.
+    pad = next(p for p in cap.pad_rects(tx, ty, tr) if p[4] == GND)
+    pcx, pcy = (pad[0] + pad[2]) / 2.0, (pad[1] + pad[3]) / 2.0
+    # Foreign-net SMD pad on the cap's side, sitting right on that pad.
+    foreign = (pcx - 0.25, pcy - 0.25, pcx + 0.25, pcy + 0.25, FOREIGN, cap.side)
+    st.cap_foreign_pads[CAP] = [foreign]
+    st.base_pad[CAP] = st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot)
+    assert st.pad_penalty(CAP, cap, tx, ty, tr) > 1e-6
+    assert st.hard_blocked(CAP, cap, tx, ty, tr)
+    # Same-net foreign pad at the same spot is NOT a violation.
+    st.cap_foreign_pads[CAP] = [(foreign[0], foreign[1], foreign[2],
+                                 foreign[3], GND, cap.side)]
+    assert st.pad_penalty(CAP, cap, tx, ty, tr) <= 1e-6
+
+
+def test_foreign_pad_other_side_smd_ignored():
+    """An SMD foreign pad on the opposite side does not constrain the cap."""
+    pcb = parse_kicad_pcb(BOARD)
+    st = _new_repair(pcb)
+    cap = st.caps[CAP]
+    pad = next(p for p in cap.pad_rects(cap.x, cap.y, cap.rot) if p[4] == GND)
+    pcx, pcy = (pad[0] + pad[2]) / 2.0, (pad[1] + pad[3]) / 2.0
+    other = 'F' if cap.side == 'B' else 'B'
+    st.cap_foreign_pads[CAP] = [(pcx - 0.25, pcy - 0.25, pcx + 0.25, pcy + 0.25,
+                                 FOREIGN, other)]
+    assert st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot) <= 1e-6
+    # A through-hole foreign pad (side=None) at the same spot DOES block.
+    st.cap_foreign_pads[CAP] = [(pcx - 0.25, pcy - 0.25, pcx + 0.25, pcy + 0.25,
+                                 FOREIGN, None)]
+    assert st.pad_penalty(CAP, cap, cap.x, cap.y, cap.rot) > 1e-6
+
+
 if __name__ == '__main__':
     test_cap_rect_uses_absolute_rotation()
     test_foreign_via_is_cleared()
     test_same_net_via_is_not_a_violation()
     test_no_new_cap_cap_overlap()
     test_no_vias_means_noop()
+    test_foreign_pad_blocks_move_into_short()
+    test_foreign_pad_other_side_smd_ignored()
     print("ALL PASS")
