@@ -258,7 +258,8 @@ def add_fab_tier_args(parser):
         help="Path to a fab-floor override file (key=value lines, e.g. "
              "'via_drill = 0.15') overlaying the selected --fab-tier; only the "
              "listed values are replaced. Supplying it disables escalation (the "
-             "floor becomes exactly the file + base tier).")
+             "floor becomes exactly the file + base tier). See the template "
+             "fab_overrides.example.txt for the format and every key.")
     return parser
 
 

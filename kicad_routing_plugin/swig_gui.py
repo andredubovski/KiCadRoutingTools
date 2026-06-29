@@ -487,11 +487,14 @@ class RoutingDialog(wx.Dialog):
         self.fab_overrides_path.SetToolTip(
             "Optional fab-floor override file (key=value lines, e.g. 'via_drill = 0.15') "
             "overlaying the selected tier; pick a recently-used file from the dropdown "
-            "or Browse. Supplying one disables standard->advanced escalation.")
+            "or Browse. Supplying one disables standard->advanced escalation. See the "
+            "ready-to-copy template fab_overrides.example.txt in the repo root for the "
+            "format and every key.")
         self.fab_overrides_path.Bind(wx.EVT_COMBOBOX, self._revalidate_fab_floors)
         ovr_sizer.Add(self.fab_overrides_path, 1, wx.EXPAND | wx.RIGHT, 4)
         self.fab_overrides_browse = wx.Button(parent, label="…", style=wx.BU_EXACTFIT)
-        self.fab_overrides_browse.SetToolTip("Browse for a fab-floor override file")
+        self.fab_overrides_browse.SetToolTip(
+            "Browse for a fab-floor override file (template: fab_overrides.example.txt)")
         self.fab_overrides_browse.Bind(wx.EVT_BUTTON, self._on_browse_fab_overrides)
         ovr_sizer.Add(self.fab_overrides_browse, 0)
         grid.Add(ovr_sizer, 0, wx.EXPAND)

@@ -96,6 +96,11 @@ via_drill = 0.15
 clearance = 0.09
 ```
 
+A ready-to-copy, fully-commented template listing every key and the built-in tier
+values lives at **[`fab_overrides.example.txt`](../fab_overrides.example.txt)** in the
+repo root. (`track_width` / `clearance` are layer-dependent in the tier tables, but an
+override sets one fixed value for every board — override them only if you want that.)
+
 ```bash
 # Route to the cheap floor (default); dense fan-outs warn when they escalate
 python route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
