@@ -28,7 +28,7 @@ The release pipeline is mostly automated by `.github/workflows/release.yml`. A m
 ## Versioning rules
 
 - **`VERSION`**: 2- or 3-part dotted decimal, e.g. `0.15.5`. The KiCad PCM regex `^\d{1,4}(\.\d{1,4}(\.\d{1,6})?)?$` rejects 4-part versions.
-- **`rust_router/Cargo.toml`**: MUST equal `VERSION`, bumped in the same commit — including Python-only releases. The prebuilt binary bakes in `CARGO_PKG_VERSION` and the runtime guard (`startup_checks.py`) requires `installed == Cargo.toml`; CI rebuilds every binary on every tag anyway, so locking them costs nothing. Letting Cargo.toml lag is what shipped a 0.17.0 binary as v0.17.1 and blocked all routing. `check_release_version.py` enforces this.
+- **`rust_router/Cargo.toml`**: bumped only when the Rust crate itself changes (see the comment at the top of that file). Python-only changes keep the Rust version constant and only bump `VERSION`.
 - Git tag must be `v<VERSION>`, e.g. `v0.15.5`.
 
 ---
@@ -58,7 +58,7 @@ You do **not** need to update `metadata.json` — Python deps live entirely outs
 #   VERSION                                  -> new x.y.z
 #   metadata.json                            -> bump versions[].version to x.y.z
 #                                               update download_url path (sha/sizes are CI-patched)
-#   rust_router/Cargo.toml                    -> version = "x.y.z"  (ALWAYS; must equal VERSION)
+#   rust_router/Cargo.toml (only if Rust changed)
 #   rust_router/README.md  (only if Rust changed, version-history table)
 ```
 

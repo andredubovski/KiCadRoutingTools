@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Fail fast if VERSION, rust_router/Cargo.toml, metadata.json (and optionally the
-release tag) disagree.
+"""Fail fast if VERSION, metadata.json (and optionally the release tag) disagree.
 
 Run this BEFORE tagging a release — and it also runs as the first CI gate in
 `.github/workflows/release.yml`, ahead of the build matrix:
 
-    python3 check_release_version.py                  # VERSION <-> Cargo.toml <-> metadata.json
+    python3 check_release_version.py                  # VERSION <-> metadata.json
     python3 check_release_version.py --tag v0.17.0     # also assert tag == vVERSION
 
 It catches the exact half-bumped state that bit v0.17.0: `VERSION` and
@@ -14,15 +13,10 @@ release built all four binaries and then failed in `package_pcm.write_top_level`
 ("metadata.json has no version entry for 0.17.0"). That check is correct but
 runs ~10 minutes too late; this one runs in a second.
 
-It ALSO catches the v0.17.1 failure: the crate was changed but `Cargo.toml` was
-left at 0.17.0 in the tagged commit (the bump landed on `main` only afterward),
-so CI compiled a 0.17.0 binary and shipped it as v0.17.1. Because the prebuilt
-bakes in `CARGO_PKG_VERSION` and the runtime guard (`startup_checks.py`) requires
-`installed == Cargo.toml`, the downloaded prebuilt then mismatched `main`'s
-bumped Cargo.toml and blocked all routing. `Cargo.toml` MUST equal `VERSION` —
-CI rebuilds every binary on every tag regardless, so there is no cost to keeping
-them locked, and only then is the shipped binary's reported version correct (see
-docs/release-pipeline.md)."""
+`rust_router/Cargo.toml` is intentionally NOT checked here — the Rust crate
+version is bumped only when the crate changes and legitimately differs from
+`VERSION` in its patch component (see docs/release-pipeline.md).
+"""
 import argparse
 import json
 import sys
@@ -44,28 +38,6 @@ def main() -> None:
 
     version = (HERE / "VERSION").read_text().strip()
 
-    # rust_router/Cargo.toml must match VERSION: the prebuilt bakes in
-    # CARGO_PKG_VERSION, and the runtime guard requires installed == Cargo.toml.
-    # A lagging Cargo.toml ships a binary that reports the wrong version (v0.17.1).
-    cargo_version = None
-    in_package = False
-    for line in (HERE / "rust_router" / "Cargo.toml").read_text().splitlines():
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            in_package = (s == "[package]")
-            continue
-        if in_package and s.startswith("version") and "=" in s:
-            cargo_version = s.split("=", 1)[1].strip().strip('"').strip("'")
-            break
-    if cargo_version is None:
-        fail("could not read [package] version from rust_router/Cargo.toml.")
-    if cargo_version != version:
-        fail(f"rust_router/Cargo.toml version {cargo_version} != VERSION {version}. "
-             f"Bump the crate version to {version} in the SAME commit you tag "
-             f"(the prebuilt bakes in CARGO_PKG_VERSION; a lagging Cargo.toml "
-             f"ships a binary that reports {cargo_version} and the runtime guard "
-             f"then rejects it).")
-
     meta = json.loads((HERE / "metadata.json").read_text())
     versions = [v.get("version") for v in meta.get("versions", [])]
     if version not in versions:
@@ -84,7 +56,7 @@ def main() -> None:
     if args.tag is not None and args.tag != f"v{version}":
         fail(f"tag {args.tag} does not match VERSION {version} (expected v{version}).")
 
-    print(f"OK: VERSION={version} matches rust_router/Cargo.toml and metadata.json"
+    print(f"OK: VERSION={version} matches metadata.json"
           + (f" and tag {args.tag}" if args.tag else "") + ".")
 
 
