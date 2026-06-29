@@ -792,8 +792,8 @@ Examples:
                         help="Clearance from tracks to other nets' vias in mm (default: 0.8)")
     parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge in mm (default: 0.5)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.3,
-                        help="Minimum clearance between drill holes in mm (default: 0.3)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
+                        help=f"Minimum clearance between drill holes in mm (default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor)")
 
     # Via options (for config)
     parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE,

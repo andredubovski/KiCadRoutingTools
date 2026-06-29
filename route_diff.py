@@ -1100,7 +1100,7 @@ Examples:
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2,
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
                         help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--board-edge-clearance", type=float, default=0.0,
                         help="Clearance from board edge in mm (default: 0 = use track clearance)")

@@ -821,7 +821,7 @@ python route.py kicad_files/input.kicad_pcb [output.kicad_pcb] [OPTIONS]
                                  # Alternates H/V: F.Cu=horizontal, In1.Cu=vertical, etc.
 --max-ripup 3                # Max blockers to rip up at once (1-N progressive)
 --routing-clearance-margin 1.0   # Multiplier on track-via clearance (1.0 = min DRC, default)
---hole-to-hole-clearance 0.2 # Minimum drill hole edge-to-edge clearance (mm)
+--hole-to-hole-clearance 0.25 # Minimum drill hole edge-to-edge clearance (mm, fab floor)
 --board-edge-clearance 0.0   # Clearance from board edge (0 = use track clearance)
 
 # Strategy
@@ -960,7 +960,7 @@ python route_planes.py kicad_files/input.kicad_pcb [output.kicad_pcb] --nets GND
 --max-search-radius 10.0  # Max radius to search for valid via position (mm)
 --max-via-reuse-radius 1.0  # Max radius to prefer reusing existing via (mm)
 --close-via-radius 0.5      # Radius to check for nearby vias before placing new one (default: 2.5 * via-size)
---hole-to-hole-clearance 0.2  # Minimum drill hole clearance (mm)
+--hole-to-hole-clearance 0.25  # Minimum drill hole clearance (mm, fab floor)
 --layers, -l F.Cu In1.Cu In2.Cu B.Cu  # All copper layers for routing and via span
 --layer-costs 1.0 1.0 1.0 1.0  # Per-layer cost multipliers (1.0-1000)
                                # Default: 4+ layers = all 1.0; 2 layers = F.Cu=1.0, B.Cu=3.0

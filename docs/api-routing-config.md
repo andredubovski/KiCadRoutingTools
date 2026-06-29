@@ -121,7 +121,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `routing_clearance_margin` | `1.0` | Multiplier on track-to-via clearance (1.0 = exact DRC minimum) |
-| `hole_to_hole_clearance` | `0.2` | Drill-to-drill clearance, edge to edge |
+| `hole_to_hole_clearance` | `0.25` | Drill-to-drill clearance, edge to edge |
 | `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
 
 ### Strategies and recovery

@@ -87,7 +87,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--max-setback-angle` | 45.0 | Maximum angle for setback position search (degrees) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
-| `--hole-to-hole-clearance` | 0.2 | Minimum drill hole edge-to-edge clearance (mm) |
+| `--hole-to-hole-clearance` | 0.25 | Minimum drill hole edge-to-edge clearance (mm) |
 | `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
 | `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
@@ -374,7 +374,7 @@ class GridRouteConfig:
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     max_setback_angle: float = 45.0  # degrees
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
-    hole_to_hole_clearance: float = 0.2  # mm - minimum drill hole edge-to-edge clearance
+    hole_to_hole_clearance: float = 0.25  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
     proximity_heuristic_factor: float = 0.02  # factor for proximity-aware heuristic (0 = disabled)
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors

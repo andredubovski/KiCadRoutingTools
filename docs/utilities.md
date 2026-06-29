@@ -17,7 +17,8 @@ Options:
                        the routing steps recorded as actually used, incl. auto-stepped
                        fine-pitch taps); falls back to 0.2 if no project is found.
   --via-clearance FLOAT  Via-to-track clearance in mm (uses --clearance if not set)
-  --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm (default: 0.2)
+  --hole-to-hole-clearance FLOAT  Minimum drill hole edge-to-edge clearance in mm
+                                  (default: 0.25, the JLC fab floor — same as routing)
   --board-edge-clearance FLOAT    Minimum clearance from board edge in mm (0 = use --clearance)
   --nets PATTERN       Only check nets matching pattern
   --debug-lines        Output debug lines on User.7 showing violation locations
@@ -45,8 +46,8 @@ python check_drc.py routed.kicad_pcb
 # Override the grading clearance explicitly
 python check_drc.py routed.kicad_pcb --clearance 0.15
 
-# Check with hole-to-hole clearance (for via drill spacing)
-python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
+# Override clearance and hole-to-hole explicitly (hole-to-hole defaults to the 0.25 fab floor)
+python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.25
 
 # Check specific nets only
 python check_drc.py routed.kicad_pcb --nets "*DATA*"

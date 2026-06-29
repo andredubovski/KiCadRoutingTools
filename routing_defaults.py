@@ -86,7 +86,10 @@ KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
 
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
-HOLE_TO_HOLE_CLEARANCE = 0.2  # mm
+HOLE_TO_HOLE_CLEARANCE = 0.25  # mm - = the JLC fab drill-to-drill floor
+                               # (list_nets._FAB_FLOORS 'hole_to_hole', layer-independent).
+                               # Routing AND check_drc default to this so a bare run
+                               # never places/passes vias closer than is manufacturable.
 BOARD_EDGE_CLEARANCE = 0.0  # mm
 
 # Default layers

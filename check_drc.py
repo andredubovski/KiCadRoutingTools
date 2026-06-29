@@ -16,6 +16,7 @@ from geometry_utils import (
     segment_to_segment_closest_points,
 )
 from net_queries import expand_pad_layers
+import routing_defaults as defaults
 
 
 class SpatialIndex:
@@ -789,7 +790,7 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
 
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
-            hole_to_hole_clearance: float = 0.2, board_edge_clearance: float = 0.0,
+            hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
             clearance_margin: float = 0.05, max_print: int = 20,
             min_track_width: Optional[float] = None,
             min_via_diameter: Optional[float] = None,
@@ -804,7 +805,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                      If provided, only checks involving at least one matching net are reported.
         debug_output: If True, write debug lines to User.7 layer showing violation locations
         quiet: If True, only print a summary line unless there are violations
-        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm (default: 0.2)
+        hole_to_hole_clearance: Minimum clearance between drill hole edges in mm
+            (default: the fab floor, routing_defaults.HOLE_TO_HOLE_CLEARANCE)
         board_edge_clearance: Minimum clearance from board edge in mm (0 = use clearance)
         min_track_width: Minimum manufacturable track width in mm. None = derive the
             JLC fab floor from the board's copper-layer count (issue #176).
@@ -1476,8 +1478,9 @@ if __name__ == "__main__":
                              'auto-detected from the sibling .kicad_pro Default net '
                              'class (the value the board was routed/graded to); falls '
                              'back to 0.2 if no project clearance is found.')
-    parser.add_argument('--hole-to-hole-clearance', type=float, default=0.2,
-                        help='Minimum drill hole edge-to-edge clearance in mm (default: 0.2)')
+    parser.add_argument('--hole-to-hole-clearance', type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE,
+                        help=f'Minimum drill hole edge-to-edge clearance in mm '
+                             f'(default: {defaults.HOLE_TO_HOLE_CLEARANCE}, the fab floor — same as routing)')
     parser.add_argument('--board-edge-clearance', type=float, default=0.0,
                         help='Minimum clearance from board edge in mm (0 = use --clearance value)')
     parser.add_argument('--clearance-margin', type=float, default=0.05,
