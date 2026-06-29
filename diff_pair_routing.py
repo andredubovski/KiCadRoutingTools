@@ -2470,13 +2470,41 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         if not ok:
             continue
         all_segs = mid_segs + leg_segs
+        all_vias = p_vias + n_vias + leg_vias
         if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+            continue
+        # Connectivity gate: the hybrid validates crossings/grazes but never that
+        # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
+        # to bridge to the middle (e.g. a layer-mismatch at a coincident cell) and
+        # still be committed, so the pair reports "routed" with one half open
+        # (#215 false-success, RX3_N). Re-verify with the copper-aware connectivity
+        # check (new copper + the pair's existing fanout stubs) and reject if either
+        # half isn't fully connected -- then this layer is retried / the pair fails
+        # honestly instead of counting as routed.
+        if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias):
             continue
         print(f"  DIRECT HYBRID: coupled middle on {layer_names[layer_idx]} + "
               f"{len(leg_segs)} leg seg(s) ({total_iters} iters)")
-        return {'new_segments': all_segs, 'new_vias': p_vias + n_vias + leg_vias,
+        return {'new_segments': all_segs, 'new_vias': all_vias,
                 'iterations': total_iters, 'path_length': len(simplified)}
     return None
+
+
+def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias) -> bool:
+    """True only if BOTH halves of the pair connect terminal-to-terminal with the
+    new hybrid copper added to the pair's existing (fanout-stub) copper. Used to
+    reject a hybrid route that left a terminal orphaned (#215)."""
+    from check_connected import check_net_connectivity
+    board_segs = getattr(pcb_data, 'segments', None) or []
+    board_vias = getattr(pcb_data, 'vias', None) or []
+    pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    for nid in (p_net_id, n_net_id):
+        segs = [s for s in board_segs if s.net_id == nid] + [s for s in new_segs if s.net_id == nid]
+        vias = [v for v in board_vias if v.net_id == nid] + [v for v in new_vias if v.net_id == nid]
+        r = check_net_connectivity(nid, segs, vias, pads_by_net.get(nid, []))
+        if not r.get('connected') or r.get('disconnected_pads'):
+            return False
+    return True
 
 
 def _seg_to_seglist_min_edge(x1, y1, x2, y2, width, layer, other_segs):
@@ -2624,8 +2652,15 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
             ax, ay, alayer, on_via = _term_anchor(term, mid_pt[2])
             tgx, tgy = coord.to_grid(ax, ay)
             mgx, mgy = coord.to_grid(mid_pt[0], mid_pt[1])
-            if (tgx, tgy) == (mgx, mgy):
-                continue  # terminal already coincides with the middle end
+            if (tgx, tgy) == (mgx, mgy) and (on_via or alayer == mid_pt[2]):
+                # Truly coincident: the terminal already sits on the middle's end
+                # cell on the SAME layer (or carries a through-via that spans all
+                # layers). If the cell coincides but the LAYERS differ (a bare F.Cu
+                # escape end vs an inner-layer middle), do NOT skip -- the leg must
+                # still drop the F.Cu->inner transition via, or the terminal is left
+                # orphaned on its own layer (RX3_N: F.Cu escape vs In2 middle at one
+                # cell -> the pair reported "routed" with N disconnected, #215).
+                continue
             # On a through-via the leg may leave on any layer; off a bare pad it
             # must start on the pad's own layer.
             sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
