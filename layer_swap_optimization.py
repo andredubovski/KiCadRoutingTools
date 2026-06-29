@@ -1124,12 +1124,17 @@ def apply_diff_pair_layer_swaps(
                     if not se_valid:
                         continue
 
-                    # Apply the single-ended swap
+                    # Apply the single-ended swap (mutates pcb_data so the
+                    # diff-pair validate_swap below sees the moved blocker). Do
+                    # NOT record its via/segment mods in the output aggregates
+                    # yet -- only commit them once the diff-pair swap it enables
+                    # is confirmed valid. Recording them up-front leaked the via
+                    # of every reverted attempt into the output (the revert only
+                    # undoes pcb_data, not all_swap_vias), producing duplicate
+                    # stacked vias and the bulk of issue #221's VIA-DRILL-HOLE.
                     se_vias, se_mods = apply_stub_layer_switch(
                         pcb_data, se_stub, alt_layer, config, debug=False
                     )
-                    all_segment_modifications.extend(se_mods)
-                    all_swap_vias.extend(se_vias)
 
                     # Now retry the diff pair source switch
                     valid, reason = validate_swap(
@@ -1140,6 +1145,9 @@ def apply_diff_pair_layer_swaps(
                     )
 
                     if valid:
+                        # Commit the single-ended blocker move now that it stuck
+                        all_segment_modifications.extend(se_mods)
+                        all_swap_vias.extend(se_vias)
                         # Apply diff pair source switch
                         vias1, mods1 = apply_stub_layer_switch(pcb_data, src_p_stub, tgt_layer, config, debug=False)
                         vias2, mods2 = apply_stub_layer_switch(pcb_data, src_n_stub, tgt_layer, config, debug=False)
@@ -1207,11 +1215,13 @@ def apply_diff_pair_layer_swaps(
                         if not se_valid:
                             continue
 
+                        # See the source-side note above: defer recording the
+                        # single-ended blocker's via/segment mods until the
+                        # diff-pair swap is confirmed, so a reverted attempt
+                        # cannot leak a duplicate via into the output (#221).
                         se_vias, se_mods = apply_stub_layer_switch(
                             pcb_data, se_stub, alt_layer, config, debug=False
                         )
-                        all_segment_modifications.extend(se_mods)
-                        all_swap_vias.extend(se_vias)
 
                         valid, reason = validate_swap(
                             tgt_p_stub, tgt_n_stub, src_layer, all_stubs_by_layer,
@@ -1221,6 +1231,8 @@ def apply_diff_pair_layer_swaps(
                         )
 
                         if valid:
+                            all_segment_modifications.extend(se_mods)
+                            all_swap_vias.extend(se_vias)
                             vias1, mods1 = apply_stub_layer_switch(pcb_data, tgt_p_stub, src_layer, config, debug=False)
                             vias2, mods2 = apply_stub_layer_switch(pcb_data, tgt_n_stub, src_layer, config, debug=False)
                             all_segment_modifications.extend(mods1 + mods2)
