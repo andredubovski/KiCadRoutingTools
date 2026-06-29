@@ -27,6 +27,7 @@ import platform
 import argparse
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from startup_checks import get_cargo_version
 
@@ -41,7 +42,7 @@ KICAD_VERSIONS = ["10.0", "9.99", "9.0"]  # Checked in order; 9.99 = nightly
 PCM_IDENTIFIER = "com.github.drandyhaas.kicadroutingtools"
 
 
-def get_kicad_python() -> Path | None:
+def get_kicad_python() -> Optional[Path]:
     """
     Find KiCad's bundled Python executable.
 
@@ -351,7 +352,7 @@ def find_conflicting_pcm_installs(plugins_dir: Path) -> list:
     return conflicts
 
 
-def disable_pcm_install(pcm_dir: Path, version: str) -> Path | None:
+def disable_pcm_install(pcm_dir: Path, version: str) -> Optional[Path]:
     """Move a conflicting PCM plugin copy out of the plugin search path.
 
     Moved to <kicad_base>/disabled_pcm_plugins/<version>/ so it leaves sys.path
