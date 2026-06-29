@@ -14,6 +14,13 @@ VIA_DRILL = 0.3  # mm
 # Grid parameters
 GRID_STEP = 0.1  # mm
 
+# Via-obstacle diagonal expansion margin: how far a via's keep-out reaches
+# diagonally on the routing grid. MUST be identical between the per-net obstacle
+# cache (_collect_via_obstacles) and the full obstacle map, or incremental
+# rip/rebuild desyncs (see obstacle_map.py). Coincidentally equals CLEARANCE but
+# is a distinct concept; centralized so the call sites can't drift.
+DIAGONAL_MARGIN = 0.25  # mm
+
 # Cost parameters
 VIA_COST = 50
 VIA_PROXIMITY_COST = 10

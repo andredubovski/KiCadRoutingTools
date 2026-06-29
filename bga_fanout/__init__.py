@@ -22,6 +22,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from net_queries import matches_net_filter
 from list_nets import fab_floors
@@ -2127,23 +2128,23 @@ def main():
                         help='Component reference (auto-detected if not specified)')
     parser.add_argument('--layers', '-l', nargs='+', default=['F.Cu', 'B.Cu'],
                         help='Routing layers (default: F.Cu B.Cu)')
-    parser.add_argument('--track-width', '-w', type=float, default=0.3,
-                        help='Track width in mm (default: 0.3)')
-    parser.add_argument('--clearance', type=float, default=0.25,
-                        help='Track clearance in mm (default: 0.25)')
-    parser.add_argument('--via-size', type=float, default=0.5,
-                        help='Via outer diameter in mm (default: 0.5)')
-    parser.add_argument('--via-drill', type=float, default=0.3,
-                        help='Via drill size in mm (default: 0.3)')
+    parser.add_argument('--track-width', '-w', type=float, default=defaults.BGA_TRACK_WIDTH,
+                        help=f'Track width in mm (default: {defaults.BGA_TRACK_WIDTH})')
+    parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
+                        help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
+    parser.add_argument('--via-size', type=float, default=defaults.BGA_VIA_SIZE,
+                        help=f'Via outer diameter in mm (default: {defaults.BGA_VIA_SIZE})')
+    parser.add_argument('--via-drill', type=float, default=defaults.BGA_VIA_DRILL,
+                        help=f'Via drill size in mm (default: {defaults.BGA_VIA_DRILL})')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
     parser.add_argument('--diff-pairs', '-d', nargs='*',
                         help='Differential pair net patterns (e.g., "*lvds*"). '
                              'Matching P/N pairs will be routed together on same layer.')
-    parser.add_argument('--diff-pair-gap', type=float, default=0.1,
-                        help='Gap between differential pair traces in mm')
-    parser.add_argument('--exit-margin', type=float, default=0.5,
-                        help='Distance past BGA boundary')
+    parser.add_argument('--diff-pair-gap', type=float, default=defaults.BGA_DIFF_PAIR_GAP,
+                        help=f'Gap between differential pair traces in mm (default: {defaults.BGA_DIFF_PAIR_GAP})')
+    parser.add_argument('--exit-margin', type=float, default=defaults.BGA_EXIT_MARGIN,
+                        help=f'Distance past BGA boundary (default: {defaults.BGA_EXIT_MARGIN})')
     parser.add_argument('--primary-escape', '-p', choices=['horizontal', 'vertical'],
                         default='horizontal',
                         help='Primary escape direction preference (default: horizontal). '

@@ -11,7 +11,9 @@ from routing_constants import FORBIDDEN_LAYER_COST
 # Cost knobs (proximity costs, via_cost, attraction bonuses) are calibrated at
 # this grid step: GridRouteConfig.cell_cost / via_cost_units scale them so the
 # cost per mm of path is the same at any --grid-step, and identical to
-# historical behavior at 0.1mm.
+# historical behavior at 0.1mm. This is a FIXED calibration baseline, NOT the
+# grid-step default (routing_defaults.GRID_STEP) -- it must stay 0.1 even if the
+# default grid changes, so the two are intentionally separate constants.
 REFERENCE_GRID_STEP = 0.1  # mm
 
 

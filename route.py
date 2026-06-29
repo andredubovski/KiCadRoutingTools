@@ -114,16 +114,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
                 disable_bga_zones: Optional[List[str]] = None,
-                track_width: float = 0.1,
+                track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
                 power_tap_neckdown: bool = True,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
-                clearance: float = 0.1,
-                via_size: float = 0.3,
-                via_drill: float = 0.2,
+                clearance: float = defaults.CLEARANCE,
+                via_size: float = defaults.VIA_SIZE,
+                via_drill: float = defaults.VIA_DRILL,
                 grid_step: float = 0.1,
                 via_cost: int = 50,
                 max_iterations: int = 200000,
@@ -602,7 +602,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
         pcb_data, list(all_unrouted_net_ids), config,
-        extra_clearance=0.0, diagonal_margin=0.25
+        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
     # Rippable pre-existing nets need cache entries too: the working obstacle
     # map is base + cache, and their copper was excluded from base (issue #103).
@@ -610,7 +610,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         from obstacle_cache import precompute_net_obstacles
         for nid in existing_rippable:
             net_obstacles_cache[nid] = precompute_net_obstacles(
-                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=0.25)
+                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")

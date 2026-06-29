@@ -12,6 +12,7 @@ import math
 
 from kicad_parser import PCBData, Segment, Via, Pad
 from routing_config import GridRouteConfig, GridCoord
+import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
     circle_offsets, segment_blocked_cells_array
 from net_queries import expand_pad_layers
@@ -108,11 +109,11 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # a diagonal cell-offset too close (e.g. (3,2) cells = 0.36mm when 0.39mm is
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
-        # diagonal_margin=0.25 to MATCH the per-net cache (_collect_via_obstacles):
+        # diagonal_margin=DIAGONAL_MARGIN to MATCH the per-net cache (_collect_via_obstacles):
         # the base map holds the excluded nets' (GND/P3.3V) fanout vias, and without
         # the diagonal margin a 45deg track grazes them a sub-cell under clearance.
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid,
-                          via_via_expansion_grid, diagonal_margin=0.25)
+                          via_via_expansion_grid, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Use effective_clearance to ensure proper spacing between nets with different clearance requirements
@@ -1641,7 +1642,7 @@ def build_base_obstacle_map_with_vis(pcb_data: PCBData, config: GridRouteConfig,
         # required) -- a real cross-net via-via DRC violation the router never saw.
         via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
         _add_via_obstacle(obstacles, via, coord, num_layers, via_track_expansion_grid, via_via_expansion_grid,
-                          diagonal_margin=0.25, blocked_cells=blocked_cells, blocked_vias=blocked_vias)
+                          diagonal_margin=defaults.DIAGONAL_MARGIN, blocked_cells=blocked_cells, blocked_vias=blocked_vias)
 
     # Add pads as obstacles (excluding nets we'll route)
     # Use effective_clearance to ensure proper spacing between nets with different clearance requirements

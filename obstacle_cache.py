@@ -12,6 +12,7 @@ import numpy as np
 
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
+import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
     pad_blocked_cells_array, segment_blocked_cells_array, circle_offsets
 from net_queries import expand_pad_layers
@@ -81,7 +82,7 @@ class NetObstacleData:
 
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
-                              diagonal_margin: float = 0.25) -> NetObstacleData:
+                              diagonal_margin: float = defaults.DIAGONAL_MARGIN) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.
@@ -341,7 +342,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
 def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: GridRouteConfig,
                                    extra_clearance: float = 0.0,
-                                   diagonal_margin: float = 0.25) -> Dict[int, NetObstacleData]:
+                                   diagonal_margin: float = defaults.DIAGONAL_MARGIN) -> Dict[int, NetObstacleData]:
     """Pre-compute obstacles for all nets to route.
 
     This is called once at the start of routing to build a cache that
@@ -434,7 +435,7 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
     # Recompute this net's obstacles (now includes the new route)
     net_obstacles_cache[net_id] = precompute_net_obstacles(
         pcb_data, net_id, config,
-        extra_clearance=0.0, diagonal_margin=0.25
+        extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
 
 
