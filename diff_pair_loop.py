@@ -665,6 +665,13 @@ def route_diff_pairs(
                         retry_result = route_diff_pair_with_obstacles(pcb_data, pair, config, retry_obstacles, base_obstacles, unrouted_stubs)
 
                         if retry_result and not retry_result.get('failed') and not retry_result.get('probe_blocked'):
+                            # #215: if this coupled route pinches its own P/N below
+                            # clearance at the connectors, re-route via the hybrid and
+                            # take it if cleaner (same swap as the primary success path).
+                            retry_result = _maybe_swap_to_hybrid(
+                                retry_result, pair, pcb_data, config, retry_obstacles, base_obstacles,
+                                routed_net_ids, remaining_net_ids, all_unrouted_net_ids,
+                                gnd_net_id, track_proximity_cache, layer_map)
                             # Calculate actual routed length from segments (includes connectors and via barrels)
                             new_segments = retry_result.get('new_segments', [])
                             new_vias = retry_result.get('new_vias', [])
