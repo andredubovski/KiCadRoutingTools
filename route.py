@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, neck_wide_segments_grazing_pads
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -881,6 +881,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # every cycle by dropping a redundant non-bridge segment, preferring one that
     # grazes foreign copper. Runs before the dead-end sweep so spurs left by a
     # removed loop edge get trimmed. Scoped + zone-skipping like the dead-end sweep.
+    # Drop a terminal/tap segment that grazes a foreign pad/via below clearance when
+    # the net stays connected without it (issue #224 -- the redundant launch-jog /
+    # tap appendix). Runs BEFORE the cycle prune + dead-end sweep so the stub left
+    # when the grazing segment is removed gets collapsed (the whole appendage goes,
+    # not just the one segment). Connectivity-gated, so a load-bearing graze stays.
+    _gz_segs, _gz_nets, graze_input_segments = prune_grazing_segments(
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
+    if _gz_segs:
+        print(f"Graze prune: removed {_gz_segs} foreign-pad-grazing segment(s) across {_gz_nets} net(s)")
+
     _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
         results, pcb_data, sweep_scope_ids, clearance=config.clearance)
     if _cy_segs:
@@ -897,9 +907,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
     if _necked:
         print(f"Width neck: narrowed {_necked} wide segment(s) grazing a foreign pad")
-    # Merge any original input-file loop edges into the writer's strip list.
+    # Merge any original input-file loop / grazing edges into the writer's strip list.
     if cycle_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
+    if graze_input_segments:
+        dead_end_input_segments = list(dead_end_input_segments) + graze_input_segments
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
     # write-list results and strips `segments_to_remove`. So an in-scope net's

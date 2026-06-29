@@ -923,6 +923,106 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
+                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+    """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
+    stays fully connected without it (issue #224).
+
+    The router lays a terminal/tap segment toward its own pad/via through the
+    obstacle-exempt endpoint region, so at tight connector / fine pad pitch it can
+    sit sub-clearance to a NEIGHBOURING foreign pad -- a route.py launch jog, a
+    route_disconnected_planes tap. `_neck_terminal_grazes` only narrows such a
+    segment and is floored at the fab track minimum, so a sub-floor graze survives
+    to DRC. But these grazing segments are frequently a REDUNDANT detour/appendix:
+    the adjacent (wider) copper already overlaps enough to carry the connection, so
+    dropping the grazing segment leaves the net fully connected and removes the
+    violation outright (e.g. ottercast Net-(R81-Pad1)'s tab poking at the C3 pad).
+
+    A candidate is removed only when the AUTHORITATIVE copper-width-aware
+    check_net_connectivity confirms the net is no worse connected without it -- a
+    load-bearing graze (e.g. a plane tap that is a pad's sole connection to the
+    pour) is kept and left for DRC. Zoned nets are checked WITH their pour, so a
+    tap that the fill makes redundant can still be dropped. Mirrors
+    prune_redundant_cycles' write-list / pcb_data sync.
+
+    Returns (segments_removed, nets_pruned, original_segments_to_remove)."""
+    from collections import defaultdict
+    from check_connected import check_net_connectivity
+    # Accurate (rect-edge, windowed) foreign-pad distance -- the same one the router's
+    # terminal-neck uses, so "grazes" matches what DRC flags. The circle model in
+    # _prune_net_cycles.grazes only ORDERS cycle-edge drops, but here grazing GATES
+    # removal, so an over-approximation would delete legitimate non-violating copper.
+    from single_ended_routing import _seg_foreign_pad_dist
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    def grazes(s):
+        d = _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                  s.end_x, s.end_y, s.layer)
+        return d < clearance + s.width / 2.0 - 1e-4
+
+    zones_by_net = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        zones_by_net[z.net_id].append(z)
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    removed_routed_ids = set()
+    original_to_remove = []
+    nets_pruned = 0
+    for net_id, net_segs in segs_by_net.items():
+        grazing = [s for s in net_segs if grazes(s)]
+        if not grazing:
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+        net_zones = zones_by_net.get(net_id, [])
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, net_zones)
+        kept = list(net_segs)
+        dropped = []
+        # Shortest grazing segments first: an appendix tip / tap stub is the most
+        # likely to be redundant, and dropping it can only help the longer ones.
+        for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
+            trial = [x for x in kept if x is not s]
+            if worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)):
+                continue
+            kept = trial
+            dropped.append(s)
+        if not dropped:
+            continue
+        nets_pruned += 1
+        for s in dropped:
+            if id(s) in routed_seg_ids:
+                removed_routed_ids.add(id(s))
+            else:
+                original_to_remove.append(s)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+
+    return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
+
+
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
     """Swap the net assignments of two pads in pcb_data (net_id, net_name, and
     membership in pads_by_net / Net.pads).
