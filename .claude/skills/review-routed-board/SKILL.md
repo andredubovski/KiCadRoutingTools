@@ -17,7 +17,11 @@ python3 -X utf8 check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connec
 python3 -X utf8 check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
 ```
 
-Pass `--clearance` to `check_drc.py` matching the value used for routing if known.
+`check_drc.py` auto-grades at the clearance the routing steps wrote into the sibling
+`.kicad_pro` (the smallest clearance any step actually used, including auto-stepped
+fine-pitch taps), so the bare invocation above already grades at the true routed
+floor. Pass `--clearance <value>` only to override (e.g. to grade a hand-routed
+board with no routed-floor `.kicad_pro`).
 
 **Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the authoritative check:
 

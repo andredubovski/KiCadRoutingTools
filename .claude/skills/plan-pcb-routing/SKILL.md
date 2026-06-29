@@ -368,8 +368,14 @@ Use the printed flags as-is:
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so
-it's the honest delta. Use the printed `check_drc.py` flags
-(`--clearance <floor> --hole-to-hole-clearance <floor>`); see Step 6.
+it's the honest delta. The routing/plane/fanout steps now **record the smallest
+clearance any step actually used** (route_planes/route_disconnected_planes and the
+single-ended multipoint taps auto-step the fine-pitch tap clearance DOWN toward the
+fab floor as the geometry demands) into the output `.kicad_pro` DRC floor and into
+`JSON_SUMMARY` (`min_clearance_used`). `check_drc.py` **auto-grades at that
+`.kicad_pro` clearance when `-c` is omitted**, so a bare `check_drc.py board.kicad_pcb`
+already grades at the true routed floor. Passing `--clearance <floor>` still works
+as an explicit override; see Step 6.
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
@@ -776,12 +782,14 @@ python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
 ### Step 6: Verify Results
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
-diff pair checks). If that skill is unavailable, run the raw checks — DRC at the
-**manufacturing floor** from Step 4's `--design-rules` output (the
-`check_drc.py` flags it printed), NOT a hardcoded 0.25, so legitimately-tight
-fine-pitch escapes that are still fabbable don't read as violations (#111):
+diff pair checks). If that skill is unavailable, run the raw checks — `check_drc.py`
+**auto-grades at the `.kicad_pro` clearance the routing steps wrote** (the smallest
+clearance any step used, including auto-stepped fine-pitch taps), NOT a hardcoded
+0.25, so legitimately-tight fine-pitch escapes that are still fabbable don't read as
+violations (#111/#226). A bare invocation is correct; pass `--clearance <floor>`
+(from Step 4's `--design-rules` output) only to override:
 
-python3 -X utf8 check_drc.py board_step5.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 check_drc.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_drc.txt
 python3 -X utf8 check_connected.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
 python3 -X utf8 check_orphan_stubs.py board_step5.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
