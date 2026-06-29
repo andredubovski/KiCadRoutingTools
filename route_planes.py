@@ -2559,21 +2559,21 @@ Examples:
                         help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=0.5, help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm (default: 0.3)")
-    parser.add_argument("--track-width", type=float, default=0.3, help="Track width for via-to-pad connections in mm (default: 0.3)")
-    parser.add_argument("--clearance", type=float, default=0.25, help="Clearance in mm (default: 0.25)")
+    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE, help="Via outer diameter in mm (default: 0.5)")
+    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL, help="Via drill size in mm (default: 0.3)")
+    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH, help="Track width for via-to-pad connections in mm (default: 0.3)")
+    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE, help="Clearance in mm (default: 0.25)")
 
     # Zone options
-    parser.add_argument("--zone-clearance", type=float, default=0.2, help="Zone clearance from other copper in mm (default: 0.2)")
-    parser.add_argument("--min-thickness", type=float, default=0.1, help="Minimum zone copper thickness in mm (default: 0.1)")
+    parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE, help="Zone clearance from other copper in mm (default: 0.2)")
+    parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
 
     # Algorithm options
-    parser.add_argument("--grid-step", type=float, default=0.1, help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--max-search-radius", type=float, default=10.0, help="Max radius to search for valid via position in mm (default: 10.0)")
-    parser.add_argument("--max-via-reuse-radius", type=float, default=1.0, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
+    parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP, help="Grid resolution in mm (default: 0.1)")
+    parser.add_argument("--max-search-radius", type=float, default=defaults.PLANE_MAX_SEARCH_RADIUS, help="Max radius to search for valid via position in mm (default: 10.0)")
+    parser.add_argument("--max-via-reuse-radius", type=float, default=defaults.PLANE_MAX_VIA_REUSE_RADIUS, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
     parser.add_argument("--close-via-radius", type=float, default=None, help="Radius to check for nearby vias before placing new one (default: 2.5 * via-size)")
-    parser.add_argument("--hole-to-hole-clearance", type=float, default=0.2, help="Minimum clearance between drill holes in mm (default: 0.2)")
+    parser.add_argument("--hole-to-hole-clearance", type=float, default=defaults.HOLE_TO_HOLE_CLEARANCE, help="Minimum clearance between drill holes in mm (default: 0.2)")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
     parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
@@ -2584,7 +2584,7 @@ Examples:
     # Blocker rip-up options
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="Identify and rip up nets blocking via placement, then retry. Ripped nets are excluded from output.")
-    parser.add_argument("--max-rip-nets", type=int, default=3,
+    parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip up (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="Automatically re-route ripped nets after via placement")
@@ -2602,15 +2602,15 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
-    parser.add_argument("--plane-track-via-clearance", type=float, default=0.8,
+    parser.add_argument("--plane-track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from track center to other nets' via centers when routing MST connections (mm, default: 0.8)")
     parser.add_argument("--voronoi-seed-interval", type=float, default=2.0,
                         help="Sample interval for Voronoi seed points along plane connection routes (mm, default: 2.0)")
-    parser.add_argument("--plane-max-iterations", type=int, default=200000,
+    parser.add_argument("--plane-max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help="Max A* iterations for routing plane connections (default: 200000)")
 
     # Board edge clearance
-    parser.add_argument("--board-edge-clearance", type=float, default=0.5,
+    parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge for zones in mm (default: 0.5)")
     parser.add_argument("--no-fix-drc-settings", action="store_true",
                         help="Do not adjust the output's .kicad_pro DRC constraints to match the "

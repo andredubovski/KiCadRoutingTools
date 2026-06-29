@@ -776,39 +776,39 @@ Examples:
                         help="Layer(s) available for routing (e.g., F.Cu B.Cu). If omitted, all copper layers are used.")
 
     # Track width options
-    parser.add_argument("--max-track-width", type=float, default=2.0,
+    parser.add_argument("--max-track-width", type=float, default=defaults.REPAIR_MAX_TRACK_WIDTH,
                         help="Maximum track width for connections in mm (default: 2.0)")
-    parser.add_argument("--min-track-width", type=float, default=0.2,
+    parser.add_argument("--min-track-width", type=float, default=defaults.REPAIR_MIN_TRACK_WIDTH,
                         help="Minimum track width for connections in mm (default: 0.2)")
-    parser.add_argument("--track-width", type=float, default=0.3,
+    parser.add_argument("--track-width", type=float, default=defaults.TRACK_WIDTH,
                         help="Default track width for routing config in mm (default: 0.3)")
 
     # Clearance options
-    parser.add_argument("--clearance", type=float, default=0.25,
+    parser.add_argument("--clearance", type=float, default=defaults.CLEARANCE,
                         help="Trace-to-trace clearance in mm (default: 0.25)")
-    parser.add_argument("--zone-clearance", type=float, default=0.2,
+    parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
-    parser.add_argument("--track-via-clearance", type=float, default=0.8,
+    parser.add_argument("--track-via-clearance", type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
                         help="Clearance from tracks to other nets' vias in mm (default: 0.8)")
-    parser.add_argument("--board-edge-clearance", type=float, default=0.5,
+    parser.add_argument("--board-edge-clearance", type=float, default=defaults.PLANE_EDGE_CLEARANCE,
                         help="Clearance from board edge in mm (default: 0.5)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=0.3,
                         help="Minimum clearance between drill holes in mm (default: 0.3)")
 
     # Via options (for config)
-    parser.add_argument("--via-size", type=float, default=0.5,
+    parser.add_argument("--via-size", type=float, default=defaults.VIA_SIZE,
                         help="Via outer diameter in mm (default: 0.5)")
-    parser.add_argument("--via-drill", type=float, default=0.3,
+    parser.add_argument("--via-drill", type=float, default=defaults.VIA_DRILL,
                         help="Via drill diameter in mm (default: 0.3)")
 
     # Grid step
-    parser.add_argument("--grid-step", type=float, default=0.1,
+    parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help="Routing grid step in mm (default: 0.1)")
-    parser.add_argument("--analysis-grid-step", type=float, default=0.5,
+    parser.add_argument("--analysis-grid-step", type=float, default=defaults.REPAIR_ANALYSIS_GRID_STEP,
                         help="Grid step for connectivity analysis in mm (coarser = faster, default: 0.5)")
 
     # Routing options
-    parser.add_argument("--max-iterations", type=int, default=200000,
+    parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help="Maximum A* iterations per route attempt (default: 200000)")
 
     # Pad-level repair (issue #99)
@@ -829,7 +829,7 @@ Examples:
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
-    parser.add_argument("--max-rip-nets", type=int, default=3,
+    parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
                         help="DEPRECATED / no-op (issue #141 reverted): ripped nets are always "
