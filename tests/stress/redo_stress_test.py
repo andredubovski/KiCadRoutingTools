@@ -4,13 +4,20 @@
 The original board run is driven by an LLM agent following RUNBOOK.md, but every
 routing/fanout/plane/check command goes through tests/stress/run_limited.sh,
 which records each command (fully quoted argv + the cwd it ran in) to a manifest
-(default <run-dir>/redo_commands.sh). This script replays that manifest verbatim,
-so the exact final board is reproduced in seconds with no API calls -- which makes
-runs reproducible and lets an engine change be A/B'd cleanly (replay the same
-manifest with the change on vs off).
+(default <run-dir>/redo_commands.sh). This script replays that manifest to
+reproduce the exact final board in seconds with no API calls -- which makes runs
+reproducible and lets an engine change be A/B'd cleanly (replay the same manifest
+with the change on vs off).
+
+By default the replay is PRUNED to the file-dependency chain that produces the
+final board (issue #231): the agent's superseded retries (a route command it ran
+5x, only the last feeding downstream) and dead-end branches (an output nothing
+consumes) are skipped. This is much faster and deterministic -- each kept command
+re-reads its own input board, so dropping the overwritten writes can't change its
+result. Pass --verbatim to replay every recorded command literally.
 
 Usage:
-  redo_stress_test.py <manifest> [--remap OLD:NEW ...] [--skip-checks] [--dry-run]
+  redo_stress_test.py <manifest> [--remap OLD:NEW ...] [--verbatim] [--skip-checks] [--dry-run]
 
 --remap rewrites a path prefix in every argument, so a run whose intermediates
 were written with absolute paths under one run dir can be replayed into a fresh
@@ -120,6 +127,91 @@ def is_check_cmd(argv):
     return any(os.path.basename(a).startswith("check_") for a in argv)
 
 
+def board_io(argv):
+    """Return (input_basenames, output_basename) for a command's .kicad_pcb args.
+
+    Convention for every tool here: the LAST .kicad_pcb token is the output and
+    the earlier ones are inputs -- this covers both positional `<in> <out>`
+    (route*.py, place_fanout_clearance.py) and `<in> --output <out>`
+    (bga_fanout.py, qfn_fanout.py), because the --output value still appears after
+    the input in argv. Boards are keyed by BASENAME so the dependency analysis is
+    invariant under --remap / --workdir path rewriting (issue #231). Returns
+    ([], None) when the command names no board (e.g. `--help`)."""
+    toks = [a for a in argv if a.endswith(".kicad_pcb")]
+    if not toks:
+        return [], None
+    return [os.path.basename(t) for t in toks[:-1]], os.path.basename(toks[-1])
+
+
+def compute_prune_keep(cmds):
+    """Indices (0-based) of the commands needed to reproduce the final board.
+
+    Builds the file-dependency DAG (issue #231) and keeps only the transitive
+    chain feeding the final board, dropping the agent's superseded retries and
+    dead-end branches:
+
+    - Forward pass tracks `producer[board] = last command index that wrote it`, so
+      a command's inputs bind to the THEN-CURRENT producer -- i.e. the last write
+      before that read. A board rewritten N times therefore links only its last
+      writer to whoever consumes it; the earlier writes gain no dependents.
+    - The final target is the last non-check command that writes a board.
+    - keep = the final command + everything transitively reachable through those
+      input->producer edges. Non-chain non-check commands (superseded writes,
+      never-consumed dead ends like `*_retry`) fall out.
+    - A check command is kept only if every board it reads is still produced by
+      the kept chain or is an external/seeded input (never produced by any
+      command) -- so we never check a board no kept command makes.
+
+    Returns (keep:set[int], info:dict) where info has final_index, final_board,
+    and the dropped non-check indices (for a transparent report).
+
+    Caveat (issue #231): keeping the last writer of each consumed board assumes
+    that writer SUCCEEDED in the original run -- true when the agent only advanced
+    after a success, the normal case. The manifest records no exit status, so a
+    rare "earlier attempt succeeded, later attempt failed" ordering would keep a
+    failing command; rerun without --prune (verbatim) if a pruned replay fails."""
+    n = len(cmds)
+    producer = {}
+    deps = [set() for _ in range(n)]
+    out_of = [None] * n
+    in_of = [[] for _ in range(n)]
+    final = None
+    for i, (_cwd, argv) in enumerate(cmds):
+        ins, out = board_io(argv)
+        in_of[i] = ins
+        if is_check_cmd(argv):
+            continue  # reads boards but produces none; not part of the producer chain
+        out_of[i] = out
+        deps[i] = {producer[b] for b in ins if b in producer}
+        if out is not None:
+            producer[out] = i
+            final = i
+
+    if final is None:
+        return set(range(n)), {"final_index": None, "final_board": None, "dropped": []}
+
+    keep = set()
+    stack = [final]
+    while stack:
+        j = stack.pop()
+        if j in keep:
+            continue
+        keep.add(j)
+        stack.extend(deps[j])
+
+    produced_any = {o for o in out_of if o}
+    produced_kept = {out_of[i] for i in keep if out_of[i]}
+    for i, (_cwd, argv) in enumerate(cmds):
+        if not is_check_cmd(argv):
+            continue
+        # keep a check iff every board it reads exists after pruning
+        if all(b in produced_kept or b not in produced_any for b in in_of[i]):
+            keep.add(i)
+
+    dropped = [i for i in range(n) if i not in keep and not is_check_cmd(cmds[i][1])]
+    return keep, {"final_index": final, "final_board": out_of[final], "dropped": dropped}
+
+
 def seed_input_boards(manifest, cmds, dest_dir):
     """Copy 'input-only' relative .kicad_pcb files into the replay dest dir.
 
@@ -174,6 +266,16 @@ def main():
                          "path) still resolves either way.")
     ap.add_argument("--skip-checks", action="store_true",
                     help="Skip check_*.py commands (they do not mutate the board)")
+    ap.add_argument("--verbatim", action="store_true",
+                    help="Replay EVERY recorded command in order, including the agent's "
+                         "superseded retries and dead-end branches. By default the replay "
+                         "PRUNES to the file-dependency chain that produces the final "
+                         "board (issue #231) -- much faster on dense boards (e.g. a "
+                         "signal-route command recorded 5x runs once) and deterministic "
+                         "(each kept command re-reads its own input, independent of the "
+                         "dropped writes). Use --verbatim to reproduce the literal "
+                         "sequence, or if a pruned replay fails on a failed-retry "
+                         "ordering (see compute_prune_keep()).")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan, run nothing")
     ap.add_argument("--continue-on-error", action="store_true",
                     help="Keep going if a command fails (default: replicate the agent's "
@@ -208,6 +310,18 @@ def main():
     if remaps:
         print("Remaps: " + ", ".join(f"{o} -> {n}" for o, n in remaps))
 
+    prune_keep = None
+    if not args.verbatim:
+        prune_keep, info = compute_prune_keep(cmds)
+        dropped = info["dropped"]
+        print(f"Pruning to file-dependency chain: running {len(prune_keep)} of "
+              f"{len(cmds)} command(s), dropping {len(dropped)} superseded/dead-end "
+              f"non-check command(s). Final board: {info['final_board']}")
+        for i in dropped:
+            _ins, out = board_io(cmds[i][1])
+            tool = next((os.path.basename(a) for a in cmds[i][1] if a.endswith(".py")), "?")
+            print(f"    drop [{i+1}] {tool} -> {out}")
+
     # Seed input-only relative boards (e.g. <board>_input.kicad_pcb) into the dest
     # so the first command finds them -- without this the chain breaks (issue: a
     # relative seed file the original run dir had but no recorded command produces).
@@ -221,6 +335,9 @@ def main():
     timings = []   # per-command (index, seconds, returncode, argv) for later comparison
     t0 = time.time()
     for i, (cwd, argv) in enumerate(cmds, 1):
+        if prune_keep is not None and (i - 1) not in prune_keep:
+            print(f"[{i}/{len(cmds)}] prune: {' '.join(map(shlex.quote, argv[:3]))} ...")
+            continue
         argv = apply_remaps(argv, remaps)
         # --workdir forces every command into one directory (chains relative outputs
         # correctly); otherwise use the command's recorded cwd, remapped.
@@ -264,7 +381,12 @@ def main():
                 return 2
 
     total = time.time() - t0
-    print(f"\nReplayed {len(cmds)} command(s) in {total:.1f}s ({failures} non-zero exits).")
+    if prune_keep is not None:
+        ran = sum(1 for i in range(1, len(cmds) + 1) if (i - 1) in prune_keep)
+        print(f"\nReplayed {ran} of {len(cmds)} command(s) (pruned to the dependency "
+              f"chain) in {total:.1f}s ({failures} non-zero exits).")
+    else:
+        print(f"\nReplayed {len(cmds)} command(s) in {total:.1f}s ({failures} non-zero exits).")
     # Per-command timing breakdown (slowest first) -- comparable across code versions.
     if timings:
         print("Per-command time (slowest first):")

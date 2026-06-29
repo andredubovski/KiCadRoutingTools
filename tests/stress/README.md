@@ -83,10 +83,18 @@ the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
 when a command isn't routed through `run_limited.sh` — which the agent does
 inconsistently — so the manifest is a complete, replayable transcript of the run.
 
-`redo_stress_test.py` replays a manifest verbatim — no LLM, no API calls,
+`redo_stress_test.py` replays a manifest — no LLM, no API calls,
 seconds-to-minutes instead of tens of minutes, and immune to API outages. The
 router is deterministic, so a replay reproduces the recorded board exactly (only
 the freshly-assigned track/via UUIDs differ; geometry and nets are identical).
+
+By default the replay is **pruned to the file-dependency chain** that produces
+the final board (issue #231): the agent's superseded retries (a route command it
+ran 5× — only the last feeds downstream) and dead-end branches (an output nothing
+consumes) are skipped. Each kept command re-reads its own input board, so dropping
+the overwritten writes can't change the result — the final board is identical, just
+reached in far fewer steps (e.g. ottercast 24 → 11 commands, same DRC). Pass
+`--verbatim` to replay every recorded command literally.
 
 ```bash
 # Replay a recorded run in place (re-runs the exact recorded sequence):
