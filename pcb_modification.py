@@ -1023,6 +1023,232 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+def _octolinear_bends(A, B):
+    """Candidate octolinear (45-degree) polylines from A to B: the direct segment
+    (when A->B is already octolinear) and the two single-bend L-elbows (diagonal-
+    then-orthogonal and orthogonal-then-diagonal). Each is returned as the list of
+    INTERMEDIATE points ([] = direct)."""
+    ax, ay = A
+    bx, by = B
+    dx, dy = bx - ax, by - ay
+    adx, ady = abs(dx), abs(dy)
+    sx = 1.0 if dx >= 0 else -1.0
+    sy = 1.0 if dy >= 0 else -1.0
+    out = []
+    if adx < 1e-9 or ady < 1e-9 or abs(adx - ady) < 1e-6:
+        out.append([])                                   # already octolinear
+    if adx >= ady:
+        out.append([(round(ax + sx * ady, 4), round(by, 4))])   # diag then horizontal
+        out.append([(round(bx - sx * ady, 4), round(ay, 4))])   # horizontal then diag
+    else:
+        out.append([(round(bx, 4), round(ay + sy * adx, 4))])   # diag then vertical
+        out.append([(round(ax, 4), round(by - sy * adx, 4))])   # vertical then diag
+    return out
+
+
+def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
+                             clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+    """Re-bend a foreign-pad-grazing octolinear jog so it clears the pad (issue #224).
+
+    The complement to prune_grazing_segments: when a grazing segment is LOAD-BEARING
+    (removing it would disconnect the net) it can't be dropped, but the little jog it
+    forms can often be re-routed around the pad with a different octolinear bend that
+    keeps the SAME two anchor endpoints -- so connectivity is untouched and only the
+    poking corner moves (e.g. ottercast Net-(R81-Pad1): the 45-degree apex poking at
+    the C3 pad becomes a 45-then-vertical bend that stays clear). All-45-degree
+    geometry is preserved; the new segments are verified to clear every foreign pad
+    AND track/via before they replace the old jog, and the net's connectivity is
+    re-checked, so the pass can only ever remove a graze, never introduce one or
+    disconnect a net. A jog with no clearing octolinear bend is left for DRC.
+
+    Returns (segments_changed, nets_changed, original_segments_to_remove)."""
+    from collections import defaultdict
+    from check_connected import check_net_connectivity
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist
+
+    routed_seg_result = {}
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_result[id(s)] = r
+
+    def grazes(s):
+        return _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                     s.end_x, s.end_y, s.layer) < clearance + s.width / 2.0 - 1e-4
+
+    def clears(x1, y1, x2, y2, layer, net_id, w):
+        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+        return d >= clearance + w / 2.0 - 1e-4
+
+    def vk(x, y):
+        return (round(x, 3), round(y, 3))
+
+    zones_by_net = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        zones_by_net[z.net_id].append(z)
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            segs_by_net[s.net_id].append(s)
+
+    def worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    removed_ids = set()
+    original_to_remove = []
+    added_segments = []
+    nets_changed = 0
+    MAX_CHAIN = 5
+
+    # Re-bending keeps a jog's two anchor endpoints fixed, so it preserves
+    # connectivity on a plane mesh as much as on a signal net -- unlike a cycle
+    # prune, it removes no structural edge. So zoned (plane) nets are NOT skipped;
+    # their grazing taps (e.g. a GND tap pinched against a connector pad) get
+    # re-bent too. The connectivity check is run WITH the net's pour.
+    for net_id, net_segs in segs_by_net.items():
+        grazing = [s for s in net_segs if grazes(s)]
+        if not grazing:
+            continue
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        net_vias = vias_by_net.get(net_id, [])
+        net_zones = zones_by_net.get(net_id, [])
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, net_zones)
+
+        # Group the grazing segments into simple chains: a vertex touching exactly
+        # one grazing segment is an ANCHOR (it ties into non-grazing copper / a
+        # pad / a via and must not move); interior vertices touch two.
+        gadj = defaultdict(list)
+        for s in grazing:
+            gadj[vk(s.start_x, s.start_y)].append(s)
+            gadj[vk(s.end_x, s.end_y)].append(s)
+        anchors = [v for v, ss in gadj.items() if len(ss) == 1]
+        used = set()
+        net_changed = False
+        for start in anchors:
+            seg0 = next((s for s in gadj[start] if id(s) not in used), None)
+            if seg0 is None:
+                continue
+            # Walk the chain from this anchor to the next anchor / junction.
+            chain = []
+            cur = start
+            ok_chain = True
+            while True:
+                nxt = [s for s in gadj[cur] if id(s) not in used]
+                if not nxt:
+                    break
+                s = nxt[0]
+                used.add(id(s))
+                chain.append(s)
+                other = vk(s.end_x, s.end_y) if vk(s.start_x, s.start_y) == cur else vk(s.start_x, s.start_y)
+                cur = other
+                if len(gadj[cur]) != 2:          # reached the far anchor / a junction
+                    break
+                if len(chain) > MAX_CHAIN:
+                    ok_chain = False
+                    break
+            B = cur
+            if not ok_chain or len(gadj[B]) > 2 or B == start:
+                continue                          # branchy / loop -> skip
+            A = start
+            w = min(s.width for s in chain)
+            layer = chain[0].layer
+            if any(s.layer != layer for s in chain):
+                continue                          # mixed-layer jog (has a via) -> skip
+            # Try each octolinear reconnection; commit the first that clears.
+            for inter in _octolinear_bends(A, B):
+                pts = [A] + inter + [B]
+                if all(clears(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], layer, net_id, w)
+                       for i in range(len(pts) - 1)):
+                    new = [Segment(start_x=pts[i][0], start_y=pts[i][1],
+                                   end_x=pts[i + 1][0], end_y=pts[i + 1][1],
+                                   width=w, layer=layer, net_id=net_id)
+                           for i in range(len(pts) - 1)
+                           if (pts[i][0], pts[i][1]) != (pts[i + 1][0], pts[i + 1][1])]
+                    trial = [s for s in net_segs if s not in chain] + new
+                    if worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)):
+                        continue
+                    # Commit: drop the chain, splice in the new octolinear segments.
+                    res = None
+                    for s in chain:
+                        if id(s) in routed_seg_result:
+                            removed_ids.add(id(s))
+                            res = res or routed_seg_result[id(s)]
+                        else:
+                            original_to_remove.append(s)
+                    if res is None:
+                        res = {'new_segments': [], 'new_vias': []}
+                        results.append(res)
+                    res['new_segments'] = list(res.get('new_segments') or []) + new
+                    added_segments.extend(new)
+                    net_segs = trial
+                    net_changed = True
+                    break
+        if net_changed:
+            nets_changed += 1
+
+    if removed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
+    if removed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_ids and id(s) not in orig_ids]
+    pcb_data.segments = list(pcb_data.segments) + added_segments
+    # foreign-copper caches read pcb_data.segments; invalidate so later passes /
+    # the next call see the spliced geometry.
+    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+        pcb_data._foreign_seg_arr_cache = None
+
+    return (len(removed_ids) + len(original_to_remove) + len(added_segments),
+            nets_changed, original_to_remove, added_segments)
+
+
+def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
+                               scope_net_ids=None, clearance: float = 0.1):
+    """Apply prune_grazing_segments + nudge_grazing_octolinear to a PLANE script's
+    write-list (issue #224).
+
+    route_planes / route_disconnected_planes carry their new copper as
+    {'start','end','width','layer','net_id'} DICTS in `all_new_segments` (not the
+    route.py `results` list of Segment objects), so the two passes -- which operate
+    on pcb_data and the route.py results -- are driven here with an empty results
+    list and their Segment-level removals/additions are mirrored back into the dict
+    list by coordinate signature. Returns (all_new_segments, n_removed, n_nudged).
+    """
+    def sig(sx, sy, ex, ey, layer):
+        a, b = (round(sx, 3), round(sy, 3)), (round(ex, 3), round(ey, 3))
+        return (min(a, b), max(a, b), layer)
+
+    def strip(segs, removed):
+        if not removed:
+            return segs, 0
+        rm = {sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer) for s in removed}
+        out = [d for d in segs
+               if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer']) not in rm]
+        return out, len(segs) - len(out)
+
+    # Drop redundant grazing taps.
+    _, _, removed = prune_grazing_segments([], pcb_data, scope_net_ids, clearance)
+    all_new_segments, n_removed = strip(all_new_segments, removed)
+
+    # Re-bend the load-bearing ones around the pad.
+    _, n_nudged, nudge_removed, nudge_added = nudge_grazing_octolinear(
+        [], pcb_data, scope_net_ids, clearance)
+    all_new_segments, _ = strip(all_new_segments, nudge_removed)
+    for s in nudge_added:
+        all_new_segments.append({'start': (s.start_x, s.start_y), 'end': (s.end_x, s.end_y),
+                                 'width': s.width, 'layer': s.layer, 'net_id': s.net_id})
+
+    return all_new_segments, n_removed, n_nudged
+
+
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
     """Swap the net assignments of two pads in pcb_data (net_id, net_name, and
     membership in pads_by_net / Net.pads).

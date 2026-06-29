@@ -1440,6 +1440,19 @@ def _write_output_and_reroute(
     # enforce clearance at the pad). Narrowing only removes conflicts (#157).
     _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
 
+    # Necking is floored at the fab minimum, so a tap whose centreline sits inside a
+    # foreign pad's clearance still grazes (#224). Drop a redundant grazing tap, or
+    # re-bend a load-bearing one around the pad -- connectivity-gated, all-octolinear.
+    if all_new_segments:
+        from pcb_modification import cleanup_plane_taps_grazing
+        _scope = {s['net_id'] for s in all_new_segments}
+        all_new_segments, _gz_rm, _gz_nudge = cleanup_plane_taps_grazing(
+            pcb_data, all_new_segments, _scope, clearance=clearance)
+        if _gz_rm:
+            print(f"  Graze prune: removed {_gz_rm} foreign-pad-grazing tap segment(s)")
+        if _gz_nudge:
+            print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
+
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,

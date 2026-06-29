@@ -30,7 +30,7 @@ from kicad_writer import (
     modify_segment_layers
 )
 from output_writer import write_routed_output
-from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, neck_wide_segments_grazing_pads
+from pcb_modification import drop_phantom_copper, sweep_dead_ends, snap_stub_gaps, prune_redundant_cycles, prune_grazing_segments, nudge_grazing_octolinear, neck_wide_segments_grazing_pads
 from schematic_updater import apply_swaps_to_schematics
 
 # Import from refactored modules
@@ -891,6 +891,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _gz_segs:
         print(f"Graze prune: removed {_gz_segs} foreign-pad-grazing segment(s) across {_gz_nets} net(s)")
 
+    # For a grazing segment that is LOAD-BEARING (removal would disconnect the net),
+    # re-bend its octolinear jog around the pad instead (#224): the apex poking at the
+    # pad becomes a different 45-degree bend that keeps the same two anchor endpoints,
+    # so connectivity is untouched. Verified to clear before committing.
+    _nz_segs, _nz_nets, nudge_input_segments, _ = nudge_grazing_octolinear(
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
+    if _nz_segs:
+        print(f"Graze nudge: re-bent grazing octolinear jog(s) on {_nz_nets} net(s)")
+
     _cy_segs, _cy_nets, cycle_input_segments = prune_redundant_cycles(
         results, pcb_data, sweep_scope_ids, clearance=config.clearance)
     if _cy_segs:
@@ -912,6 +921,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         dead_end_input_segments = list(dead_end_input_segments) + cycle_input_segments
     if graze_input_segments:
         dead_end_input_segments = list(dead_end_input_segments) + graze_input_segments
+    if nudge_input_segments:
+        dead_end_input_segments = list(dead_end_input_segments) + nudge_input_segments
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
     # write-list results and strips `segments_to_remove`. So an in-scope net's
