@@ -75,8 +75,9 @@ class GridRouteConfig:
     target_swap_crossing_penalty: float = 1000.0  # Penalty for crossing assignments in target swap
     crossing_layer_check: bool = True  # Only count crossings when routes share a layer
     routing_clearance_margin: float = 1.0  # Multiplier on track-via clearance (1.0 = minimum DRC)
-    hole_to_hole_clearance: float = 0.25  # mm - edge-to-edge drill spacing; = the JLC fab floor
-                                           # (keep in sync with routing_defaults.HOLE_TO_HOLE_CLEARANCE)
+    hole_to_hole_clearance: float = 0.20  # mm - edge-to-edge via drill spacing; JLC "Via
+                                           # Hole-to-Hole Spacing" (keep in sync with
+                                           # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,

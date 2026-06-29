@@ -65,10 +65,10 @@ _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
 # signal track floor"); power/impedance nets keep their net-class width.
 _FAB_FLOORS = {
     2: {'clearance': 0.127, 'track_width': 0.127, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
+        'via_drill': 0.20, 'hole_to_hole': 0.20, 'annular': 0.13,
         'fine_via_diameter': 0.45, 'fine_via_drill': 0.20},
     4: {'clearance': 0.10, 'track_width': 0.0889, 'via_diameter': 0.45,
-        'via_drill': 0.20, 'hole_to_hole': 0.25, 'annular': 0.13,
+        'via_drill': 0.20, 'hole_to_hole': 0.20, 'annular': 0.13,
         'fine_via_diameter': 0.30, 'fine_via_drill': 0.15},
 }
 

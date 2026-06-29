@@ -1272,7 +1272,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         dy = sy2 - sy1
         seglen2 = dx * dx + dy * dy
         safe_len2 = np.where(seglen2 > 0, seglen2, 1.0)
-        tolerance = clearance * clearance_margin
+        # JLC "NPTH to Track" fab floor (never below the graded clearance).
+        npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        tolerance = npth_clr * clearance_margin
         if matching_net_ids is not None:
             seg_match = np.array([n in matching_net_ids for n in snet], dtype=bool)
         for hx, hy, drill, hnet, ref in holes:
@@ -1283,7 +1285,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             cxp = sx1 + t * dx
             cyp = sy1 + t * dy
             dist = np.sqrt((hx - cxp) ** 2 + (hy - cyp) ** 2)
-            overlap = (drill / 2.0 + sw / 2.0 + clearance) - dist
+            overlap = (drill / 2.0 + sw / 2.0 + npth_clr) - dist
             viol = (overlap > tolerance) & (snet != hnet)
             if matching_net_ids is not None:
                 viol &= seg_match | (hnet in matching_net_ids)

@@ -831,10 +831,13 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                 if not _pad_has_copper(pad):
                     npth_holes.append((pad.global_x, pad.global_y, pad.drill))
 
-    # Track keep-out for NPTH holes on every copper layer (issue #233).
+    # Track keep-out for NPTH holes on every copper layer (issue #233). The
+    # copper-to-NPTH-hole floor is the JLC "NPTH to Track" fab value, never below
+    # the routing clearance.
     if npth_holes:
+        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
-                                      config.clearance, config.grid_step,
+                                      npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
 
     # Via keep-out (hole-to-hole drill minimum) near every drill.

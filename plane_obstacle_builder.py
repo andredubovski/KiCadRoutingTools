@@ -24,6 +24,7 @@ from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
 
 import sys
 import os
+import routing_defaults as defaults
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 from grid_router import GridObstacleMap
 
@@ -861,8 +862,9 @@ def build_routing_obstacle_map(
         for pad in pads:
             if pad.drill > 0 and not _pad_has_copper(pad):
                 npth_holes.append((pad.global_x, pad.global_y, pad.drill))
+    npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
     block_track_cells_near_drills(obstacles, npth_holes, route_track_w,
-                                  config.clearance, config.grid_step, [layer_idx])
+                                  npth_clr, config.grid_step, [layer_idx])
     if verbose:
         print(f"  NPTH-hole track keep-out: {len(npth_holes)} holes in {time.time() - t0:.2f}s")
 

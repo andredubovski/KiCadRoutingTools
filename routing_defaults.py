@@ -93,10 +93,19 @@ KEEPOUT_LAYER = "User.2"  # User layer the keepout polygon is drawn on
 
 # Clearance parameters
 ROUTING_CLEARANCE_MARGIN = 1.0
-HOLE_TO_HOLE_CLEARANCE = 0.25  # mm - = the JLC fab drill-to-drill floor
-                               # (list_nets._FAB_FLOORS 'hole_to_hole', layer-independent).
+HOLE_TO_HOLE_CLEARANCE = 0.20  # mm - JLC "Via Hole-to-Hole Spacing" (edge-to-edge),
+                               # the floor that governs router-placed via drills.
+                               # (JLCPCB's pad-hole-to-hole is a separate, larger
+                               # 0.45 mm; not modelled here -- this value targets
+                               # via spacing. list_nets._FAB_FLOORS 'hole_to_hole'.)
                                # Routing AND check_drc default to this so a bare run
                                # never places/passes vias closer than is manufacturable.
+NPTH_TO_TRACK_CLEARANCE = 0.20  # mm - JLC "NPTH to Track" fab floor: minimum copper
+                                # (track) to NPTH mounting-hole edge. The drill removes
+                                # any copper closer, so a track can't be routed/graded
+                                # nearer than this regardless of the (smaller) routing
+                                # clearance. Used by the NPTH track keep-out + check_drc
+                                # track-hole check (issue #233).
 BOARD_EDGE_CLEARANCE = 0.0  # mm
 
 # Default layers
