@@ -182,6 +182,49 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
     return float(np.min(dist))
 
 
+def _foreign_via_arrays(pcb_data):
+    """Cached (net_id, x, y, radius) numpy arrays for every via on the board. Vias
+    are treated as present on ALL layers (a through-hole conservative over-
+    approximation, matching the obstacle map / _foreign_seg_arrays). Rebuilt when
+    the via count changes."""
+    sig = len(pcb_data.vias)
+    cache = getattr(pcb_data, '_foreign_via_arr_cache', None)
+    if cache is None or cache[0] != sig:
+        nids, cx, cy, rad = [], [], [], []
+        for v in pcb_data.vias:
+            nids.append(v.net_id)
+            cx.append(v.x); cy.append(v.y)
+            rad.append((v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0)
+        cache = (sig, (np.asarray(nids, dtype=np.int64), np.asarray(cx, dtype=float),
+                       np.asarray(cy, dtype=float), np.asarray(rad, dtype=float)))
+        pcb_data._foreign_via_arr_cache = cache
+    return cache[1]
+
+
+def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer):
+    """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
+    segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
+    result (centreline inside the via) is returned as-is."""
+    nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
+    if cx.size == 0:
+        return 1e9
+    R = _FOREIGN_PAD_WINDOW
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    near = ((np.abs(cx - mx) <= R + abs(x2 - x1) / 2.0 + rad) &
+            (np.abs(cy - my) <= R + abs(y2 - y1) / 2.0 + rad) & (nids != net_id))
+    if not near.any():
+        return 1e9
+    fcx, fcy, fr = cx[near], cy[near], rad[near]
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 0.0:
+        d = np.hypot(fcx - x1, fcy - y1) - fr
+    else:
+        tt = np.clip(((fcx - x1) * dx + (fcy - y1) * dy) / l2, 0.0, 1.0)
+        d = np.hypot(fcx - (x1 + tt * dx), fcy - (y1 + tt * dy)) - fr
+    return float(np.min(d))
+
+
 def _emit_via_size(pcb_data, gx, gy, config):
     """(size, drill) for a via the route conversion emits at cell (gx, gy). If a #189
     via-in-pad unblock placed a DRC-legal shrunk via here, return THAT size so the

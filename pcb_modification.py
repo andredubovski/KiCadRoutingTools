@@ -952,7 +952,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     # terminal-neck uses, so "grazes" matches what DRC flags. The circle model in
     # _prune_net_cycles.grazes only ORDERS cycle-edge drops, but here grazing GATES
     # removal, so an over-approximation would delete legitimate non-violating copper.
-    from single_ended_routing import _seg_foreign_pad_dist
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
 
     routed_seg_ids = set()
     for r in results:
@@ -960,9 +960,11 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
             routed_seg_ids.add(id(s))
 
     def grazes(s):
-        d = _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                  s.end_x, s.end_y, s.layer)
-        return d < clearance + s.width / 2.0 - 1e-4
+        thr = clearance + s.width / 2.0 - 1e-4
+        return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer) < thr or
+                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer) < thr)
 
     zones_by_net = defaultdict(list)
     for z in (getattr(pcb_data, 'zones', []) or []):
@@ -1064,7 +1066,7 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     Returns (segments_changed, nets_changed, original_segments_to_remove)."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_seg_dist, _seg_foreign_via_dist
 
     routed_seg_result = {}
     for r in results:
@@ -1072,8 +1074,11 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             routed_seg_result[id(s)] = r
 
     def grazes(s):
-        return _seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer) < clearance + s.width / 2.0 - 1e-4
+        thr = clearance + s.width / 2.0 - 1e-4
+        return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer) < thr or
+                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
+                                      s.end_x, s.end_y, s.layer) < thr)
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
