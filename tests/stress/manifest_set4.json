@@ -1,0 +1,16 @@
+[
+  {
+    "set": "set4",
+    "repo": "Rahul9-spb/FPGA-1",
+    "path": "PCB/FPGA_SDRAM.kicad_pcb",
+    "file": "/Users/andy/Documents/kicad_stress_test/sources/github_set4/Rahul9-spb__FPGA-1__PCB_FPGA_SDRAM.kicad_pcb",
+    "raw_url": "https://raw.githubusercontent.com/Rahul9-spb/FPGA-1/main/PCB/FPGA_SDRAM.kicad_pcb",
+    "github_url": "https://github.com/Rahul9-spb/FPGA-1",
+    "version": 20260206,
+    "size_kb": 1433,
+    "layers_est": 4,
+    "packages": "BGA,QFN,SOIC,SOT,SDRAM",
+    "license": "unspecified",
+    "note": "FPGA + SDRAM board (FPGA_SDRAM), 4-layer, KiCad 10 (126 footprints, 305 nets)"
+  }
+]

@@ -235,9 +235,9 @@ truth for a manufacturable board; large gaps are router-improvement findings.
 Wired into RUNBOOK step 11b; output goes into the results JSON `comparison` /
 `suggestions` fields.
 
-## Two 15-board sets
+## Board sets
 
-Each corpus is exactly **15 boards**:
+Sets 1–3 are exactly **15 boards** each; set 4 starts smaller and grows:
 
 - **Set 1** — the original 15 (curated in `fetch_boards.py` / `normalize_boards.py`).
   `spirit_cm5` (6-layer) was dropped and replaced by `lpddr4_testbed`
@@ -259,14 +259,21 @@ Each corpus is exactly **15 boards**:
   the text parser can't read pre-v6 directly, so the pcbnew round-trip in
   `prep_set3.sh` upgrades them first — extra coverage of that rescue path. Boards
   live in `boards_unrouted_set3/`; results in `results_set3/`.
+- **Set 4** — listed in `manifest_set4.json`, fetched by `fetch_set4.py` to
+  `$STRESS_DIR/sources/github_set4/`. Starts as a single board:
+  `Rahul9-spb/FPGA-1` (`PCB/FPGA_SDRAM.kicad_pcb`) — an FPGA + SDRAM design
+  (BGA/QFN/SOIC/SOT, 4-layer, KiCad 10; 126 footprints / 305 nets). Append more
+  entries to the manifest (and a `MAP` line in `prep_set4.sh`) to grow it. Boards
+  live in `boards_unrouted_set4/`; results in `results_set4/`.
 
-Prepare set 2 / set 3 (KiCad Python; loads each board once):
+Prepare set 2 / set 3 / set 4 (KiCad Python; loads each board once):
 
 ```bash
 bash prep_set2.sh    # -> boards_set2/ (normalized routed + .kicad_pro)
                      #    boards_unrouted_set2/ (stripped, to route)
 
 python3 fetch_set3.py && bash prep_set3.sh   # set 3: fetch + normalize + strip
+python3 fetch_set4.py && bash prep_set4.sh   # set 4: fetch + normalize + strip
 ```
 
 `prep_set2.py <src> <routed_dst> <stripped_dst>` normalizes the routed reference
