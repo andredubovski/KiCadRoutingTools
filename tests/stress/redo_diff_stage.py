@@ -22,6 +22,8 @@ restrict the run.
 Usage:
   redo_diff_stage.py                       # all diff boards under the default root
   redo_diff_stage.py hackrf_one glasgow_revC
+  redo_diff_stage.py --jobs 4 --stagger 8  # 4 boards at once, 8s apart (don't
+                                           # launch every routing step at once)
   redo_diff_stage.py --stress-root ~/Documents/kicad_stress_test \
                      --out-dir ~/Documents/diff2
 """
@@ -265,6 +267,11 @@ def main():
     ap.add_argument("--drc-size-checks", action="store_true",
                     help="Include fab min-width/size checks in DRC (default: clearance/geometry only)")
     ap.add_argument("--list", action="store_true", help="List detected diff boards and exit")
+    ap.add_argument("--jobs", "-j", type=int, default=1,
+                    help="Replay this many boards concurrently (default 1 = sequential)")
+    ap.add_argument("--stagger", type=float, default=0.0,
+                    help="Seconds to wait between starting each board's replay, so the "
+                         "heavy python routing steps don't all launch at once (default 0)")
     args = ap.parse_args()
 
     work_root = args.work_root or os.path.join(args.stress_root, "diff_redo_work")
@@ -285,16 +292,40 @@ def main():
         print("No matching diff boards found.")
         return 1
 
-    print(f"Replaying diff stage for {len(boards)} board(s) from {args.stress_root}")
+    jobs = max(1, args.jobs)
+    print(f"Replaying diff stage for {len(boards)} board(s) from {args.stress_root}"
+          + (f" ({jobs} parallel" + (f", {args.stagger}s stagger)" if args.stagger else ")")
+             if jobs > 1 else ""))
     report = []
-    for sb, man in boards:
+
+    def _run(sb, man):
         try:
-            rec = process_board(sb, man, work_root, args.out_dir, args.drc_size_checks)
-            if rec:
-                report.append(rec)
+            return process_board(sb, man, work_root, args.out_dir, args.drc_size_checks)
         except Exception as e:
             print(f"  ERROR on {sb}: {e}")
-            report.append(dict(board=sb, error=str(e), flagged=True))
+            return dict(board=sb, error=str(e), flagged=True)
+
+    if jobs == 1:
+        for sb, man in boards:
+            rec = _run(sb, man)
+            if rec:
+                report.append(rec)
+    else:
+        # Each board's replay spawns its own subprocesses (fanout/route_diff), so a
+        # thread pool is enough to orchestrate; --stagger spaces the launches so the
+        # heavy python routing steps don't all start simultaneously.
+        import concurrent.futures
+        import time as _time
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+            futs = []
+            for idx, (sb, man) in enumerate(boards):
+                if args.stagger and idx:
+                    _time.sleep(args.stagger)
+                futs.append(ex.submit(_run, sb, man))
+            for fut in concurrent.futures.as_completed(futs):
+                rec = fut.result()
+                if rec:
+                    report.append(rec)
 
     with open(os.path.join(work_root, "report.json"), "w") as f:
         json.dump(report, f, indent=2)
