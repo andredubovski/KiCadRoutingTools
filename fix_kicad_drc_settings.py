@@ -44,13 +44,13 @@ Targets come from the routing parameters when you pass them (``--clearance``,
 fall back to the smallest object found on the board, and clearance falls back to
 the project's Default net-class clearance.
 
-It also (``enable_used_layers``) adds any layer the board actually *uses* -- a
-footprint, graphic, pad, track, via or zone draws on it -- but that is missing
-from the board's ``(layers)`` table, back into that table in the ``.kicad_pcb``,
-so KiCad shows the layer as selectable and stops flagging
-``item_on_disabled_layer``. This is the one place the module edits the
-``.kicad_pcb`` (a format-preserving text insert); everything else edits only the
-``.kicad_pro``.
+With ``--enable-used-layers`` (OFF by default), it also (``enable_used_layers``)
+adds any layer the board actually *uses* -- a footprint, graphic, pad, track, via
+or zone draws on it -- but that is missing from the board's ``(layers)`` table,
+back into that table in the ``.kicad_pcb``, so KiCad shows the layer as selectable
+and stops flagging ``item_on_disabled_layer``. This is the one place the module
+edits the ``.kicad_pcb`` (a format-preserving text insert), which is why it is
+opt-in; everything else edits only the ``.kicad_pro``.
 
 IMPORTANT: close the board in KiCad before running this. KiCad keeps the project
 in memory and will overwrite an externally-edited ``.kicad_pro`` on save/close.
@@ -144,6 +144,24 @@ def enable_used_layers(pcb_path: str, verbose: bool = True):
     """Add any layer the board actually *uses* (a footprint, graphic, pad, track,
     via or zone draws on it) but that is missing from its ``(layers)`` table, so
     KiCad shows the layer as selectable and stops flagging ``item_on_disabled_layer``.
+
+    This makes the layer **enabled / selectable** -- the layer SET in the
+    ``.kicad_pcb`` ``(layers)`` table (KiCad's ``board.GetEnabledLayers()``). It
+    does NOT touch layer **visibility** (which enabled layers are shown in the
+    canvas) -- that is appearance state in the sibling ``.kicad_prl`` local-settings
+    file, a separate concept this function deliberately leaves alone.
+
+    CLI-ONLY AND OPT-IN. ``fix_project_for_output`` calls this only when its
+    ``enable_layers`` flag is set -- the CLI ``--enable-used-layers`` option, which
+    is OFF by default -- so by default it never runs and the ``.kicad_pcb`` is left
+    untouched. It is opt-in because it mutates board structure (the layer table),
+    not just DRC settings. The GUI plugin does NOT offer it at all: the GUI applies
+    its DRC settings to a *live* pcbnew board the user is editing (via
+    ``apply_targets_to_board``), and silently restructuring that board's
+    enabled-layer set as a side effect of routing would be intrusive (the user
+    manages layers in Board Setup). So the CLI/GUI asymmetry exists only when a CLI
+    user explicitly opts in, and is intentional -- not a parity gap to close (see
+    CLAUDE.md's parity rule).
 
     Format-preserving text edit of the ``.kicad_pcb`` (unlike the rest of this
     module, which only touches the ``.kicad_pro``). Returns the list of layer
@@ -430,24 +448,65 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     return changes
 
 
+def add_drc_fix_args(parser, *, include_no_fix=True):
+    """Add the post-route DRC-settings-fix CLI options shared by the routing
+    front-ends (``route.py`` / ``route_diff.py`` / ``route_planes.py`` /
+    ``route_disconnected_planes.py``). Wiring a new shared DRC-fix flag in here
+    adds it to all of them at once; pair with :func:`drc_fix_kwargs` to forward the
+    parsed values into :func:`fix_project_for_output`.
+
+    ``include_no_fix=False`` omits ``--no-fix-drc-settings`` (the standalone
+    ``fix_kicad_drc_settings`` script always fixes, so the flag is meaningless there)."""
+    g = parser.add_argument_group("DRC settings (post-route, issue #160)")
+    if include_no_fix:
+        g.add_argument("--no-fix-drc-settings", action="store_true",
+                       help="Do not adjust the output's .kicad_pro DRC constraints to match the "
+                            "routed clearances/sizes afterwards. By default the written project's "
+                            "Board Setup floors are loosened to the routed values so KiCad's DRC "
+                            "only flags genuine problems.")
+    g.add_argument("--keep-thermal", action="store_true",
+                   help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
+                        "untouched instead of demoting it to a warning.")
+    g.add_argument("--enable-used-layers", action="store_true",
+                   help="Add any layer the board uses but that is missing from its (layers) table "
+                        "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
+                        "flagging item_on_disabled_layer. OFF by default (it edits the board, not "
+                        "just DRC settings).")
+    return parser
+
+
+def drc_fix_kwargs(args):
+    """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
+    keyword arguments (the shared DRC-fix flags only -- per-script routing floors
+    like clearance/track/via are passed separately by each caller)."""
+    return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers)
+
+
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,
                            diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
-                           keep_thermal=False, extra_ignore=(), verbose=True):
+                           keep_thermal=False, enable_layers=False,
+                           extra_ignore=(), verbose=True):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
     ``.kicad_pro`` -- copying the input board's project if the output is a new
     file, or seeding a minimal complete one if the input has none -- then applies
     the floors and severity plan. Edits the ``.kicad_pro`` (DRC settings); the
-    board's DRC-rule format is preserved. Also adds any layer the board uses but
-    that is missing from its ``(layers)`` table to that table in the
-    ``.kicad_pcb`` (``enable_used_layers``), so KiCad shows it as selectable and
-    stops flagging ``item_on_disabled_layer`` -- a format-preserving text edit.
-    Returns the ``.kicad_pro`` path, or None if nothing was done."""
+    board's DRC-rule format is preserved.
+
+    When ``enable_layers`` is True (the CLI ``--enable-used-layers`` flag, OFF by
+    default), it also adds any layer the board uses but that is missing from its
+    ``(layers)`` table back into that table in the ``.kicad_pcb``
+    (``enable_used_layers``), so KiCad shows it as selectable and stops flagging
+    ``item_on_disabled_layer`` -- a format-preserving text edit. It is opt-in
+    because that mutates board structure (not just DRC settings); the default
+    leaves the ``.kicad_pcb`` untouched. Returns the ``.kicad_pro`` path, or None
+    if nothing was done."""
     import shutil
-    enable_used_layers(output_pcb, verbose=verbose)
+    if enable_layers:
+        enable_used_layers(output_pcb, verbose=verbose)
     out_pro = find_project(output_pcb)
     if not os.path.isfile(out_pro):
         in_pro = find_project(input_pcb) if input_pcb else None
@@ -630,8 +689,9 @@ def main():
     ap.add_argument("--keep-mask", action="store_true", help="Do not ignore solder-mask bridge")
     ap.add_argument("--keep-footprint", action="store_true",
                     help="Do not ignore footprint/library categories (annular_width, lib_footprint_*)")
-    ap.add_argument("--keep-thermal", action="store_true",
-                    help="Keep starved_thermal as an error (default: demote to a warning)")
+    # Shared DRC-fix flags (--keep-thermal, --enable-used-layers); the standalone
+    # script always fixes, so --no-fix-drc-settings is omitted.
+    add_drc_fix_args(ap, include_no_fix=False)
     ap.add_argument("--ignore", nargs="+", default=[], metavar="CAT",
                     help="Extra severity categories to set to ignore")
     ap.add_argument("--ignore-warnings", action="store_true",
@@ -656,6 +716,8 @@ def main():
     # clearance to the project's Default net-class clearance) and the severity
     # plan, then apply with only-loosen semantics via the shared logic.
     pcb_path = args.board if args.board.endswith(".kicad_pcb") else os.path.splitext(args.board)[0] + ".kicad_pcb"
+    if args.enable_used_layers and not args.dry_run:
+        enable_used_layers(pcb_path)
     minima = scan_board_minima(pcb_path)
     clearance = args.clearance if args.clearance is not None else project_copper_clearance(proj)
     # When a size / hole-to-hole floor isn't given explicitly, fall back to the

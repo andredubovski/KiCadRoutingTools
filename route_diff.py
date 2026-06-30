@@ -1209,13 +1209,8 @@ Examples:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads in output file")
-    parser.add_argument("--no-fix-drc-settings", action="store_true",
-                        help="Do not rewrite the output project's DRC design rules to match "
-                             "the routing floors (by default they are made consistent so "
-                             "KiCad's manual DRC shows only genuine violations; issue #160)")
-    parser.add_argument("--keep-thermal", action="store_true",
-                        help="When fixing DRC settings, leave thermal-relief severity "
-                             "(starved_thermal) untouched instead of demoting it to a warning")
+    from fix_kicad_drc_settings import add_drc_fix_args
+    add_drc_fix_args(parser)
 
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
@@ -1368,13 +1363,13 @@ Examples:
             if eff_clearance < args.clearance:
                 print(f"  Min clearance used: {eff_clearance:.4g} mm "
                       f"(below nominal {args.clearance:.4g}) - grading at this floor")
-            from fix_kicad_drc_settings import fix_project_for_output
+            from fix_kicad_drc_settings import fix_project_for_output, drc_fix_kwargs
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
                 clearance=eff_clearance, hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
                 via_diameter=args.via_size, via_drill=args.via_drill,
                 diff_pair_gap=args.diff_pair_gap, diff_pair_width=args.track_width,
-                keep_thermal=args.keep_thermal)
+                **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
