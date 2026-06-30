@@ -37,7 +37,7 @@ from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_f
 from stub_layer_switching import apply_bare_pad_target_via
 from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from polarity_swap import apply_polarity_swap, undo_polarity_swap
-from routing_context import build_diff_pair_obstacles
+from routing_context import build_diff_pair_obstacles, build_diff_pair_leg_obstacles
 
 
 def _segments_properly_cross(a, b, eps: float = 1e-6) -> bool:
@@ -943,11 +943,11 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             # can't launch a *coupled* pair from the pads (CK1's DDR3-bank escape),
             # but each net escapes individually and couples once clear; the coupled
             # middle shortens until reachable and the legs single-end the rest.
-            leg_obstacles, _ = build_diff_pair_obstacles(
-                state.diff_pair_base_obstacles, pcb_data, config,
+            leg_obstacles = build_diff_pair_leg_obstacles(
+                state.base_obstacles, pcb_data, config,
                 state.routed_net_ids, state.remaining_net_ids,
                 state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
-                state.gnd_net_id, state.track_proximity_cache, state.layer_map, 0.0)
+                state.gnd_net_id, state.track_proximity_cache, state.layer_map)
             hyb_eps = (_terminal_stub_endpoint(pcb_data, term_a, config) or endpoints[0],
                        _terminal_stub_endpoint(pcb_data, term_b, config) or endpoints[1])
             hyb = _route_direct_coupled_middle(

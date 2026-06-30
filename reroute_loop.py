@@ -24,6 +24,7 @@ from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
     build_single_ended_obstacles, build_diff_pair_obstacles,
+    build_diff_pair_leg_obstacles,
     record_single_ended_success, record_diff_pair_success,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
@@ -887,16 +888,14 @@ def run_reroute_loop(
                         add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
                         ripped_route_layer_costs=state.ripped_route_layer_costs,
                         ripped_route_via_positions=state.ripped_route_via_positions)
-                    # The hybrid's terminal legs are single-ended, so give them a
-                    # single-ended-clearance map (extra_clearance=0); the diff-pair
-                    # map over-blocks a leg's escape via (watchy USB_D).
-                    leg_obstacles, _ = build_diff_pair_obstacles(
-                        diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id, gnd_net_id,
-                        track_proximity_cache, layer_map, 0.0,
-                        add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
-                        ripped_route_layer_costs=state.ripped_route_layer_costs,
-                        ripped_route_via_positions=state.ripped_route_via_positions)
+                    # Single-ended leg clearance map. See build_diff_pair_leg_obstacles
+                    # for why this uses base_obstacles + 0 clearance (not the coupled
+                    # diff_pair_base_obstacles / extra clearance the middle map above
+                    # uses) -- previously this site built it inconsistently (#246 review).
+                    leg_obstacles = build_diff_pair_leg_obstacles(
+                        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id,
+                        gnd_net_id, track_proximity_cache, layer_map)
                     hyb = _route_direct_coupled_middle(
                         pcb_data, ripped_pair, config, hyb_obstacles, config.layers,
                         leg_obstacles=leg_obstacles)

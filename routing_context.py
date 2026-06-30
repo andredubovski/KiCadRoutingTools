@@ -202,6 +202,35 @@ def build_diff_pair_obstacles(
     return obstacles, all_stubs
 
 
+def build_diff_pair_leg_obstacles(base_obstacles, pcb_data, config, routed_net_ids,
+                                  remaining_net_ids, all_unrouted_net_ids,
+                                  p_net_id, n_net_id, gnd_net_id,
+                                  track_proximity_cache, layer_map):
+    """Obstacle map for a hybrid pair's SINGLE-ENDED legs (issue #246 review).
+
+    The legs are one-track point-to-point routes, so they must use single-ended
+    clearance -- NOT the coupled diff-pair clearance:
+
+    - base = ``base_obstacles`` (no extra clearance baked in), NOT
+      ``diff_pair_base_obstacles`` (which bakes in the half-pair-width the coupled
+      CENTERLINE needs for its offsets); that inflation over-blocks a one-track leg.
+    - ``extra_clearance=0`` for the same reason (over-blocks a leg's escape via --
+      watchy USB_D).
+    - no ``add_own_stubs_func`` / ``ripped_route_*``: the leg's own near-pad stub must
+      not block it, and the partner net's copper is re-added per-leg inside
+      ``_route_hybrid_leg``.
+
+    Every hybrid call site (``_maybe_swap_to_hybrid``, the main-loop and reroute-loop
+    last-resort hybrids, and the multipoint leg hybrid) builds the leg map through this
+    one helper so it means the SAME thing regardless of entry path.
+    """
+    obstacles, _ = build_diff_pair_obstacles(
+        base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+        all_unrouted_net_ids, p_net_id, n_net_id, gnd_net_id,
+        track_proximity_cache, layer_map, 0.0)
+    return obstacles
+
+
 def build_single_ended_obstacles(
     base_obstacles,
     pcb_data,

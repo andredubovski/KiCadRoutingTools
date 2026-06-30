@@ -24,7 +24,8 @@ from diff_pair_multipoint import (
     get_diff_pair_terminals, route_multipoint_diff_pair,
     leg_electrically_short, diff_pair_min_coupled_length,
 )
-from routing_context import build_diff_pair_obstacles, restore_ripped_net
+from routing_context import (build_diff_pair_obstacles, build_diff_pair_leg_obstacles,
+                             restore_ripped_net)
 from terminal_colors import RED, GREEN, RESET
 
 
@@ -93,12 +94,10 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
                 return alt
     finally:
         config.diff_pair_centerline_setback = saved_sb
-    # Single-ended-clearance map for the legs (extra_clearance=0), as the
-    # last-resort hybrid does -- the coupled map over-blocks a leg escape via.
-    leg_obstacles, _ = build_diff_pair_obstacles(
+    leg_obstacles = build_diff_pair_leg_obstacles(
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
-        track_proximity_cache, layer_map, 0.0)
+        track_proximity_cache, layer_map)
     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
                                        config.layers, leg_obstacles=leg_obstacles)
     if not hyb or hyb.get('failed'):
@@ -1008,14 +1007,12 @@ def route_diff_pairs(
                 # own escape via if needed (watchy USB_D). Returns None when it
                 # can't lay a clean route, so this can't make things worse.
                 if config.diff_pair_hybrid_escape and result:
-                    # The hybrid's terminal legs are single-ended, so build them a
-                    # single-ended-clearance obstacle map (extra_clearance=0) --
-                    # the diff-pair map's coupled extra clearance over-blocks a
-                    # leg's escape via. Built lazily, only now that the hybrid fires.
-                    leg_obstacles, _ = build_diff_pair_obstacles(
+                    # Single-ended leg clearance map (built lazily, only now). See
+                    # build_diff_pair_leg_obstacles for why base_obstacles + 0 clearance.
+                    leg_obstacles = build_diff_pair_leg_obstacles(
                         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
                         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
-                        track_proximity_cache, layer_map, 0.0)
+                        track_proximity_cache, layer_map)
                     hyb = _route_direct_coupled_middle(pcb_data, pair, config, obstacles,
                                                        config.layers, leg_obstacles=leg_obstacles)
                     if hyb and not hyb.get('failed'):
