@@ -1000,8 +1000,25 @@ def get_multipoint_net_pads(
             px, py = pad.global_x, pad.global_y
             pad_layers = _pad_layers(pad)
             reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
+            # A via-in-pad fans an SMD pad out to every copper layer, so the
+            # group's copper may legitimately reach the pad on a layer the pad
+            # does not itself live on (e.g. an F.Cu pad escaped to B.Cu). Treat
+            # such a pad like a through-hole pad and skip the layer gate; else it
+            # is mis-classed as unconnected and the net is falsely promoted to a
+            # multi-point route that re-runs the already-routed leg. The test is
+            # deliberately a genuine via-IN-pad (via centre inside the pad
+            # rectangle), NOT mere annulus overlap: a same-net via merely grazing
+            # the pad edge is some neighbour's escape, and crediting it would
+            # collapse endpoints the router still needs, perturbing dense
+            # multi-drop nets.
+            half_x = (pad.size_x or 0) / 2
+            half_y = (pad.size_y or 0) / 2
+            reaches_all_layers = pad.drill > 0 or any(
+                abs(v.x - px) <= half_x and abs(v.y - py) <= half_y
+                for v in net_vias
+            )
             for seg in group:
-                if seg.layer not in pad_layers and pad.drill == 0:
+                if seg.layer not in pad_layers and not reaches_all_layers:
                     continue
                 dx = seg.end_x - seg.start_x
                 dy = seg.end_y - seg.start_y
