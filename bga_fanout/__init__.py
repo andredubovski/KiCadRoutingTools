@@ -1292,40 +1292,42 @@ def build_converge_route(
                 exit_pos = (grid.max_x + exit_margin, stub_end[1])
             else:  # left
                 exit_pos = (grid.min_x - exit_margin, stub_end[1])
+        elif escape_dir in ('up', 'down'):
+            # Vertical escape: converge in X (perpendicular to the escape) and
+            # keep Y monotonic toward the edge. Converging in Y here would send
+            # the pad on the escape side *back* toward the BGA before it exits
+            # (a loop-back, #242) and leave the pair uncoupled.
+            p_is_left = p_pad.global_x < n_pad.global_x
+            if (is_p_route and p_is_left) or (not is_p_route and not p_is_left):
+                target_x = center_x - half_pair_spacing
+            else:
+                target_x = center_x + half_pair_spacing
+
+            # At 45, the Y advance toward the edge equals the X convergence.
+            dx_needed = target_x - pad_info.global_x
+            if escape_dir == 'down':
+                stub_end = (target_x, pad_info.global_y + abs(dx_needed))
+                exit_pos = (target_x, grid.max_y + exit_margin)
+            else:  # up
+                stub_end = (target_x, pad_info.global_y - abs(dx_needed))
+                exit_pos = (target_x, grid.min_y - exit_margin)
+
         else:
-            # Original convergence logic
-            # Target Y for converged pair - top pad goes to top target, bottom to bottom
+            # Horizontal escape: converge in Y, keep X monotonic toward the edge.
+            # Top pad goes to the top target, bottom pad to the bottom target.
             if (is_p_route and p_is_top) or (not is_p_route and not p_is_top):
-                # This pad is on top, target is above center
                 target_y = center_y - half_pair_spacing
             else:
-                # This pad is on bottom, target is below center
                 target_y = center_y + half_pair_spacing
 
-            # Distance each trace needs to move in Y (towards center)
-            dy_needed = target_y - pad_info.global_y
-
             # At 45, dx = dy (in absolute terms)
+            dy_needed = target_y - pad_info.global_y
             if escape_dir == 'right':
-                stub_end_x = pad_info.global_x + abs(dy_needed)
-                stub_end_y = target_y
-            elif escape_dir == 'left':
-                stub_end_x = pad_info.global_x - abs(dy_needed)
-                stub_end_y = target_y
-            else:
-                stub_end_x = pad_info.global_x
-                stub_end_y = target_y
-
-            stub_end = (stub_end_x, stub_end_y)
-
-            if escape_dir == 'right':
-                exit_pos = (grid.max_x + exit_margin, stub_end[1])
-            elif escape_dir == 'left':
-                exit_pos = (grid.min_x - exit_margin, stub_end[1])
-            elif escape_dir == 'down':
-                exit_pos = (stub_end[0], grid.max_y + exit_margin)
-            else:  # up
-                exit_pos = (stub_end[0], grid.min_y - exit_margin)
+                stub_end = (pad_info.global_x + abs(dy_needed), target_y)
+                exit_pos = (grid.max_x + exit_margin, target_y)
+            else:  # left
+                stub_end = (pad_info.global_x - abs(dy_needed), target_y)
+                exit_pos = (grid.min_x - exit_margin, target_y)
 
     # Use pre-assigned layer if available, otherwise default to layers[0]
     assigned_layer = pair_layer_assignments.get(pair_id, layers[0]) if pair_layer_assignments else layers[0]
