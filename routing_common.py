@@ -58,9 +58,13 @@ def setup_bga_exclusion_zones(
             disabled_refs = set(disable_bga_zones)
             for fp in bga_components:
                 if fp.reference not in disabled_refs:
-                    bounds = get_footprint_bounds(fp, margin=0.5)
+                    # Zone ends at the pad edge (get_footprint_bounds is pad-based);
+                    # fanout stubs exit past it, so the keep-out doesn't bury the
+                    # escape tips (issue #243). Keep in sync with
+                    # auto_detect_bga_exclusion_zones (margin=0).
+                    bounds = get_footprint_bounds(fp, margin=0.0)
                     pitch = detect_bga_pitch(fp)
-                    edge_tolerance = 0.5 + pitch * 1.1
+                    edge_tolerance = pitch * 1.1
                     bga_exclusion_zones.append((*bounds, edge_tolerance))
             if bga_exclusion_zones:
                 print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s) (excluding {', '.join(disable_bga_zones)}):")
@@ -73,7 +77,9 @@ def setup_bga_exclusion_zones(
             return bga_exclusion_zones
 
     elif existing_zones is None:
-        bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.5)
+        # margin=0: zone ends at the BGA pad edge so fanout stubs (which exit past
+        # the pads) stay in open copper for leg attachment (issue #243).
+        bga_exclusion_zones = auto_detect_bga_exclusion_zones(pcb_data, margin=0.0)
         if bga_exclusion_zones:
             bga_components = find_components_by_type(pcb_data, 'BGA')
             print(f"Auto-detected {len(bga_exclusion_zones)} BGA exclusion zone(s):")

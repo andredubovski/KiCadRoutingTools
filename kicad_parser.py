@@ -2845,19 +2845,28 @@ def detect_bga_pitch(footprint: Footprint) -> float:
     return 1.0
 
 
-def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.5) -> List[Tuple[float, float, float, float, float]]:
+def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.0) -> List[Tuple[float, float, float, float, float]]:
     """
     Auto-detect BGA exclusion zones from all BGA components in the PCB.
 
     Via placement should be avoided inside BGA packages to prevent shorts
     with the BGA balls.
 
+    The zone is anchored to the BGA's PAD bounding box (get_footprint_bounds is
+    pad-edge based), not the courtyard, and defaults to margin=0 so the zone ends
+    exactly at the edge of the outermost pads. The fanout escapes every pad to a
+    stub that exits PAST the pad edge (>= (pitch - pad_size)/2, and ideally
+    BGA_EXIT_MARGIN), so a pad-edge zone leaves those stub tips in open copper --
+    a coupled/single-ended leg can then attach to a tip outside the keep-out
+    instead of being marooned inside it. The old margin=0.5 pushed the zone ~0.3mm
+    PAST where the escapes exit, burying the tips (issue #243).
+
     Returns zones as 5-tuples: (min_x, min_y, max_x, max_y, edge_tolerance)
     where edge_tolerance = margin + pitch * 1.1 (pitch + 10%)
 
     Args:
         pcb_data: Parsed PCB data
-        margin: Extra margin around BGA bounds (in mm)
+        margin: Extra margin around the pad bounding box (in mm); 0 = end at pad edge
 
     Returns:
         List of (min_x, min_y, max_x, max_y, edge_tolerance) tuples for each BGA
