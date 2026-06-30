@@ -3,6 +3,7 @@ Escape channel finding and assignment for BGA fanout routing.
 
 Functions for determining escape directions and channels for pads and differential pairs.
 """
+from __future__ import annotations
 
 from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict

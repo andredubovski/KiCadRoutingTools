@@ -17,6 +17,8 @@ runs ~10 minutes too late; this one runs in a second.
 version is bumped only when the crate changes and legitimately differs from
 `VERSION` in its patch component (see docs/release-pipeline.md).
 """
+from __future__ import annotations
+
 import argparse
 import json
 import sys

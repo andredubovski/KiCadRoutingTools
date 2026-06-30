@@ -3,6 +3,7 @@ Single-ended net routing functions.
 
 Routes individual nets using A* pathfinding on a grid obstacle map.
 """
+from __future__ import annotations
 
 import math
 import time

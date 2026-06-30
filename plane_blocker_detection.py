@@ -4,6 +4,7 @@ Blocker detection for copper plane via placement.
 Identifies which nets are blocking via placement or routing,
 and provides rip-up functionality to remove blockers.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Set

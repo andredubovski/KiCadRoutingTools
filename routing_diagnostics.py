@@ -7,6 +7,7 @@ flag the ones most likely to be too aggressive. The output is a list of
 short, actionable bullet strings the GUI can append to its completion
 dialog.
 """
+from __future__ import annotations
 
 from typing import Dict, List, Any
 

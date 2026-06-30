@@ -5,6 +5,7 @@ This module provides the RoutingState class that encapsulates all shared state
 used during the routing process, enabling cleaner extraction of routing loops
 into separate functions.
 """
+from __future__ import annotations
 
 import os
 from typing import List, Dict, Set, Tuple, Optional, Any

@@ -4,6 +4,7 @@ Write placed PCB output by modifying footprint positions in the .kicad_pcb file.
 Uses text-based manipulation (same approach as output_writer.py / kicad_writer.py)
 to update the (at X Y [rotation]) of each footprint block.
 """
+from __future__ import annotations
 
 import re
 from typing import List, Dict

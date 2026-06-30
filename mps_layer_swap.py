@@ -5,6 +5,7 @@ This module handles layer swaps specifically for resolving MPS crossing conflict
 When MPS ordering puts nets in Round 2+ due to same-layer crossings, this module
 attempts layer swaps to eliminate those crossings, then triggers an MPS re-run.
 """
+from __future__ import annotations
 
 from typing import Dict, Set, List, Tuple, Optional
 from dataclasses import dataclass

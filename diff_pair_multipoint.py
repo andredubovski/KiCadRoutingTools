@@ -15,6 +15,7 @@ resistor -> IC pins) are routed as a CHAIN of terminals:
   fresh terminal). Pad swaps are never used: a swap at a shared terminal
   would break the already-routed leg.
 """
+from __future__ import annotations
 
 import math
 from itertools import permutations

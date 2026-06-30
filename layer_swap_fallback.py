@@ -5,6 +5,7 @@ When routing fails due to blocked cells, this module attempts to swap the blocke
 side's stubs to another layer as a fallback strategy. It includes rip-up and
 reroute logic if the initial route after swap fails.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict
 

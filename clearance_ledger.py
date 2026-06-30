@@ -26,6 +26,7 @@ callers that route repeatedly in one process (the KiCad GUI plugin) must call
 clearance does not leak into a later one. Recording is monotonic (keeps the
 minimum), so order does not matter within a run.
 """
+from __future__ import annotations
 
 from typing import Optional
 

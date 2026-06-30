@@ -21,6 +21,7 @@ plain via-in-pad (no dog-bone). This module is the production router: a small
 per-ball grid search (straight-first) over a layered occupancy grid built from
 the board's real pads, vias and copper.
 """
+from __future__ import annotations
 
 import heapq
 import math

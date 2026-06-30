@@ -1,6 +1,7 @@
 """
 KiCad PCB Writer - Writes routing results to .kicad_pcb files.
 """
+from __future__ import annotations
 
 import re
 import uuid

@@ -4,6 +4,7 @@ Reroute loop for ripped-up nets.
 This module contains the unified reroute loop that handles all nets ripped
 during diff pair or single-ended routing, extracted from route.py.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple

@@ -1,6 +1,7 @@
 """
 DRC Checker - Find overlapping tracks and vias between different nets.
 """
+from __future__ import annotations
 
 import sys
 import argparse

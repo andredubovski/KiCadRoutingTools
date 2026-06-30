@@ -8,6 +8,7 @@ This module handles the upfront layer swap optimization that happens before rout
 
 The goal is to minimize the number of vias needed by swapping stubs to compatible layers.
 """
+from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple, Optional
 from dataclasses import dataclass

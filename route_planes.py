@@ -7,6 +7,7 @@ and routes short traces to connect vias to pads when direct placement is blocked
 Usage:
     python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 """
+from __future__ import annotations
 
 import sys
 import os

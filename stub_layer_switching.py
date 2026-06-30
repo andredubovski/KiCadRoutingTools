@@ -4,6 +4,7 @@ Stub layer switching optimization for differential pair routing.
 Provides functions to switch stub layers to avoid vias when the
 source and target stubs are on different layers.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict

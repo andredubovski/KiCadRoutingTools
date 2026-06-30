@@ -1,6 +1,7 @@
 """
 Connectivity Checker - Verify that tracks form fully connected routes from source to target pads.
 """
+from __future__ import annotations
 
 import sys
 import argparse

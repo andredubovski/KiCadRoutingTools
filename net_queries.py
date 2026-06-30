@@ -4,6 +4,7 @@ Net query utilities for PCB routing.
 Functions for querying pads, nets, differential pairs, and computing
 MPS (Maximum Planar Subset) net ordering.
 """
+from __future__ import annotations
 
 import math
 import fnmatch

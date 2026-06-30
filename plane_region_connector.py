@@ -5,6 +5,7 @@ After power planes are created, regions may be effectively split due to vias and
 traces from other nets cutting through the plane. This module detects disconnected
 regions and routes wide, short tracks between them to ensure electrical continuity.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Set
 from collections import deque

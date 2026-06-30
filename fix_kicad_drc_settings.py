@@ -58,6 +58,8 @@ in memory and will overwrite an externally-edited ``.kicad_pro`` on save/close.
 Usage:
     python3 fix_kicad_drc_settings.py board.kicad_pcb [options]
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os

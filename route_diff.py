@@ -14,6 +14,7 @@ Requires the Rust router module. Build it with:
     cp target/release/grid_router.dll grid_router.pyd  # Windows
     cp target/release/libgrid_router.so grid_router.so  # Linux
 """
+from __future__ import annotations
 
 import sys
 import os

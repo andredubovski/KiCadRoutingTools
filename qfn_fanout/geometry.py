@@ -3,6 +3,7 @@ Geometry calculations for QFN/QFP fanout routing.
 
 Functions for calculating fanout stub positions and angles.
 """
+from __future__ import annotations
 
 import math
 from typing import Tuple

@@ -3,6 +3,7 @@ BGA grid analysis functions.
 
 Analyzes BGA footprint geometry to extract grid parameters and routing channels.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple
 from collections import defaultdict

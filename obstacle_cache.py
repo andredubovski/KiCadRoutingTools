@@ -4,6 +4,7 @@ Net obstacle caching for PCB routing.
 Provides pre-computation and incremental updates for per-net obstacles,
 dramatically speeding up routing by avoiding redundant obstacle calculations.
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field

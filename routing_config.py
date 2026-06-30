@@ -1,6 +1,7 @@
 """
 Configuration classes and coordinate utilities for PCB routing.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict

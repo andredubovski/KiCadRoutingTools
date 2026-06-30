@@ -4,6 +4,7 @@ Single-ended routing loop.
 This module contains the main loop for routing single-ended nets,
 extracted from route.py for better maintainability.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple, Optional, Any, Dict, Set

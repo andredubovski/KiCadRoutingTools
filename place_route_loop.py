@@ -24,6 +24,7 @@ Usage:
       --route-args '--nets "/*" "Net-*" --track-width 0.2 ...' \
       [quench options]
 """
+from __future__ import annotations
 
 import argparse
 import json

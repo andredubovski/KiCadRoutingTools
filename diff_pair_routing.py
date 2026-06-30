@@ -3,6 +3,7 @@ Differential pair routing functions.
 
 Routes differential pairs (P and N nets) together using centerline + offset approach.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict

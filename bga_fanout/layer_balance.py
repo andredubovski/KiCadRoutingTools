@@ -3,6 +3,7 @@ Layer rebalancing for BGA fanout routing.
 
 Distributes routes evenly across available layers after initial assignment.
 """
+from __future__ import annotations
 
 from typing import List, Dict, Set, Tuple
 from bga_fanout.types import FanoutRoute

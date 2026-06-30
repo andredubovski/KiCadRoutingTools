@@ -4,6 +4,7 @@ Obstacle map building functions for PCB routing.
 Builds GridObstacleMap objects from PCB data, adding obstacles for segments,
 vias, pads, BGA exclusion zones, and routed paths.
 """
+from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass, field

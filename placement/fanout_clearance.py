@@ -30,6 +30,7 @@ on top of each other. A cap that can't clear a foreign via within the base
 budget gets its budget grown and rotations enabled until it fits or hits the
 displacement cap; if it still can't, it's reported unresolved.
 """
+from __future__ import annotations
 
 import math
 from typing import Dict, List, Optional, Set, Tuple

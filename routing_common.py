@@ -4,6 +4,7 @@ Shared utilities for route.py and route_diff.py.
 This module contains common functions used by both single-ended and differential
 pair routing to avoid code duplication.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Optional, Tuple, Dict, Set

@@ -1,6 +1,7 @@
 """
 KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad_pcb files.
 """
+from __future__ import annotations
 
 import re
 import math

@@ -13,6 +13,7 @@ recover those pads. The fine retry is scoped to a single pad: obstacle maps
 are built on a small window around the pad so a fine grid stays cheap even
 on large boards.
 """
+from __future__ import annotations
 
 import copy
 import math

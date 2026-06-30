@@ -3,6 +3,7 @@ GND via placement for single-ended routing.
 
 Adds GND vias near signal vias for return current paths.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict

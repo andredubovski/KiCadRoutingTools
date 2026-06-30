@@ -20,6 +20,7 @@ Usage:
         )
         print_blocking_analysis(blockers)
 """
+from __future__ import annotations
 
 from typing import List, Tuple, Dict, Set, Optional
 from dataclasses import dataclass

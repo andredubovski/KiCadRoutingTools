@@ -4,6 +4,7 @@ Length matching for PCB routes using trombone-style meanders.
 Adds length to shorter routes by inserting perpendicular zigzag patterns
 at the longest straight segment.
 """
+from __future__ import annotations
 
 import fnmatch
 import math

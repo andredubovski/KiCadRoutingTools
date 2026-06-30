@@ -4,6 +4,7 @@ Connectivity analysis utilities for PCB routing.
 Functions for finding endpoints, analyzing stubs, computing MST paths,
 and tracking segment connectivity.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple, Dict, Set

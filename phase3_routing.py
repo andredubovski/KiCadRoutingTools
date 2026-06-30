@@ -8,6 +8,7 @@ Phase 3 runs after:
 
 Phase 3 connects remaining pads to the main route.
 """
+from __future__ import annotations
 
 import time
 from dataclasses import dataclass

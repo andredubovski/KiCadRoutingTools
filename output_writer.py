@@ -8,6 +8,7 @@ This module handles writing the routed PCB output file, including:
 - New segments and vias from routing
 - Debug visualization paths
 """
+from __future__ import annotations
 
 from typing import List, Dict, Optional
 from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION

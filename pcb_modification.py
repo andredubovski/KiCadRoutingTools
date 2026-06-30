@@ -4,6 +4,7 @@ Route modification utilities for PCB routing.
 Functions for adding/removing routes from PCB data and cleaning up
 self-intersecting or redundant segments.
 """
+from __future__ import annotations
 
 import math
 from typing import Dict, List, Optional, Tuple

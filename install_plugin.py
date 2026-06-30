@@ -18,6 +18,7 @@ Content Manager is detected (it sits next to the local install in
 3rdparty/plugins and would shadow it on sys.path) and moved aside, unless
 --keep-pcm is given.
 """
+from __future__ import annotations
 
 import os
 import sys

@@ -3,6 +3,7 @@ I/O utilities for copper plane generation.
 
 Handles reading zone information from PCB files and writing plane output.
 """
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass

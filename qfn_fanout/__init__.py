@@ -9,6 +9,7 @@ Generic module that analyzes actual pad geometry to determine:
 
 Works with any QFN/QFP package regardless of pin count or size.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional

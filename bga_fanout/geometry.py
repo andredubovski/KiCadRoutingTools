@@ -3,6 +3,7 @@ Geometry calculations for BGA fanout routing.
 
 Functions for calculating 45-degree stubs, exit points, and jog endpoints.
 """
+from __future__ import annotations
 
 import math
 from typing import List, Tuple, Optional, Dict

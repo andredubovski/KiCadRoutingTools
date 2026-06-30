@@ -4,6 +4,7 @@ Differential pair routing loop.
 This module contains the main loop for routing differential pairs,
 extracted from route.py for better maintainability.
 """
+from __future__ import annotations
 
 import time
 from typing import List, Tuple

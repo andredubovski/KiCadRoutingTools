@@ -4,6 +4,7 @@ Routing context helpers for PCB routing.
 This module provides helper functions for common routing operations
 like building obstacle maps and recording route results.
 """
+from __future__ import annotations
 
 from typing import List, Set, Dict, Optional, Tuple, TYPE_CHECKING
 import math

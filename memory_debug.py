@@ -1,4 +1,5 @@
 """Memory debugging utilities for tracking routing memory usage."""
+from __future__ import annotations
 
 import sys
 from typing import Dict, Any, Optional

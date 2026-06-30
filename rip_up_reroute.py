@@ -4,6 +4,7 @@ Rip-up and reroute functions for the PCB router.
 This module handles removing routed nets from the PCB data and tracking structures,
 as well as restoring them when needed (e.g., when a rip-up retry fails).
 """
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 

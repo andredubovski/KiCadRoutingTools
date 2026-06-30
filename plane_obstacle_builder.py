@@ -5,6 +5,7 @@ Provides functions to build obstacle maps for:
 - Via placement (considering all layers)
 - Single-layer routing (for via-to-pad traces)
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional

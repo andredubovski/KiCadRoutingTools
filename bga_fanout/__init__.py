@@ -13,6 +13,7 @@ Key features:
 - Validates no overlapping segments are created
 - Differential pair support: P/N pairs routed together on same layer
 """
+from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional, Set

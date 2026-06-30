@@ -14,6 +14,7 @@ Usage:
     python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND --plane-layers B.Cu
 """
+from __future__ import annotations
 
 import sys
 import os
