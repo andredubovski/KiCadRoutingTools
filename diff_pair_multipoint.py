@@ -30,7 +30,8 @@ from kicad_parser import PCBData, Pad
 from routing_config import GridRouteConfig, GridCoord, DiffPairNet
 from diff_pair_routing import (
     route_diff_pair_with_obstacles, get_pair_end_direction, _pn_tracks_cross,
-    _DRC_CLEARANCE_MARGIN, _routing_copper_layers, _seg_to_seglist_min_edge
+    _DRC_CLEARANCE_MARGIN, _routing_copper_layers, _seg_to_seglist_min_edge,
+    _route_direct_coupled_middle
 )
 from layer_swap_fallback import add_own_stubs_as_obstacles_for_diff_pair, rank_fallback_layers
 from stub_layer_switching import apply_bare_pad_target_via
@@ -581,6 +582,60 @@ def _make_endpoint(terminal: Tuple[Pad, Pad], config: GridRouteConfig) -> Tuple:
             pp.global_x, pp.global_y, nn.global_x, nn.global_y)
 
 
+def _terminal_stub_endpoint(pcb_data: PCBData, terminal: Tuple[Pad, Pad],
+                            config: GridRouteConfig):
+    """Endpoint at the terminal's fanout STUB free ends (clear of the BGA) instead
+    of the pad midpoint (buried inside the BGA -> blocked on every layer, so a
+    coupled middle can't even start there). For each polarity, flood-fill the net's
+    copper from the pad and take the farthest free end of that component -- the
+    escape tip the fanout already threaded out between the bus vias. Returns a
+    get_diff_pair_endpoints-format tuple, or None if either stub tip is missing."""
+    from connectivity import find_stub_free_ends
+    coord = GridCoord(config.grid_step)
+    pp, nn = terminal
+    tol = 0.05
+
+    def _near(ax, ay, bx, by):
+        return abs(ax - bx) < tol and abs(ay - by) < tol
+
+    def tip(pad):
+        segs = [s for s in pcb_data.segments if s.net_id == pad.net_id]
+        comp, used = [], [False] * len(segs)
+        pts = [(pad.global_x, pad.global_y)]
+        changed = True
+        while changed:
+            changed = False
+            for k, s in enumerate(segs):
+                if used[k]:
+                    continue
+                if any(_near(s.start_x, s.start_y, px, py) or _near(s.end_x, s.end_y, px, py)
+                       for px, py in pts):
+                    used[k] = True
+                    comp.append(s)
+                    pts.append((s.start_x, s.start_y))
+                    pts.append((s.end_x, s.end_y))
+                    changed = True
+        if not comp:
+            return None
+        ends = find_stub_free_ends(comp, [pad])
+        if not ends:
+            return None
+        fx, fy, flayer = max(ends, key=lambda e: math.hypot(e[0] - pad.global_x,
+                                                            e[1] - pad.global_y))
+        if flayer not in config.layers:
+            return None
+        return fx, fy, config.layers.index(flayer)
+
+    pt, nt = tip(pp), tip(nn)
+    if pt is None or nt is None:
+        return None
+    px, py, pl = pt
+    nx, ny, nl = nt
+    p_gx, p_gy = coord.to_grid(px, py)
+    n_gx, n_gy = coord.to_grid(nx, ny)
+    return (p_gx, p_gy, n_gx, n_gy, pl, px, py, nx, ny)
+
+
 def _terminal_base_dir(pcb_data: PCBData, pair: DiffPairNet, terminal: Tuple[Pad, Pad],
                        config: GridRouteConfig,
                        other_center: Tuple[float, float]) -> Tuple[float, float]:
@@ -882,6 +937,31 @@ def _route_chain_attempt(state, pair: DiffPairNet, pair_name: str,
             failed_reason = "missing target direction"
 
         if failed_reason:
+            # Before giving up, route THIS leg as a 2-terminal HYBRID: a clean
+            # coupled middle between the terminals (launched from their fanout STUB
+            # TIPS, clear of the BGA) + single-ended escape legs. A congested BGA
+            # can't launch a *coupled* pair from the pads (CK1's DDR3-bank escape),
+            # but each net escapes individually and couples once clear; the coupled
+            # middle shortens until reachable and the legs single-end the rest.
+            leg_obstacles, _ = build_diff_pair_obstacles(
+                state.diff_pair_base_obstacles, pcb_data, config,
+                state.routed_net_ids, state.remaining_net_ids,
+                state.all_unrouted_net_ids, pair.p_net_id, pair.n_net_id,
+                state.gnd_net_id, state.track_proximity_cache, state.layer_map, 0.0)
+            hyb_eps = (_terminal_stub_endpoint(pcb_data, term_a, config) or endpoints[0],
+                       _terminal_stub_endpoint(pcb_data, term_b, config) or endpoints[1])
+            hyb = _route_direct_coupled_middle(
+                pcb_data, pair, config, obstacles, config.layers,
+                leg_obstacles=leg_obstacles, endpoints=hyb_eps)
+            if (hyb is not None and not hyb.get('failed') and
+                    not _pn_tracks_cross(hyb.get('new_segments', []), pair.p_net_id, pair.n_net_id) and
+                    not _crosses_committed_legs(hyb.get('new_segments', []), committed_segments)):
+                print(f"  Leg {i + 1} via hybrid (coupled middle + single-ended escapes)")
+                add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
+                leg_results.append(hyb)
+                committed_segments.extend(hyb.get('new_segments', []))
+                forced_dir_next = None
+                continue
             print(f"  Leg {i + 1} FAILED ({failed_reason}) - "
                   f"ripping {len(leg_results)} committed leg(s)")
             rip_attempt()

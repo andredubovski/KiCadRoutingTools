@@ -2301,7 +2301,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
 
 
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
-                                 leg_obstacles=None):
+                                 leg_obstacles=None, endpoints=None):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
     straight from the source via-midpoint to the target via-midpoint on the
     open layer -- no escape-direction setback, no connectors, no polarity stage.
@@ -2319,10 +2319,13 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     p_net_id, n_net_id = diff_pair.p_net_id, diff_pair.n_net_id
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
 
-    srcs, tgts, err = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
-    if err or not srcs or not tgts:
-        return None
-    src, tgt = srcs[0], tgts[0]
+    if endpoints is not None:
+        src, tgt = endpoints
+    else:
+        srcs, tgts, err = get_diff_pair_endpoints(pcb_data, p_net_id, n_net_id, config)
+        if err or not srcs or not tgts:
+            return None
+        src, tgt = srcs[0], tgts[0]
     p_src_x, p_src_y, n_src_x, n_src_y = src[5], src[6], src[7], src[8]
     p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y = tgt[5], tgt[6], tgt[7], tgt[8]
     csx, csy = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
@@ -2338,9 +2341,16 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config)) &
                (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config)))
+    # Prefer spanned layers (no extra escape via), then the CHEAPEST layer by the
+    # board's layer-cost weights -- so a coupled middle takes the open layer the
+    # user steered routing to (CK1: B.Cu cost 1.0 vs the congested In1.Cu cost 3.0),
+    # not just "inner before outer". The single-ended legs via down to it.
+    _lc_order = config.get_layer_costs()
     layer_order = sorted(
         range(len(config.layers)),
-        key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
+        key=lambda i: (i not in spanned,
+                       _lc_order[i] if i < len(_lc_order) else 1000,
+                       layer_names[i] in ('F.Cu', 'B.Cu'), i))
 
     min_radius_grid = config.min_turning_radius / config.grid_step
     turn_cost = int(min_radius_grid * math.pi / 4 * 1000)
@@ -2359,11 +2369,40 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                                   / config.grid_step + 0.5))
     max_iters = config.max_iterations * 8
 
+    s_gx, s_gy = coord.to_grid(csx, csy)
+    t_gx, t_gy = coord.to_grid(ctx, cty)
+
+    # Couple as far as possible: if an endpoint centre is unreachable on EVERY
+    # layer (a multipoint terminal whose P/N fanned out far apart, so their
+    # midpoint is buried inside the part), shorten the coupled middle toward the
+    # other end until it reaches open copper. The single-ended legs span the rest.
+    _nlay = len(config.layers)
+
+    def _relax(gx, gy, ox, oy):
+        steps = max(int(math.hypot(ox - gx, oy - gy)), 1)
+        for k in range(1, steps + 1):
+            cx = int(round(gx + (ox - gx) * k / steps))
+            cy = int(round(gy + (oy - gy) * k / steps))
+            if any(not obstacles.is_blocked(cx, cy, li) for li in range(_nlay)):
+                return cx, cy
+        return None
+
+    if all(obstacles.is_blocked(s_gx, s_gy, li) for li in range(_nlay)):
+        r = _relax(s_gx, s_gy, t_gx, t_gy)
+        if r is None:
+            return None
+        s_gx, s_gy = r
+        csx, csy = coord.to_float(s_gx, s_gy)
+    if all(obstacles.is_blocked(t_gx, t_gy, li) for li in range(_nlay)):
+        r = _relax(t_gx, t_gy, s_gx, s_gy)
+        if r is None:
+            return None
+        t_gx, t_gy = r
+        ctx, cty = coord.to_float(t_gx, t_gy)
+
     dx, dy = ctx - csx, cty - csy
     L = math.hypot(dx, dy) or 1.0
     theta = direction_to_theta_idx(dx / L, dy / L)
-    s_gx, s_gy = coord.to_grid(csx, csy)
-    t_gx, t_gy = coord.to_grid(ctx, cty)
 
     for layer_idx in layer_order:
         if obstacles.is_blocked(s_gx, s_gy, layer_idx) or obstacles.is_blocked(t_gx, t_gy, layer_idx):
