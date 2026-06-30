@@ -2341,16 +2341,14 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config)) &
                (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config)))
-    # Prefer spanned layers (no extra escape via), then the CHEAPEST layer by the
-    # board's layer-cost weights -- so a coupled middle takes the open layer the
-    # user steered routing to (CK1: B.Cu cost 1.0 vs the congested In1.Cu cost 3.0),
-    # not just "inner before outer". The single-ended legs via down to it.
-    _lc_order = config.get_layer_costs()
+    # NOTE (TODO #1, see issue): this single-layer ordering is the existing
+    # 2-terminal scheme -- try spanned layers, then inner before F.Cu/B.Cu, then by
+    # index, with the WHOLE middle pinned to one layer. The planned upgrade is a
+    # source-layer / target-layer / source->target(coupled via) / all-combos
+    # priority shared by both the 2-terminal and multipoint-leg hybrid.
     layer_order = sorted(
         range(len(config.layers)),
-        key=lambda i: (i not in spanned,
-                       _lc_order[i] if i < len(_lc_order) else 1000,
-                       layer_names[i] in ('F.Cu', 'B.Cu'), i))
+        key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
 
     min_radius_grid = config.min_turning_radius / config.grid_step
     turn_cost = int(min_radius_grid * math.pi / 4 * 1000)
