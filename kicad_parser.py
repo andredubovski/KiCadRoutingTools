@@ -142,6 +142,8 @@ class Footprint:
     layer: str
     pads: List[Pad] = field(default_factory=list)
     value: str = ""  # Component value (e.g., "MCF5213", "100nF", "10K")
+    dnp: bool = False  # Do-not-populate / no-pop. A no-pop series part is an open
+                       # circuit, so its pads do NOT bridge two nets into one signal.
 
 
 @dataclass
@@ -1214,6 +1216,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
         value = value_match.group(1) if value_match else ""
 
+        # Extract the do-not-populate flag from the footprint (attr ...) token.
+        # KiCad 7+ writes a standalone `dnp` keyword among the attr flags
+        # (e.g. "(attr smd dnp exclude_from_pos_files)"). A no-pop part is an
+        # open circuit, so callers must not treat its pads as bridging two nets.
+        attr_match = re.search(r'\(attr\b([^)]*)\)', fp_text)
+        is_dnp = bool(attr_match and re.search(r'\bdnp\b', attr_match.group(1)))
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1221,7 +1230,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             y=fp_y,
             rotation=fp_rotation,
             layer=fp_layer,
-            value=value
+            value=value,
+            dnp=is_dnp
         )
 
         # Extract pads
@@ -1962,6 +1972,14 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_value = ""
 
+        # DNP (do-not-populate) flag — kept at parity with the text parser. A
+        # no-pop series part is an open circuit, so its pads must not be treated
+        # as bridging two nets into one logical net. IsDNP() is KiCad 7+.
+        try:
+            fp_dnp = bool(fp.IsDNP())
+        except Exception:
+            fp_dnp = False
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1969,7 +1987,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             y=fp_y,
             rotation=fp_rotation,
             layer=fp_layer,
-            value=fp_value
+            value=fp_value,
+            dnp=fp_dnp
         )
 
         # Extract pads
