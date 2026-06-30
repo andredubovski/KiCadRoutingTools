@@ -182,6 +182,10 @@ def _setback_ladder(setback, spacing_mm, pad_gap_half, config):
     """
     floor = max(2 * spacing_mm,
                 abs(pad_gap_half - spacing_mm) + config.grid_step)
+    # Pinch retry (#246): route at EXACTLY the configured setback, no expansion, so the
+    # caller's chosen radius is the one actually used (the scan drives the radius itself).
+    if getattr(config, 'diff_pair_setback_no_ladder', False):
+        return [setback]
     # The configured/default setback is always rung 1, even below the floor -
     # an explicit --diff-pair-centerline-setback must be honored as given.
     ladder = [setback]

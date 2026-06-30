@@ -67,11 +67,15 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
     # #246): the centerline starts at a different setback, so the taper geometry shifts
     # and a gentler/closer one often clears the pinch -- keeping a standard coupled
     # route, with the hybrid a true last resort. (The route's internal ladder picks the
-    # first setback that ROUTES, not the first pinch-FREE one, so we drive it here.)
+    # first setback that ROUTES, not the first pinch-FREE one, so we drive the radius
+    # here, with diff_pair_setback_no_ladder so each attempt routes at EXACTLY `sb` --
+    # otherwise the internal ladder would re-expand `sb` and settle on some nearby rung.)
     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
     base_sb = (config.diff_pair_centerline_setback
                if config.diff_pair_centerline_setback is not None else spacing_mm * 4)
     saved_sb = config.diff_pair_centerline_setback
+    saved_no_ladder = config.diff_pair_setback_no_ladder
+    config.diff_pair_setback_no_ladder = True
     try:
         tried = {round(base_sb, 4)}
         for sb in (base_sb * 1.5, base_sb * 2.0, base_sb * 3.0,
@@ -89,11 +93,12 @@ def _maybe_swap_to_hybrid(result, pair, pcb_data, config, obstacles, base_obstac
             a_ov = _count_pn_overlaps([s for s in a_ns if s.net_id == pair.p_net_id],
                                       [s for s in a_ns if s.net_id == pair.n_net_id], config)
             if a_ov == 0:
-                print(f"  Standard coupled route clean at setback ~{sb:.2f}mm "
+                print(f"  Standard coupled route clean at setback {sb:.2f}mm "
                       f"(was {base_ov} P/N overlap(s)); kept standard, no hybrid")
                 return alt
     finally:
         config.diff_pair_centerline_setback = saved_sb
+        config.diff_pair_setback_no_ladder = saved_no_ladder
     leg_obstacles = build_diff_pair_leg_obstacles(
         base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
         all_unrouted_net_ids, pair.p_net_id, pair.n_net_id, gnd_net_id,
