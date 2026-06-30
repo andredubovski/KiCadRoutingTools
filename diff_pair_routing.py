@@ -2300,6 +2300,36 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     return None
 
 
+def _pad_obstacle_segments(pad, layer_names):
+    """Represent a pad as capsule segment(s) -- one per copper layer -- so it can be
+    fed to a leg's TRACK-obstacle list (add_segments_list_as_obstacles). A coupled
+    hybrid's single-ended leg must keep clearance from a PARTNER-net pad, not just
+    keep its via off it (add_pads_via_keepout is via-only), or the leg track grazes
+    the partner pad (keks /CK_N leg under the /CK_P pad R41.2). The capsule runs
+    along the pad's long axis, width = its short side, approximating the rounded
+    rect the same way a track segment is blocked."""
+    cx, cy = pad.global_x, pad.global_y
+    sx, sy = pad.size_x, pad.size_y
+    # Segment spans the FULL long axis (+-long/2): a capsule of that length and
+    # width=short side covers the entire pad rectangle (corners included) -- using
+    # length = long-short would round the corners and leave a ~0.1*short graze
+    # (keks /CK_N still 0.046mm into R41.2's corner). The semicircular caps bulge
+    # short/2 past the pad ends, a small, harmless over-block.
+    if sx >= sy:
+        half = sx / 2.0
+        a = (cx - half, cy, cx + half, cy, sy)
+    else:
+        half = sy / 2.0
+        a = (cx, cy - half, cx, cy + half, sx)
+    cu = [L for L in (pad.layers or []) if L.endswith('.Cu')]
+    if (getattr(pad, 'drill', 0) or 0) > 0 or not cu:
+        cu = list(layer_names)  # THT / unknown copper -> block every routing layer
+    else:
+        cu = [L for L in cu if L in layer_names]
+    return [Segment(start_x=a[0], start_y=a[1], end_x=a[2], end_y=a[3],
+                    width=a[4], layer=L, net_id=pad.net_id) for L in cu]
+
+
 def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
                                  leg_obstacles=None, endpoints=None):
     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
@@ -2341,14 +2371,36 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_src_x, n_src_y, config)) &
                (_endpoint_launch_layer_indices(pcb_data, p_net_id, p_tgt_x, p_tgt_y, config) &
                 _endpoint_launch_layer_indices(pcb_data, n_net_id, n_tgt_x, n_tgt_y, config)))
-    # NOTE (TODO #1, see issue): this single-layer ordering is the existing
-    # 2-terminal scheme -- try spanned layers, then inner before F.Cu/B.Cu, then by
-    # index, with the WHOLE middle pinned to one layer. The planned upgrade is a
-    # source-layer / target-layer / source->target(coupled via) / all-combos
-    # priority shared by both the 2-terminal and multipoint-leg hybrid.
-    layer_order = sorted(
-        range(len(config.layers)),
+    # TODO1 layer scheme (issue #243): try each terminal's OWN layer first so the
+    # coupled middle stays where the terminal already sits -- a terminal carrying an
+    # all-layer via-in-pad (e.g. a bare-pad target swap) is then reached with NO
+    # extra transition via, instead of detouring to an inner layer and dropping a
+    # gratuitous via that can block a neighbour (eis DDMI_D1 -> blocked CK). Order
+    # of (start_layer, end_layer) candidates, each a FULL attempt (middle + legs),
+    # first that fully routes wins:
+    #   1. source layer the whole way
+    #   2. target layer the whole way
+    #   3. source -> target (one coupled layer change mid-middle; A* drops the via)
+    #   4. every remaining single layer (old spanned/inner/outer order)
+    # (Shared by the 2-terminal hybrid and each multipoint-leg hybrid. A full
+    # remaining-cross-combo sweep is deliberately omitted -- it is nL^2 middle A*
+    # runs on already-hard pairs; #3 covers the one useful cross case.)
+    nL = len(config.layers)
+    s_lyr = src[4] if isinstance(src[4], int) and 0 <= src[4] < nL else None
+    t_lyr = tgt[4] if isinstance(tgt[4], int) and 0 <= tgt[4] < nL else None
+    single_order = sorted(
+        range(nL),
         key=lambda i: (i not in spanned, layer_names[i] in ('F.Cu', 'B.Cu'), i))
+    layer_pairs = []
+
+    def _add_pair(a, b):
+        if a is not None and b is not None and (a, b) not in layer_pairs:
+            layer_pairs.append((a, b))
+    _add_pair(s_lyr, s_lyr)             # 1. source layer the whole way
+    _add_pair(t_lyr, t_lyr)             # 2. target layer the whole way
+    _add_pair(s_lyr, t_lyr)             # 3. source -> target (one coupled via)
+    for _L in single_order:             # 4. every remaining single layer
+        _add_pair(_L, _L)
 
     min_radius_grid = config.min_turning_radius / config.grid_step
     turn_cost = int(min_radius_grid * math.pi / 4 * 1000)
@@ -2398,24 +2450,55 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         t_gx, t_gy = r
         ctx, cty = coord.to_float(t_gx, t_gy)
 
-    dx, dy = ctx - csx, cty - csy
-    L = math.hypot(dx, dy) or 1.0
-    theta = direction_to_theta_idx(dx / L, dy / L)
+    # Base (un-setback) endpoints: each candidate couples as close to these as its
+    # wide corridor allows (see _closest_launch in the loop).
+    s_gx0, s_gy0 = s_gx, s_gy
+    t_gx0, t_gy0 = t_gx, t_gy
+    # The coupled pair occupies a swath ~diff_pair_spacing_grid wide; a launch point
+    # must have that swath clear or the A* dead-ends between the tightly-spaced stub
+    # ends. Search inward from the terminal for the CLOSEST cell whose swath is clear.
+    _swath_r = max(1, diff_pair_spacing_grid)
 
-    for layer_idx in layer_order:
-        if obstacles.is_blocked(s_gx, s_gy, layer_idx) or obstacles.is_blocked(t_gx, t_gy, layer_idx):
+    def _closest_launch(gx0, gy0, ox, oy, layer):
+        """Closest cell to (gx0,gy0), stepping toward (ox,oy), whose
+        diff-pair-wide swath is clear on `layer` -- couple as far as possible, the
+        single-ended leg spans the small remaining gap. Returns (cx,cy) or None."""
+        steps = max(int(math.hypot(ox - gx0, oy - gy0)), 1)
+        for k in range(0, steps + 1):
+            cx = int(round(gx0 + (ox - gx0) * k / steps))
+            cy = int(round(gy0 + (oy - gy0) * k / steps))
+            if not any(obstacles.is_blocked(cx + dxx, cy + dyy, layer)
+                       for dxx in range(-_swath_r, _swath_r + 1)
+                       for dyy in range(-_swath_r, _swath_r + 1)):
+                return cx, cy
+        return None
+
+    for a_layer, b_layer in layer_pairs:
+        # Couple as close to each terminal as this candidate's launch layer allows.
+        _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
+        _tl = _closest_launch(t_gx0, t_gy0, s_gx0, s_gy0, b_layer)
+        if _sl is None or _tl is None:
             continue
+        s_gx, s_gy = _sl
+        t_gx, t_gy = _tl
+        csx, csy = coord.to_float(s_gx, s_gy)
+        ctx, cty = coord.to_float(t_gx, t_gy)
+        if (s_gx, s_gy) == (t_gx, t_gy):
+            continue
+        _dxc, _dyc = ctx - csx, cty - csy
+        _Lc = math.hypot(_dxc, _dyc) or 1.0
+        theta = direction_to_theta_idx(_dxc / _Lc, _dyc / _Lc)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         for ox in range(-2, 3):
             for oy in range(-2, 3):
                 obstacles.add_allowed_cell(s_gx + ox, s_gy + oy)
                 obstacles.add_allowed_cell(t_gx + ox, t_gy + oy)
-        obstacles.add_source_target_cell(s_gx, s_gy, layer_idx)
-        obstacles.add_source_target_cell(t_gx, t_gy, layer_idx)
+        obstacles.add_source_target_cell(s_gx, s_gy, a_layer)
+        obstacles.add_source_target_cell(t_gx, t_gy, b_layer)
         path, iters, _blocked, _gnd = pr.route_pose_with_frontier(
-            obstacles, s_gx, s_gy, layer_idx, theta,
-            t_gx, t_gy, layer_idx, theta, max_iters, diff_pair_via_spacing=via_spacing_grid)
+            obstacles, s_gx, s_gy, a_layer, theta,
+            t_gx, t_gy, b_layer, theta, max_iters, diff_pair_via_spacing=via_spacing_grid)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if not path:
@@ -2486,12 +2569,23 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # grazing the USB_D+ stub).
             partner_net = n_net_id if net_id == p_net_id else p_net_id
             partner_stub = [s for s in board_segs if s.net_id == partner_net]
-            partner_s = [s for s in mid_segs if s.net_id != net_id] + committed_segs + partner_stub
-            partner_v = [v for v in pair_vias if v.net_id != net_id] + committed_vias
-            # The partner net's pads are excluded from the diff-pair map too -
-            # re-add them as a via keep-out so the leg's transition via doesn't
-            # land on one (issue #241).
+            # The partner net's pads are excluded from the diff-pair map too. Re-add
+            # them as TRACK obstacles (capsule segments) so the leg routes AROUND the
+            # partner's terminal pad instead of grazing it (keks /CK_N leg under the
+            # /CK_P pad R41.2), and ALSO as a via keep-out below (issue #241) so its
+            # transition via doesn't land on one.
             partner_pads = (getattr(pcb_data, 'pads_by_net', None) or {}).get(partner_net, [])
+            partner_pad_segs = [seg for pad in partner_pads
+                                for seg in _pad_obstacle_segments(pad, layer_names)]
+            partner_s = ([s for s in mid_segs if s.net_id != net_id] + committed_segs
+                         + partner_stub + partner_pad_segs)
+            # partner_v must include the partner's NEW coupled-middle vias (p_vias /
+            # n_vias just built), not only existing board vias + committed leg vias --
+            # else the leg grazes the partner's fresh middle via (keks /D0_N seg vs
+            # the /D0_P via, 0.06mm).
+            partner_mid_vias = n_vias if net_id == p_net_id else p_vias
+            partner_v = ([v for v in pair_vias if v.net_id != net_id]
+                         + committed_vias + partner_mid_vias)
             ls, lv, it = _route_hybrid_legs(
                 pcb_data, net_id, config, leg_obs, layer_names, coord,
                 mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias,
@@ -2520,7 +2614,9 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         # honestly instead of counting as routed.
         if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias):
             continue
-        print(f"  DIRECT HYBRID: coupled middle on {layer_names[layer_idx]} + "
+        _mid_desc = (layer_names[a_layer] if a_layer == b_layer
+                     else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
+        print(f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
               f"{len(leg_segs)} leg seg(s) ({total_iters} iters)")
         return {'new_segments': all_segs, 'new_vias': all_vias,
                 'iterations': total_iters, 'path_length': len(simplified)}
