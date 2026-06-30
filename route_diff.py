@@ -943,7 +943,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             import shutil, os
             # under --overwrite, output_file IS input_file: the board is already
             # there, so skip the copy (shutil.copy would raise SameFileError).
-            if os.path.abspath(input_file) != os.path.abspath(output_file):
+            # samefile() also catches the same-inode-via-symlink/hardlink case;
+            # it raises when output_file doesn't exist yet (the normal pass-through
+            # to a fresh path), so fall back to an abspath compare there.
+            try:
+                same = os.path.samefile(input_file, output_file)
+            except OSError:
+                same = os.path.abspath(input_file) == os.path.abspath(output_file)
+            if not same:
                 shutil.copy(input_file, output_file)
             if state.diff_pair_single_ended_nets:
                 print(f"\nAll diff pairs deferred to single-ended (no coupled copper "
