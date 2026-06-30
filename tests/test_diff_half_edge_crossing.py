@@ -106,7 +106,7 @@ def main():
         print(f"  N seg {tb['start']} -> {tb['end']}")
         return 1
 
-    # Sanity: the inner pad must converge on its own (lower) side of the edge
+    # Sanity 1: the inner pad must converge on its own (lower) side of the edge
     # pad, i.e. the inner exit Y should be below the edge pad's Y.
     edge_y = n_pad.global_y
     inner_exit_y = p_route.exit_pos[1]
@@ -116,8 +116,20 @@ def main():
               f"inner pad sits below the edge pad)")
         return 1
 
-    print("PASS: #242 half-edge diff-pair escape stubs do not cross "
-          f"(inner converges below edge: {inner_exit_y:.3f} > {edge_y:.3f})")
+    # Sanity 2: no loop-back. The inner stub must reach its convergence point
+    # at or inside (to the right of, for a left escape) the exit point, so the
+    # final straight run goes out toward the edge - never back toward the BGA
+    # (the #242 overshoot/loop-back).
+    inner_stub_x = p_route.stub_end[0]
+    inner_exit_x = p_route.exit_pos[0]
+    if inner_stub_x < inner_exit_x:
+        print(f"FAIL: inner stub overshoots the exit and loops back toward the "
+              f"BGA (stub x={inner_stub_x:.3f} < exit x={inner_exit_x:.3f})")
+        return 1
+
+    print("PASS: #242 half-edge diff-pair escape stubs do not cross, no "
+          f"loop-back (inner converges below edge: {inner_exit_y:.3f} > "
+          f"{edge_y:.3f}; stub x={inner_stub_x:.3f} >= exit x={inner_exit_x:.3f})")
     return 0
 
 

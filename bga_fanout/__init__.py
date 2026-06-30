@@ -958,22 +958,12 @@ def build_half_edge_route(
         channels_above = [c for c in h_channels if c.position < inner_y]
         channels_below = [c for c in h_channels if c.position > inner_y]
 
-        # Converge on the side of the edge pad that the inner pad already sits
-        # on, so the inner pad's escape doesn't cross the edge pad's straight
-        # track (#242). Pads sharing the row carry no crossing risk, so fall
-        # back to the nearest-BGA-edge heuristic there.
+        # Choose channel direction based on distance to BGA edge (only used by
+        # the same-row tent below; diagonal pairs converge directly).
         dist_to_top = inner_y - grid.min_y
         dist_to_bottom = grid.max_y - inner_y
-        inner_above_edge = inner_y < edge_y
-        inner_below_edge = inner_y > edge_y
 
-        if inner_above_edge and channels_above:
-            inner_channel = max(channels_above, key=lambda c: c.position)
-            channel_above = True
-        elif inner_below_edge and channels_below:
-            inner_channel = min(channels_below, key=lambda c: c.position)
-            channel_above = False
-        elif dist_to_top <= dist_to_bottom and channels_above:
+        if dist_to_top <= dist_to_bottom and channels_above:
             inner_channel = max(channels_above, key=lambda c: c.position)
             channel_above = True
         elif channels_below:
@@ -995,49 +985,46 @@ def build_half_edge_route(
             channel_pt = None
             channel_pt2 = None
         else:
-            # Inner pad: 45 up to channel, horizontal in channel (1 pitch),
-            # then 45 back down to converge with edge pad
+            # Inner pad tent: 45 to a channel, 1 pitch toward the edge, then 45
+            # to converge with the edge pad at pair spacing.
+            #
+            # Converge on the inner pad's OWN side of the edge pad so the P/N
+            # stubs don't cross (#242), and route the tent through the channel
+            # BETWEEN the two pads (toward the edge pad) so the return stub
+            # doesn't overshoot the BGA edge and loop back toward the BGA
+            # (#242). For a same-row pair (no "between" channel) keep the
+            # nearest-edge heuristic computed above.
+            if inner_y > edge_y + POSITION_TOLERANCE and channels_above:
+                inner_channel = max(channels_above, key=lambda c: c.position)
+                target_exit_y = edge_pad_info.global_y + pair_spacing_full
+            elif inner_y < edge_y - POSITION_TOLERANCE and channels_below:
+                inner_channel = min(channels_below, key=lambda c: c.position)
+                target_exit_y = edge_pad_info.global_y - pair_spacing_full
+            elif channel_above:
+                target_exit_y = edge_pad_info.global_y - pair_spacing_full
+            else:
+                target_exit_y = edge_pad_info.global_y + pair_spacing_full
+
             channel_y = inner_channel.position
             dy_to_channel = channel_y - inner_pad_info.global_y
 
             if actual_escape_dir == 'right':
-                # First 45: pad -> channel entry point
                 channel_pt_x = inner_pad_info.global_x + abs(dy_to_channel)
                 channel_pt = (channel_pt_x, channel_y)
-
-                # Horizontal segment in channel: 1 pitch toward edge
                 channel_pt2_x = channel_pt_x + grid.pitch_x
                 channel_pt2 = (channel_pt2_x, channel_y)
-
-                # Target Y at exit = edge pad Y + offset for pair spacing
-                if channel_above:
-                    target_exit_y = edge_pad_info.global_y - pair_spacing_full
-                else:
-                    target_exit_y = edge_pad_info.global_y + pair_spacing_full
-
-                # Second 45: from channel_pt2 back toward target_exit_y
                 dy_return = target_exit_y - channel_y
                 stub_end_x = channel_pt2_x + abs(dy_return)
                 stub_end = (stub_end_x, target_exit_y)
-
                 exit_pos = (grid.max_x + exit_margin, target_exit_y)
-
             else:  # left
                 channel_pt_x = inner_pad_info.global_x - abs(dy_to_channel)
                 channel_pt = (channel_pt_x, channel_y)
-
                 channel_pt2_x = channel_pt_x - grid.pitch_x
                 channel_pt2 = (channel_pt2_x, channel_y)
-
-                if channel_above:
-                    target_exit_y = edge_pad_info.global_y - pair_spacing_full
-                else:
-                    target_exit_y = edge_pad_info.global_y + pair_spacing_full
-
                 dy_return = target_exit_y - channel_y
                 stub_end_x = channel_pt2_x - abs(dy_return)
                 stub_end = (stub_end_x, target_exit_y)
-
                 exit_pos = (grid.min_x - exit_margin, target_exit_y)
 
             route_channel = inner_channel
@@ -1051,21 +1038,12 @@ def build_half_edge_route(
         channels_left = [c for c in v_channels if c.position < inner_x]
         channels_right = [c for c in v_channels if c.position > inner_x]
 
-        # Converge on the side of the edge pad that the inner pad already sits
-        # on (#242); fall back to the nearest-BGA-edge heuristic when the pads
-        # share a column or no channel exists on the preferred side.
+        # Choose channel direction based on distance to BGA edge (only used by
+        # the same-column tent below; diagonal pairs converge directly).
         dist_to_left = inner_x - grid.min_x
         dist_to_right = grid.max_x - inner_x
-        inner_left_of_edge = inner_x < edge_x
-        inner_right_of_edge = inner_x > edge_x
 
-        if inner_left_of_edge and channels_left:
-            inner_channel = max(channels_left, key=lambda c: c.position)
-            channel_left = True
-        elif inner_right_of_edge and channels_right:
-            inner_channel = min(channels_right, key=lambda c: c.position)
-            channel_left = False
-        elif dist_to_left <= dist_to_right and channels_left:
+        if dist_to_left <= dist_to_right and channels_left:
             inner_channel = max(channels_left, key=lambda c: c.position)
             channel_left = True
         elif channels_right:
@@ -1085,51 +1063,41 @@ def build_half_edge_route(
             channel_pt = None
             channel_pt2 = None
         else:
+            # Inner pad tent (X/Y swapped vs the horizontal case). Converge on
+            # the inner pad's own side of the edge pad and route through the
+            # channel between the two pads so the return stub doesn't overshoot
+            # and loop back toward the BGA (#242).
+            if inner_x > edge_x + POSITION_TOLERANCE and channels_left:
+                inner_channel = max(channels_left, key=lambda c: c.position)
+                target_exit_x = edge_pad_info.global_x + pair_spacing_full
+            elif inner_x < edge_x - POSITION_TOLERANCE and channels_right:
+                inner_channel = min(channels_right, key=lambda c: c.position)
+                target_exit_x = edge_pad_info.global_x - pair_spacing_full
+            elif channel_left:
+                target_exit_x = edge_pad_info.global_x - pair_spacing_full
+            else:
+                target_exit_x = edge_pad_info.global_x + pair_spacing_full
+
             channel_x = inner_channel.position
             dx_to_channel = channel_x - inner_pad_info.global_x
 
             if actual_escape_dir == 'down':
-                # First 45: pad -> channel entry point
                 channel_pt_y = inner_pad_info.global_y + abs(dx_to_channel)
                 channel_pt = (channel_x, channel_pt_y)
-
-                # Vertical segment in channel: 1 pitch toward edge
                 channel_pt2_y = channel_pt_y + grid.pitch_y
                 channel_pt2 = (channel_x, channel_pt2_y)
-
-                # Target X at exit = edge pad X + offset for pair spacing
-                if channel_left:
-                    target_exit_x = edge_pad_info.global_x - pair_spacing_full
-                else:
-                    target_exit_x = edge_pad_info.global_x + pair_spacing_full
-
-                # Second 45: from channel_pt2 back toward target_exit_x
                 dx_return = target_exit_x - channel_x
                 stub_end_y = channel_pt2_y + abs(dx_return)
                 stub_end = (target_exit_x, stub_end_y)
-
                 exit_pos = (target_exit_x, grid.max_y + exit_margin)
-
             else:  # up
-                # First 45: pad -> channel entry point
                 channel_pt_y = inner_pad_info.global_y - abs(dx_to_channel)
                 channel_pt = (channel_x, channel_pt_y)
-
-                # Vertical segment in channel: 1 pitch toward edge
                 channel_pt2_y = channel_pt_y - grid.pitch_y
                 channel_pt2 = (channel_x, channel_pt2_y)
-
-                # Target X at exit = edge pad X + offset for pair spacing
-                if channel_left:
-                    target_exit_x = edge_pad_info.global_x - pair_spacing_full
-                else:
-                    target_exit_x = edge_pad_info.global_x + pair_spacing_full
-
-                # Second 45: from channel_pt2 back toward target_exit_x
                 dx_return = target_exit_x - channel_x
                 stub_end_y = channel_pt2_y - abs(dx_return)
                 stub_end = (target_exit_x, stub_end_y)
-
                 exit_pos = (target_exit_x, grid.min_y - exit_margin)
 
             route_channel = inner_channel
