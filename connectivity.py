@@ -524,23 +524,29 @@ def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: flo
     current_x, current_y = stub_x, stub_y
 
     while True:
-        # Find segment connected at current position
+        # Find the connected segment at the current position. Among ALL segments
+        # whose endpoint is within tolerance, take the CLOSEST -- not the first.
+        # Picking the first let the walk "jump across" a short diagonal jog whose
+        # far end sits right at the per-axis tolerance (a 0.05mm-per-axis jog == the
+        # 0.05mm tolerance): the neighbour beyond the jog matched and the jog segment
+        # was skipped, dropping it from the stub. A later layer-swap then relocated
+        # only part of the stub and left a ~71um gap that severed the pad
+        # (fpga_sdram /D0-). Closest-wins keeps the chain intact -- the true next
+        # segment (shared endpoint, distance ~0) always beats a boundary-distance
+        # neighbour, while the per-axis gate preserves the original match set.
         found = None
+        best_d = None
         for seg in net_segments:
             if id(seg) in visited:
                 continue
-
-            # Check if start matches current position
             if abs(seg.start_x - current_x) < tolerance and abs(seg.start_y - current_y) < tolerance:
-                found = seg
-                next_x, next_y = seg.end_x, seg.end_y
-                break
-
-            # Check if end matches current position
+                d = math.hypot(seg.start_x - current_x, seg.start_y - current_y)
+                if best_d is None or d < best_d:
+                    found, best_d, next_x, next_y = seg, d, seg.end_x, seg.end_y
             if abs(seg.end_x - current_x) < tolerance and abs(seg.end_y - current_y) < tolerance:
-                found = seg
-                next_x, next_y = seg.start_x, seg.start_y
-                break
+                d = math.hypot(seg.end_x - current_x, seg.end_y - current_y)
+                if best_d is None or d < best_d:
+                    found, best_d, next_x, next_y = seg, d, seg.start_x, seg.start_y
 
         if found is None:
             break
