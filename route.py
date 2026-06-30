@@ -102,11 +102,9 @@ def _write_passthrough_output(input_file: str, output_file: str) -> None:
     Pipelines that chain output->input then keep working instead of dying on
     a missing file. Skipped when output is the input (in-place).
     """
-    import shutil
-    if not output_file or os.path.abspath(output_file) == os.path.abspath(input_file):
-        return
-    shutil.copyfile(input_file, output_file)
-    print(f"Wrote unchanged copy to {output_file} (nothing to route)")
+    from pcb_io_utils import passthrough_copy
+    if passthrough_copy(input_file, output_file):
+        print(f"Wrote unchanged copy to {output_file} (nothing to route)")
 
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],

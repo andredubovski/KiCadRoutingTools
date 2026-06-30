@@ -733,8 +733,8 @@ def main():
         # (e.g. the component is already fanned on a retry) leaves the next step
         # with no input file.
         if getattr(args, 'output', None):
-            import shutil
-            shutil.copyfile(args.pcb, args.output)
+            from pcb_io_utils import passthrough_copy
+            passthrough_copy(args.pcb, args.output)
             print(f"Wrote board through to {args.output} (unchanged)")
 
     # Structured summary + post-fanout DRC so downstream tooling (plan-pcb-routing
