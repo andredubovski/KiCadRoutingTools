@@ -2591,17 +2591,46 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
 
     probe_cap = max(int(config.max_probe_iterations), 1)
 
+    # Hybrid step logging: the hybrid is a silent last resort -- a failed/rejected
+    # attempt printed nothing, so a pair that fell back to single-ended looked like
+    # a correct "electrically short" decision. Record WHY each layer-combo is
+    # rejected (and, for a graze, WHAT foreign copper and by how much) so the final
+    # failure says so. Per-combo lines under --debug-lines; a one-line summary always.
+    _p_nm = (getattr(pcb_data, 'nets', {}) or {}).get(p_net_id)
+    _p_nm = getattr(_p_nm, 'name', None) or f"net{p_net_id}"
+    _hyb_label = _p_nm[:-1] if _p_nm and _p_nm[-1] in '+-' else _p_nm
+    _hyb_rej = []
+
+    def _net_nm(nid):
+        n = (getattr(pcb_data, 'nets', {}) or {}).get(nid)
+        return getattr(n, 'name', None) or f"net{nid}"
+
+    def _combo_nm(a, b):
+        return layer_names[a] if a == b else f"{layer_names[a]}->{layer_names[b]}"
+
+    def _graze_reason(gz):
+        kind, obj, _seg, ov = gz
+        return (f"grazes foreign {kind} (net {_net_nm(getattr(obj, 'net_id', None))}) "
+                f"by {ov * 1000:.0f}um")
+
+    def _rej(a, b, reason):
+        _hyb_rej.append(reason)
+        if getattr(config, 'debug_lines', False):
+            print(f"    hybrid {_combo_nm(a, b)}: rejected -- {reason}")
+
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
         _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
         _tl = _closest_launch(t_gx0, t_gy0, s_gx0, s_gy0, b_layer)
         if _sl is None or _tl is None:
+            _rej(a_layer, b_layer, "no clear diff-pair-wide launch swath at a terminal")
             continue
         s_gx, s_gy = _sl
         t_gx, t_gy = _tl
         csx, csy = coord.to_float(s_gx, s_gy)
         ctx, cty = coord.to_float(t_gx, t_gy)
         if (s_gx, s_gy) == (t_gx, t_gy):
+            _rej(a_layer, b_layer, "source and target launch collapse to one cell")
             continue
         _dxc, _dyc = ctx - csx, cty - csy
         _Lc = math.hypot(_dxc, _dyc) or 1.0
@@ -2654,6 +2683,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if not path:
+            _rej(a_layer, b_layer, "coupled middle A* found no path")
             continue
         grid_path = []
         for gx, gy, _th, lyr in path:
@@ -2662,6 +2692,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             grid_path.append((gx, gy, lyr))
         simplified = simplify_path(grid_path)
         if len(simplified) < 2:
+            _rej(a_layer, b_layer, "coupled middle degenerate (<2 points)")
             continue
         centerline_float = [(coord.to_float(gx, gy)[0], coord.to_float(gx, gy)[1], lyr)
                             for gx, gy, lyr in simplified]
@@ -2723,8 +2754,11 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             n_float, n_net_id, None, None, n_sign, (0, 0), (0, 0), 0, 0, config, layer_names, omit_connectors=True)
         mid_segs = p_segs + n_segs
         if _pn_tracks_cross_full(mid_segs, pcb_data, p_net_id, n_net_id):
+            _rej(a_layer, b_layer, "coupled middle P/N tracks cross")
             continue
-        if _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
+        _gz = _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config)
+        if _gz:
+            _rej(a_layer, b_layer, "coupled middle " + _graze_reason(_gz))
             continue
 
         # Attach each terminal to its middle near-end with point-to-point single-ended
@@ -2801,15 +2835,19 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
                 break
         if not ok:
+            _rej(a_layer, b_layer, "terminal legs could not attach to the coupled middle")
             continue
         all_segs = mid_segs + leg_segs
         all_vias = p_vias + n_vias + leg_vias
         if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+            _rej(a_layer, b_layer, "assembled route P/N tracks cross")
             continue
         # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
         # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
         # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
-        if _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config):
+        _gz = _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config)
+        if _gz:
+            _rej(a_layer, b_layer, "assembled route " + _graze_reason(_gz))
             continue
         # Connectivity gate: the hybrid validates crossings/grazes but never that
         # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
@@ -2820,6 +2858,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         # half isn't fully connected -- then this layer is retried / the pair fails
         # honestly instead of counting as routed.
         if not _hybrid_route_connects(pcb_data, p_net_id, n_net_id, all_segs, all_vias):
+            _rej(a_layer, b_layer, "assembled route leaves a terminal unconnected")
             continue
         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
@@ -2827,6 +2866,12 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
               f"{len(leg_segs)} leg seg(s) ({total_iters} iters)")
         return {'new_segments': all_segs, 'new_vias': all_vias,
                 'iterations': total_iters, 'path_length': len(simplified)}
+    if _hyb_rej:
+        from collections import Counter
+        counts = Counter(_hyb_rej)
+        print(f"  HYBRID failed ({_hyb_label}): {len(_hyb_rej)} layer-combo(s) rejected -- "
+              + "; ".join(f"{r} (x{n})" if n > 1 else r
+                          for r, n in counts.most_common(4)))
     return None
 
 
