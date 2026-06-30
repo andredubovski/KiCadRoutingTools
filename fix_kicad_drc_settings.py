@@ -44,6 +44,14 @@ Targets come from the routing parameters when you pass them (``--clearance``,
 fall back to the smallest object found on the board, and clearance falls back to
 the project's Default net-class clearance.
 
+It also (``enable_used_layers``) adds any layer the board actually *uses* -- a
+footprint, graphic, pad, track, via or zone draws on it -- but that is missing
+from the board's ``(layers)`` table, back into that table in the ``.kicad_pcb``,
+so KiCad shows the layer as selectable and stops flagging
+``item_on_disabled_layer``. This is the one place the module edits the
+``.kicad_pcb`` (a format-preserving text insert); everything else edits only the
+``.kicad_pro``.
+
 IMPORTANT: close the board in KiCad before running this. KiCad keeps the project
 in memory and will overwrite an externally-edited ``.kicad_pro`` on save/close.
 
@@ -53,6 +61,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 
 # Severity categories treated as non-routing noise by default.
@@ -95,6 +104,131 @@ def find_project(path: str) -> str:
     base, ext = os.path.splitext(path)
     pro = path if ext == ".kicad_pro" else base + ".kicad_pro"
     return pro
+
+
+# Canonical KiCad file-format layer ids (stable across KiCad 6-9). The id and
+# type are needed to write a well-formed (layers) table entry. Copper layers are
+# 'signal'; technical/user layers are 'user'. Returns None for a name we don't
+# have a canonical id for (User.10+, exotic layers) so we skip rather than guess.
+_TECH_LAYER_IDS = {
+    'F.Mask': 1, 'B.Mask': 3, 'F.SilkS': 5, 'B.SilkS': 7,
+    'F.Adhes': 9, 'B.Adhes': 11, 'F.Paste': 13, 'B.Paste': 15,
+    'Dwgs.User': 17, 'Cmts.User': 19, 'Eco1.User': 21, 'Eco2.User': 23,
+    'Edge.Cuts': 25, 'Margin': 27, 'B.CrtYd': 29, 'F.CrtYd': 31,
+    'B.Fab': 33, 'F.Fab': 35,
+}
+
+
+def _canonical_layer(name: str):
+    """(id, type) for a canonical KiCad layer name, or None if unknown."""
+    if name == 'F.Cu':
+        return (0, 'signal')
+    if name == 'B.Cu':
+        return (2, 'signal')
+    m = re.fullmatch(r'In(\d+)\.Cu', name)        # In1.Cu=4, In2.Cu=6, ... In30.Cu=62
+    if m:
+        n = int(m.group(1))
+        return (2 + 2 * n, 'signal') if 1 <= n <= 30 else None
+    if name in _TECH_LAYER_IDS:
+        return (_TECH_LAYER_IDS[name], 'user')
+    m = re.fullmatch(r'User\.(\d+)', name)         # User.1=39, User.2=41, ... User.9=55
+    if m:
+        n = int(m.group(1))
+        return (37 + 2 * n, 'user') if 1 <= n <= 9 else None
+    return None
+
+
+def enable_used_layers(pcb_path: str, verbose: bool = True):
+    """Add any layer the board actually *uses* (a footprint, graphic, pad, track,
+    via or zone draws on it) but that is missing from its ``(layers)`` table, so
+    KiCad shows the layer as selectable and stops flagging ``item_on_disabled_layer``.
+
+    Format-preserving text edit of the ``.kicad_pcb`` (unlike the rest of this
+    module, which only touches the ``.kicad_pro``). Returns the list of layer
+    names added (empty if none / on any problem). Best-effort and conservative:
+    a layer whose canonical id we don't know, or whose id would collide with an
+    existing entry, is left alone."""
+    try:
+        with open(pcb_path, encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return []
+
+    tbl = re.search(r'\(layers\b', text)
+    if not tbl:
+        return []
+    start = tbl.start()
+    depth, end = 0, start
+    for i in range(start, len(text)):
+        if text[i] == '(':
+            depth += 1
+        elif text[i] == ')':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    block = text[start:end + 1]
+
+    enabled = set(re.findall(r'\(\d+\s+"([^"]+)"', block))
+    used_ids = {int(x) for x in re.findall(r'\((\d+)\s+"', block)}
+
+    # Layer names referenced anywhere EXCEPT inside the (layers) table itself:
+    # (layer "X") on graphics/text/zones, and (layers "A" "B" ...) on pads/vias.
+    # Also drop the (setup (stackup ...)) block, whose (layer "dielectric N"...)
+    # entries describe the physical stack, not the logical layer set.
+    outside = text[:start] + text[end + 1:]
+    stk = re.search(r'\(stackup\b', outside)
+    if stk:
+        d, k = 0, stk.start()
+        for k in range(stk.start(), len(outside)):
+            if outside[k] == '(':
+                d += 1
+            elif outside[k] == ')':
+                d -= 1
+                if d == 0:
+                    break
+        outside = outside[:stk.start()] + outside[k + 1:]
+    refs = set(re.findall(r'\(layer\s+"([^"]+)"', outside))
+    for grp in re.findall(r'\(layers\s+((?:"[^"]+"\s*)+)\)', outside):
+        refs.update(re.findall(r'"([^"]+)"', grp))
+
+    indent_m = re.search(r'\n([ \t]+)\(\d+\s+"', block)
+    indent = indent_m.group(1) if indent_m else '\t\t'
+
+    additions = []
+    for name in sorted(refs):
+        if name in enabled or '*' in name or '&' in name or name == '':
+            continue  # already enabled, or a wildcard/layer-set token (e.g. *.Cu, F&B.Cu)
+        canon = _canonical_layer(name)
+        if canon is None:
+            if verbose:
+                print(f"  layer enable: skipping {name!r} (no canonical id)")
+            continue
+        lid, ltype = canon
+        if lid in used_ids:
+            if verbose:
+                print(f"  layer enable: skipping {name!r} (id {lid} already in use)")
+            continue
+        used_ids.add(lid)
+        additions.append((lid, name, ltype))
+
+    if not additions:
+        return []
+
+    additions.sort()
+    new_entries = ''.join(f'\n{indent}({lid} "{name}" {ltype})'
+                          for lid, name, ltype in additions)
+    # Insert right after the last existing entry (before the block's closing paren).
+    j = end - 1
+    while j > start and text[j] in ' \t\r\n':
+        j -= 1
+    new_text = text[:j + 1] + new_entries + text[j + 1:]
+    with open(pcb_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    if verbose:
+        print(f"  layer enable: added {len(additions)} used layer(s) to {pcb_path}: "
+              + ", ".join(n for _, n, _ in additions))
+    return [n for _, n, _ in additions]
 
 
 def project_copper_clearance(proj: dict):
@@ -304,10 +438,14 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
     ``.kicad_pro`` -- copying the input board's project if the output is a new
     file, or seeding a minimal complete one if the input has none -- then applies
-    the floors and severity plan. Only edits the ``.kicad_pro`` (never the
-    ``.kicad_pcb``), so the board's KiCad-version format is preserved. Returns the
-    ``.kicad_pro`` path, or None if nothing was done."""
+    the floors and severity plan. Edits the ``.kicad_pro`` (DRC settings); the
+    board's DRC-rule format is preserved. Also adds any layer the board uses but
+    that is missing from its ``(layers)`` table to that table in the
+    ``.kicad_pcb`` (``enable_used_layers``), so KiCad shows it as selectable and
+    stops flagging ``item_on_disabled_layer`` -- a format-preserving text edit.
+    Returns the ``.kicad_pro`` path, or None if nothing was done."""
     import shutil
+    enable_used_layers(output_pcb, verbose=verbose)
     out_pro = find_project(output_pcb)
     if not os.path.isfile(out_pro):
         in_pro = find_project(input_pcb) if input_pcb else None
