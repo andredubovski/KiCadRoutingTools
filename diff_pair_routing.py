@@ -2248,12 +2248,22 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     completely unseen (e.g. a USB-C P connector cutting across the adjacent N pad,
     or grazing the partner's underpad escape via).
 
-    Re-validate the final P/N geometry against every foreign pad AND via (any not
-    on this pair's own nets, which includes the partner net's copper) using the
+    Re-validate the final P/N geometry against every foreign pad, via AND track (any
+    not on this pair's own nets, which includes the partner net's copper) using the
     SAME geometry and tolerance as check_drc, so a graze reported here is one
     check_drc would also flag - not tight-but-legal packing sitting at clearance.
 
-    Returns (kind, obj, segment, overlap_mm) where kind is 'pad' or 'via', or None.
+    The TRACK check (issue #246) matters because the pose router only validates the
+    diff-pair CENTERLINE cell during routing -- the P/N OFFSET tracks are generated
+    geometrically (create_parallel_path_from_float) and the standard connector/setback
+    is centerline-only -- so an offset or a hybrid leg can graze or CROSS an already-
+    committed foreign track unseen (D2's offset across D3's committed leg). A foreign
+    TRACK excludes BOTH pair nets (the pair's own P/N legitimately run at diff_pair_gap,
+    tighter than clearance); the pad/via checks instead exclude only the segment's own
+    net so the PARTNER's pad/via is still caught (#165/#241).
+
+    Returns (kind, obj, segment, overlap_mm) where kind is 'pad', 'via' or 'track',
+    or None.
     """
     from check_drc import check_pad_segment_overlap, check_via_segment_overlap
 
@@ -2266,6 +2276,12 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     clearance = config.clearance
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
     vias = getattr(pcb_data, 'vias', None) or []
+    # Foreign tracks (not on either pair net), bucketed by layer for a cheap prefilter.
+    foreign_tracks_by_layer = {}
+    for o in (getattr(pcb_data, 'segments', None) or []):
+        if o.net_id in own:
+            continue
+        foreign_tracks_by_layer.setdefault(o.layer, []).append(o)
 
     for seg in pair_segs:
         sxmin, sxmax = min(seg.start_x, seg.end_x), max(seg.start_x, seg.end_x)
@@ -2297,6 +2313,21 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
                 via, seg, clearance, _DRC_CLEARANCE_MARGIN)
             if hit:
                 return ('via', via, seg, overlap)
+        # vs foreign tracks on the same layer (issue #246)
+        for o in foreign_tracks_by_layer.get(seg.layer, ()):
+            ow = o.width if getattr(o, 'width', 0) else seg.width
+            need = clearance + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
+            if need <= 0:
+                continue
+            if (max(o.start_x, o.end_x) < sxmin - need or
+                    min(o.start_x, o.end_x) > sxmax + need or
+                    max(o.start_y, o.end_y) < symin - need or
+                    min(o.start_y, o.end_y) > symax + need):
+                continue
+            d = _seg_seg_distance(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                  o.start_x, o.start_y, o.end_x, o.end_y)
+            if d < need:
+                return ('track', o, seg, need - d)
     return None
 
 
@@ -2339,7 +2370,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     Both terminals carry through-vias (or THT pads), so the centerline can start
     and end as close as possible to each terminal on whichever spanned layer is
     open. Each terminal is then attached to its middle near-end with a
-    point-to-point single-ended leg (_route_hybrid_legs), which routes around the
+    point-to-point single-ended leg (_route_hybrid_leg), which routes around the
     partner copper -- that is where polarity is resolved, at the pads. Returns a
     complete (fully-connected) route dict, or None if no clean route was found.
     """
@@ -2360,6 +2391,28 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y = tgt[5], tgt[6], tgt[7], tgt[8]
     csx, csy = (p_src_x + n_src_x) / 2, (p_src_y + n_src_y) / 2
     ctx, cty = (p_tgt_x + n_tgt_x) / 2, (p_tgt_y + n_tgt_y) / 2
+
+    # Terminal ESCAPE directions (issue #244): the pose A* must launch/arrive at each
+    # terminal along the heading the stub/pad actually points, exactly as the standard
+    # route's try_route does (s_theta=dir(src_escape), t_theta=dir(-tgt_escape)).
+    # Feeding the straight src->tgt line instead makes the coupled A* dead-end on a
+    # terminal whose fingers point ACROSS the route (J4's vertical connector pads ->
+    # arriving horizontally burns the full iter cap). Computed once here from terminal
+    # geometry; the dot-guard below applies them only when they point toward the route.
+    nL = len(config.layers)
+
+    def _safe_layer_name(idx):
+        return layer_names[idx] if isinstance(idx, int) and 0 <= idx < nL else layer_names[0]
+    _p_segs_all = [s for s in (getattr(pcb_data, 'segments', None) or []) if s.net_id == p_net_id]
+    _n_segs_all = [s for s in (getattr(pcb_data, 'segments', None) or []) if s.net_id == n_net_id]
+    src_ex, src_ey, _ = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, _p_segs_all, _n_segs_all,
+        p_src_x, p_src_y, n_src_x, n_src_y, _safe_layer_name(src[4]),
+        other_center=(ctx, cty))
+    tgt_ex, tgt_ey, _ = get_pair_end_direction(
+        pcb_data, p_net_id, n_net_id, _p_segs_all, _n_segs_all,
+        p_tgt_x, p_tgt_y, n_tgt_x, n_tgt_y, _safe_layer_name(tgt[4]),
+        other_center=(csx, csy))
 
     # The coupled middle may run on ANY routing layer: each terminal leg is a
     # single-ended A* from the pad's layer to the middle, and it drops a via for
@@ -2395,7 +2448,6 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     # which boxed out neighbours' reroutes (ETH_B/D1 failed only under --layer-costs,
     # which the #243 stress -- run without layer-costs -- never exercised). Without a
     # terminal via, fall back to the congestion-ordered single_order (pre-#243).
-    nL = len(config.layers)
     s_lyr = src[4] if isinstance(src[4], int) and 0 <= src[4] < nL else None
     t_lyr = tgt[4] if isinstance(tgt[4], int) and 0 <= tgt[4] < nL else None
     single_order = sorted(
@@ -2502,6 +2554,38 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 return cx, cy
         return None
 
+    def _theta_options(ex, ey, slx, sly, arrival):
+        """Ordered candidate pose headings (theta_idx) for one coupled-middle end.
+        The best launch/arrival heading depends on local congestion and is hard to
+        know a priori (issue #244), so SCAN rather than pick one: the terminal
+        escape heading first (when it points toward the route), then the straight
+        src->tgt line, then a +-45/+-90 fan around it. ``arrival`` flips the escape
+        for the target end (the path ARRIVES heading -escape, valid when the escape
+        points back toward the source)."""
+        opts = []
+
+        def _add(vx, vy):
+            if abs(vx) < 1e-9 and abs(vy) < 1e-9:
+                return
+            t = direction_to_theta_idx(vx, vy)
+            if t not in opts:
+                opts.append(t)
+        _add(slx, sly)                       # straight line FIRST (historical default)
+        if ex or ey:
+            ehx, ehy = (-ex, -ey) if arrival else (ex, ey)
+            if ehx * slx + ehy * sly > 0:    # escape agrees with the straight line
+                _add(ehx, ehy)
+        # +-45deg fan around the straight line. theta_idx is quantised to 8 dirs (45deg
+        # steps), so +-45 is the only meaningful off-axis launch; +-90 was too divergent
+        # and produced worse middle geometry (finer angles aren't representable).
+        for deg in (45.0, -45.0):
+            r = math.radians(deg)
+            _add(slx * math.cos(r) - sly * math.sin(r),
+                 slx * math.sin(r) + sly * math.cos(r))
+        return opts
+
+    probe_cap = max(int(config.max_probe_iterations), 1)
+
     for a_layer, b_layer in layer_pairs:
         # Couple as close to each terminal as this candidate's launch layer allows.
         _sl = _closest_launch(s_gx0, s_gy0, t_gx0, t_gy0, a_layer)
@@ -2516,7 +2600,9 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             continue
         _dxc, _dyc = ctx - csx, cty - csy
         _Lc = math.hypot(_dxc, _dyc) or 1.0
-        theta = direction_to_theta_idx(_dxc / _Lc, _dyc / _Lc)
+        _slx, _sly = _dxc / _Lc, _dyc / _Lc
+        src_thetas = _theta_options(src_ex, src_ey, _slx, _sly, arrival=False)
+        tgt_thetas = _theta_options(tgt_ex, tgt_ey, _slx, _sly, arrival=True)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         for ox in range(-2, 3):
@@ -2525,9 +2611,41 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                 obstacles.add_allowed_cell(t_gx + ox, t_gy + oy)
         obstacles.add_source_target_cell(s_gx, s_gy, a_layer)
         obstacles.add_source_target_cell(t_gx, t_gy, b_layer)
-        path, iters, _blocked, _gnd = pr.route_pose_with_frontier(
-            obstacles, s_gx, s_gy, a_layer, theta,
-            t_gx, t_gy, b_layer, theta, max_iters, diff_pair_via_spacing=via_spacing_grid)
+        # Middle angle selection (issue #244). The straight src->tgt line is the
+        # HISTORICAL heading -- route it FIRST at the full budget so already-routable
+        # pairs get the exact same middle (no DRC drift). Only if the straight line
+        # finds NO path do we scan the escape heading and a +-45 fan; those are tried
+        # at the cheap probe budget first so a WRONG heading can't burn the full iter
+        # cap (a bad launch dead-ended D1 for 1.6M iters), then the first "promising"
+        # combo (hit the probe cap still searching) is re-run at full budget.
+        straight_t = direction_to_theta_idx(_slx, _sly)
+
+        def _pose(st, tt, budget):
+            return pr.route_pose_with_frontier(
+                obstacles, s_gx, s_gy, a_layer, st, t_gx, t_gy, b_layer, tt,
+                budget, diff_pair_via_spacing=via_spacing_grid)
+        path, iters, _b, _g = _pose(straight_t, straight_t, max_iters)
+        iters = iters or 0
+        if path is None:
+            promising = None
+            for st in src_thetas:
+                for tt in tgt_thetas:
+                    if st == straight_t and tt == straight_t:
+                        continue                 # already tried at full budget
+                    p, it, _b, _g = _pose(st, tt, probe_cap)
+                    iters += it
+                    if p:
+                        path = p
+                        break
+                    if it >= probe_cap and promising is None:
+                        promising = (st, tt)
+                if path:
+                    break
+            if path is None and promising is not None:
+                st, tt = promising
+                p, it, _b, _g = _pose(st, tt, max_iters)
+                iters += it
+                path = p
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         if not path:
@@ -2550,12 +2668,46 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         off_plus = create_parallel_path_from_float(centerline_float, sign=1, spacing_mm=spacing_mm)
         off_minus = create_parallel_path_from_float(centerline_float, sign=-1, spacing_mm=spacing_mm)
 
-        def _d2(a, b):
-            return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-        # cost of P=+1: P-via farther from the +side end than the -side end => cross
-        cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
-                     (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
-        p_sign = 1 if cost_plus <= 1 else -1
+        # Choose which offset track is P by the SIDE the P pad sits on relative to the
+        # local centerline direction at each end -- NOT raw distance to the middle's
+        # offset endpoints. Distance is unreliable when the middle couples far from the
+        # pad (a stepped-back / dense-source launch): the two offset endpoints are only
+        # ~diff-pair-spacing apart, so a pad ~1mm away is nearly equidistant to both and
+        # noise picks the side, putting P on the WRONG side of the middle and forcing
+        # both legs to cross (issue #244, butterstick D1). The side (cross product of
+        # the centerline tangent with pad-minus-endpoint) is sign-stable at any range.
+        def _cross(ax, ay, bx, by):
+            return ax * by - ay * bx
+
+        def _p_on_plus(c_near, c_dir, ppx, ppy, off_pt):
+            # True if the P pad is on the same side of the directed centerline as the
+            # +offset track at this end.
+            dx, dy = c_dir
+            plus_side = _cross(dx, dy, off_pt[0] - c_near[0], off_pt[1] - c_near[1])
+            pad_side = _cross(dx, dy, ppx - c_near[0], ppy - c_near[1])
+            if abs(plus_side) < 1e-9 or abs(pad_side) < 1e-9:
+                return None
+            return (plus_side > 0) == (pad_side > 0)
+        c0 = centerline_float[0]
+        c1 = centerline_float[1] if len(centerline_float) > 1 else centerline_float[-1]
+        cN = centerline_float[-1]
+        cM = centerline_float[-2] if len(centerline_float) > 1 else centerline_float[0]
+        src_plus = _p_on_plus(c0, (c1[0] - c0[0], c1[1] - c0[1]),
+                              p_src_x, p_src_y, off_plus[0])
+        tgt_plus = _p_on_plus(cN, (cN[0] - cM[0], cN[1] - cM[1]),
+                              p_tgt_x, p_tgt_y, off_plus[-1])
+        votes = [v for v in (src_plus, tgt_plus) if v is not None]
+        if votes:
+            # Majority of the two ends; a genuine end-to-end side-swap (one True, one
+            # False) costs one crossing either way -- default to P=+ there.
+            p_sign = 1 if sum(votes) * 2 >= len(votes) else -1
+        else:
+            # Degenerate (both ends co-linear): fall back to the distance heuristic.
+            def _d2(a, b):
+                return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+            cost_plus = ((_d2((p_src_x, p_src_y), off_plus[0]) > _d2((p_src_x, p_src_y), off_minus[0])) +
+                         (_d2((p_tgt_x, p_tgt_y), off_plus[-1]) > _d2((p_tgt_x, p_tgt_y), off_minus[-1])))
+            p_sign = 1 if cost_plus <= 1 else -1
         n_sign = -p_sign
         p_float = off_plus if p_sign == 1 else off_minus
         n_float = off_minus if p_sign == 1 else off_plus
@@ -2570,68 +2722,89 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         if _connector_grazes_foreign_copper(mid_segs, pcb_data, p_net_id, n_net_id, config):
             continue
 
-        # Attach each terminal to its middle near-end with a point-to-point
-        # single-ended leg. The partner net's copper (its middle + already-routed
-        # legs) is an obstacle, so a side-swap leg routes AROUND it -- which is
-        # how polarity gets fixed at the pads, no coupled polarity stage needed.
-        leg_segs, leg_vias, total_iters = [], [], iters
-        ok = True
-        committed_segs, committed_vias = [], []  # partner copper accumulates
+        # Attach each terminal to its middle near-end with point-to-point single-ended
+        # legs. The partner net's copper (its middle + already-committed legs + fanout
+        # stub + pads) is an obstacle, so a side-swap leg routes AROUND it -- polarity
+        # is fixed at the pads. The legs are SINGLE-ENDED, so route them on a single-
+        # ended-clearance map (leg_obstacles) when supplied -- the diff-pair map's
+        # coupled extra clearance over-blocks a leg's escape via (watchy USB_D).
+        #
+        # Try leg-attachment ORDER PLANS in sequence, first that routes all four legs
+        # wins (issue #244). Plan 0 is the historical net-by-net order (P fully, then
+        # N) -- kept FIRST so already-routable pairs attach identically (no DRC drift).
+        # The fallbacks free a convergent leg that the default order boxes out in a
+        # dense terminal field (butterstick D1's FPGA source): routing the OTHER net
+        # first, or both SRC legs before either TGT leg so a leg isn't blocked by its
+        # own pair's far-end leg committed too early.
+        total_iters = iters
         pair_vias = [v for v in (getattr(pcb_data, 'vias', None) or [])
                      if v.net_id in (p_net_id, n_net_id)]
-        # Carry each terminal's own copper layer (src[4]/tgt[4]) so a leg off a
-        # BARE pad starts on the pad's layer, not the coupled middle's. The legs
-        # are SINGLE-ENDED, so route them on a single-ended-clearance map
-        # (leg_obstacles) when one is supplied -- the diff-pair map carries the
-        # coupled extra clearance, which would over-block a leg's escape via and
-        # is wrong for a one-track leg (watchy USB_D).
         leg_obs = leg_obstacles if leg_obstacles is not None else obstacles
         board_segs = getattr(pcb_data, 'segments', None) or []
-        for net_id, mid_float, t_src, t_tgt in (
-                (p_net_id, p_float, (p_src_x, p_src_y, src[4]), (p_tgt_x, p_tgt_y, tgt[4])),
-                (n_net_id, n_float, (n_src_x, n_src_y, src[4]), (n_tgt_x, n_tgt_y, tgt[4]))):
-            # The other net's middle + terminal vias (and, this round, the first
-            # net's legs/vias) must block, so a side-swap leg routes around them.
-            # The partner's ORIGINAL fanout stub also blocks: the diff-pair map
-            # excludes BOTH pair nets, so the partner stub isn't an obstacle there
-            # -- re-add it here or a leg vias straight into it (watchy USB_D- via
-            # grazing the USB_D+ stub).
-            partner_net = n_net_id if net_id == p_net_id else p_net_id
-            partner_stub = [s for s in board_segs if s.net_id == partner_net]
-            # The partner net's pads are excluded from the diff-pair map too. Re-add
-            # them as TRACK obstacles (capsule segments) so the leg routes AROUND the
-            # partner's terminal pad instead of grazing it (keks /CK_N leg under the
-            # /CK_P pad R41.2), and ALSO as a via keep-out below (issue #241) so its
-            # transition via doesn't land on one.
-            partner_pads = (getattr(pcb_data, 'pads_by_net', None) or {}).get(partner_net, [])
-            partner_pad_segs = [seg for pad in partner_pads
-                                for seg in _pad_obstacle_segments(pad, layer_names)]
-            partner_s = ([s for s in mid_segs if s.net_id != net_id] + committed_segs
-                         + partner_stub + partner_pad_segs)
-            # partner_v must include the partner's NEW coupled-middle vias (p_vias /
-            # n_vias just built), not only existing board vias + committed leg vias --
-            # else the leg grazes the partner's fresh middle via (keks /D0_N seg vs
-            # the /D0_P via, 0.06mm).
-            partner_mid_vias = n_vias if net_id == p_net_id else p_vias
-            partner_v = ([v for v in pair_vias if v.net_id != net_id]
-                         + committed_vias + partner_mid_vias)
-            ls, lv, it = _route_hybrid_legs(
-                pcb_data, net_id, config, leg_obs, layer_names, coord,
-                mid_float, t_src, t_tgt, partner_s, partner_v, pair_vias,
-                partner_pads=partner_pads)
-            if ls is None:
-                ok = False
+        pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+        mid_segs_by_net = {p_net_id: p_segs, n_net_id: n_segs}
+        mid_vias_by_net = {p_net_id: p_vias, n_net_id: n_vias}
+        term_by = {
+            (p_net_id, 'src'): ((p_src_x, p_src_y, src[4]), p_float[0]),
+            (p_net_id, 'tgt'): ((p_tgt_x, p_tgt_y, tgt[4]), p_float[-1]),
+            (n_net_id, 'src'): ((n_src_x, n_src_y, src[4]), n_float[0]),
+            (n_net_id, 'tgt'): ((n_tgt_x, n_tgt_y, tgt[4]), n_float[-1]),
+        }
+        # Mutable per-net committed leg copper, reset per plan; a leg sees the PARTNER's
+        # committed legs as obstacles, never its own.
+        leg_state = {'s': {p_net_id: [], n_net_id: []}, 'v': {p_net_id: [], n_net_id: []}}
+
+        def _leg_partner_copper(net_id):
+            partner = n_net_id if net_id == p_net_id else p_net_id
+            ppads = pads_by_net.get(partner, [])
+            pseg = (mid_segs_by_net[partner] + leg_state['s'][partner]
+                    + [s for s in board_segs if s.net_id == partner]
+                    + [seg for pad in ppads for seg in _pad_obstacle_segments(pad, layer_names)])
+            pvia = ([v for v in pair_vias if v.net_id == partner]
+                    + mid_vias_by_net[partner] + leg_state['v'][partner])
+            return pseg, pvia, ppads
+        P, N = p_net_id, n_net_id
+        leg_plans = [
+            [(P, 'src'), (P, 'tgt'), (N, 'src'), (N, 'tgt')],   # 0: historical default
+            [(N, 'src'), (N, 'tgt'), (P, 'src'), (P, 'tgt')],   # 1: other net first
+            [(P, 'src'), (N, 'src'), (P, 'tgt'), (N, 'tgt')],   # 2: per-side (both src first)
+            [(N, 'src'), (P, 'src'), (N, 'tgt'), (P, 'tgt')],   # 3: per-side, swapped
+        ]
+        ok = False
+        leg_segs, leg_vias = [], []
+        for plan in leg_plans:
+            leg_state['s'] = {p_net_id: [], n_net_id: []}
+            leg_state['v'] = {p_net_id: [], n_net_id: []}
+            plan_iters = 0
+            good = True
+            for net_id, _side in plan:
+                term, mid_pt = term_by[(net_id, _side)]
+                pseg, pvia, ppads = _leg_partner_copper(net_id)
+                ls, lv, it = _route_hybrid_leg(
+                    pcb_data, net_id, config, leg_obs, layer_names, coord,
+                    mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads)
+                plan_iters += it
+                if ls is None:
+                    good = False
+                    break
+                leg_state['s'][net_id] += ls
+                leg_state['v'][net_id] += lv
+            if good:
+                ok = True
+                total_iters += plan_iters
+                leg_segs = leg_state['s'][p_net_id] + leg_state['s'][n_net_id]
+                leg_vias = leg_state['v'][p_net_id] + leg_state['v'][n_net_id]
                 break
-            leg_segs += ls
-            leg_vias += lv
-            committed_segs += ls
-            committed_vias += lv
-            total_iters += it
         if not ok:
             continue
         all_segs = mid_segs + leg_segs
         all_vias = p_vias + n_vias + leg_vias
         if _pn_tracks_cross_full(all_segs, pcb_data, p_net_id, n_net_id):
+            continue
+        # Airtight foreign-copper gate (#246): the assembled route (coupled-middle
+        # offsets + legs) must not graze/cross a foreign pad, via OR track, or the
+        # hybrid emits a DRC short unseen (D3_N offset x D2_N). Reject -> try next layer.
+        if _connector_grazes_foreign_copper(all_segs, pcb_data, p_net_id, n_net_id, config):
             continue
         # Connectivity gate: the hybrid validates crossings/grazes but never that
         # the assembled route actually JOINS terminal-to-terminal -- a leg can fail
@@ -2755,12 +2928,18 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
     return leg_segs
 
 
-def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
-                       mid_float, term_src, term_tgt, partner_segs, partner_vias,
-                       pair_vias, partner_pads=None):
-    """Point-to-point single-ended legs joining each terminal to the coupled
-    middle's near end, routing around partner copper. Returns (segs, vias, iters)
-    or (None, None, 0) if either leg can't be routed.
+def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
+                      mid_pt, term, partner_segs, partner_vias, pair_vias,
+                      partner_pads=None):
+    """Route ONE point-to-point single-ended leg joining a terminal to the coupled
+    middle's near end (term -> mid_pt), routing around partner copper. Returns
+    (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
+    middle end (nothing to route), or (None, None, 0) if the leg can't be routed.
+
+    Routing one leg at a time (vs both ends of a net at once) lets the caller
+    interleave the two nets' legs PER SIDE and retry the order, so a first leg
+    can't gratuitously box out its partner's convergent leg in a dense terminal
+    field (issue #244).
 
     partner_pads: the OTHER pair-net's pads. The diff-pair obstacle map excludes
     both pair nets, so without re-adding them as a VIA keep-out the leg would drop
@@ -2788,73 +2967,61 @@ def _route_hybrid_legs(pcb_data, net_id, config, obstacles, layer_names, coord,
         if _v.net_id == net_id:
             reuse_holes.add(coord.to_grid(_v.x, _v.y))
 
-    def _term_anchor(term, mid_layer):
-        """The leg endpoint: the terminal's own-net through-via (its access to
-        the middle layer) if one sits at the terminal, else the pad itself.
-        term is (x, y, pad_layer_idx). Returns (x, y, leg_layer, on_via)."""
-        best = None
-        for v in pair_vias:
-            if v.net_id != net_id:
-                continue
-            d = math.hypot(v.x - term[0], v.y - term[1])
-            if d <= own_tol and (best is None or d < best[0]):
-                best = (d, v.x, v.y, mid_layer)  # via spans layers -> use mid layer
-        if best:
-            return best[1], best[2], best[3], True
-        # Bare pad: the leg must start on the pad's OWN copper layer (not the
-        # middle's) or it lands where the pad has no copper and never connects.
-        return term[0], term[1], term[2], False
+    # The leg endpoint: the terminal's own-net through-via (its access to the middle
+    # layer) if one sits at the terminal, else the pad itself.
+    ax, ay, alayer, on_via = term[0], term[1], term[2], False
+    best = None
+    for v in pair_vias:
+        if v.net_id != net_id:
+            continue
+        d = math.hypot(v.x - term[0], v.y - term[1])
+        if d <= own_tol and (best is None or d < best[0]):
+            best = (d, v.x, v.y, mid_pt[2])
+    if best:
+        ax, ay, alayer, on_via = best[1], best[2], best[3], True
 
     add_segments_list_as_obstacles(obstacles, partner_segs, config)
     add_vias_list_as_obstacles(obstacles, partner_vias, config)
     add_pads_via_keepout(obstacles, partner_pads, config)
     try:
-        segs, vias, iters = [], [], 0
-        for term, mid_pt in ((term_src, mid_float[0]), (term_tgt, mid_float[-1])):
-            ax, ay, alayer, on_via = _term_anchor(term, mid_pt[2])
-            tgx, tgy = coord.to_grid(ax, ay)
-            mgx, mgy = coord.to_grid(mid_pt[0], mid_pt[1])
-            if (tgx, tgy) == (mgx, mgy) and (on_via or alayer == mid_pt[2]):
-                # Truly coincident: the terminal already sits on the middle's end
-                # cell on the SAME layer (or carries a through-via that spans all
-                # layers). If the cell coincides but the LAYERS differ (a bare F.Cu
-                # escape end vs an inner-layer middle), do NOT skip -- the leg must
-                # still drop the F.Cu->inner transition via, or the terminal is left
-                # orphaned on its own layer (RX3_N: F.Cu escape vs In2 middle at one
-                # cell -> the pair reported "routed" with N disconnected, #215).
-                continue
-            # On a through-via the leg may leave on any layer; off a bare pad it
-            # must start on the pad's own layer.
-            sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
-                       else [(tgx, tgy, alayer)])
-            targets = [(mgx, mgy, mid_pt[2])]
-            obstacles.clear_allowed_cells()
-            obstacles.clear_source_target_cells()
-            for ox in range(-2, 3):
-                for oy in range(-2, 3):
-                    obstacles.add_allowed_cell(tgx + ox, tgy + oy)
-                    obstacles.add_allowed_cell(mgx + ox, mgy + oy)
-            # Mark the endpoint cells as source/target so the A* can start/end ON
-            # them even when foreign clearance blocks them (the F.Cu pad sits in a
-            # neighbour stub's keep-out) -- same as the single-ended router does.
-            for sgx, sgy, slayer in sources:
-                obstacles.add_source_target_cell(sgx, sgy, slayer)
-            obstacles.add_source_target_cell(mgx, mgy, mid_pt[2])
-            path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
-            obstacles.clear_allowed_cells()
-            obstacles.clear_source_target_cells()
-            iters += it
-            if path is None:
-                return None, None, 0
-            ps, pv = _path_to_segments_vias(
-                path, coord, layer_names, net_id, config,
-                (ax, ay, layer_names[path[0][2]]),
-                (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
-                through_hole_positions=reuse_holes, pcb_data=pcb_data)
-            _collapse_leg_attach_join(ps, (mid_pt[0], mid_pt[1]), config, pcb_data, net_id, partner_segs)
-            segs += ps
-            vias += pv
-        return segs, vias, iters
+        tgx, tgy = coord.to_grid(ax, ay)
+        mgx, mgy = coord.to_grid(mid_pt[0], mid_pt[1])
+        if (tgx, tgy) == (mgx, mgy) and (on_via or alayer == mid_pt[2]):
+            # Truly coincident: the terminal already sits on the middle's end cell on
+            # the SAME layer (or carries a through-via that spans all layers). If the
+            # cell coincides but the LAYERS differ (a bare F.Cu escape end vs an
+            # inner-layer middle), do NOT skip -- the leg must still drop the
+            # F.Cu->inner transition via, or the terminal is left orphaned (#215).
+            return [], [], 0
+        # On a through-via the leg may leave on any layer; off a bare pad it must
+        # start on the pad's own layer.
+        sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
+                   else [(tgx, tgy, alayer)])
+        targets = [(mgx, mgy, mid_pt[2])]
+        obstacles.clear_allowed_cells()
+        obstacles.clear_source_target_cells()
+        # Mark ONLY the exact endpoint cells as source/target so the A* can start/end
+        # ON them even when foreign clearance blocks them (the terminal pad / coupled-
+        # middle end sits in a neighbour's keep-out). Issue #244: do NOT add a +-2
+        # allowed-cell HALO -- that exempted a whole 5x5 block near each junction from
+        # clearance, letting a leg graze/cross a neighbour pair's leg there (butterstick
+        # D3_N x D2_N on In2.Cu). Without the halo the leg must honour every clearance,
+        # so it can't create a DRC violation; it just declines to route if truly boxed.
+        for sgx, sgy, slayer in sources:
+            obstacles.add_source_target_cell(sgx, sgy, slayer)
+        obstacles.add_source_target_cell(mgx, mgy, mid_pt[2])
+        path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
+        obstacles.clear_allowed_cells()
+        obstacles.clear_source_target_cells()
+        if path is None:
+            return None, None, 0
+        ps, pv = _path_to_segments_vias(
+            path, coord, layer_names, net_id, config,
+            (ax, ay, layer_names[path[0][2]]),
+            (mid_pt[0], mid_pt[1], layer_names[mid_pt[2]]),
+            through_hole_positions=reuse_holes, pcb_data=pcb_data)
+        _collapse_leg_attach_join(ps, (mid_pt[0], mid_pt[1]), config, pcb_data, net_id, partner_segs)
+        return ps, pv, it
     finally:
         remove_segments_list_from_obstacles(obstacles, partner_segs, config)
         remove_vias_list_from_obstacles(obstacles, partner_vias, config)
@@ -3593,6 +3760,7 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         # terminals (e.g. USB-C rows) that the detector missed. (Skip for the
         # no-swap probe: its caller checks the crossing and falls back to a swap.)
         swap_end = 'source' if routing_backwards else 'target'
+        swap_result = None
         if (not force_swap and not force_no_swap and config.fix_polarity
                 and swap_end in swap_allowed_ends):
             print("  Retrying with a polarity pad swap to untangle the crossing...")
@@ -3616,11 +3784,20 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             print("  Pad-swap retry did not produce a clean route either")
         print("  (terminals likely have opposite P/N pad order; needs a polarity "
               "swap, a layer change, or opposite-side joins)")
-        return {
+        out = {
             'failed': True,
             'iterations': result.get('iterations', 0),
             'pn_crossing': True,
         }
+        # If the swap retry was itself rejected for grazing a committed foreign net,
+        # propagate that so the caller can rip the grazed net and route this pair
+        # first, then re-route the ripped net later (#246) -- the crossing is only
+        # resolvable once the neighbour is out of the way.
+        if (swap_result and swap_result.get('connector_graze')
+                and swap_result.get('graze_net_id') is not None):
+            out['connector_graze'] = True
+            out['graze_net_id'] = swap_result['graze_net_id']
+        return out
 
     # Issue #165: the connector/setback segments are clearance-checked during
     # routing against an obstacle map that excludes BOTH halves of the pair, so a
@@ -3634,6 +3811,10 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
         kind, obj, seg, overlap = graze
         if kind == 'pad':
             what = f"pad {obj.component_ref}.{obj.pad_number} (net {obj.net_name})"
+        elif kind == 'track':
+            net = pcb_data.nets.get(obj.net_id)
+            what = (f"track ({obj.start_x:.2f},{obj.start_y:.2f})-({obj.end_x:.2f},"
+                    f"{obj.end_y:.2f}) (net {net.name if net else obj.net_id})")
         else:
             net = pcb_data.nets.get(obj.net_id)
             what = f"via at ({obj.x:.2f},{obj.y:.2f}) (net {net.name if net else obj.net_id})"
@@ -3646,6 +3827,11 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
             'failed': True,
             'iterations': result.get('iterations', 0),
             'connector_graze': True,
+            # The foreign net this route would graze/cross. The caller can rip it as
+            # a blocker and re-route this pair clean, then re-route the ripped net
+            # later (#246): there are no blocked cells to analyse here -- the route
+            # SUCCEEDED but was rejected post-hoc -- so name the blocker explicitly.
+            'graze_net_id': getattr(obj, 'net_id', None),
         }
 
     return result

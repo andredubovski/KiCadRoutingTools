@@ -16,7 +16,8 @@ from connectivity import get_net_endpoints, calculate_stub_length, get_multipoin
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
-from diff_pair_routing import route_diff_pair_with_obstacles, get_diff_pair_endpoints
+from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
+                               _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
@@ -867,6 +868,54 @@ def run_reroute_loop(
                             invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
                             invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
                             reroute_succeeded = True
+
+                # Last-resort hybrid (issue #244): a rip-reroute casualty whose lane
+                # is gone and whose standard probe + rip-up both dead-ended can still
+                # have a coupled-middle + single-ended-leg escape (often to an inner
+                # layer). The MAIN routing loop already tries this on a first-pass
+                # failure (diff_pair_loop.py); the reroute path did not, so a pair
+                # that only fails AFTER being ripped (butterstick /GIGABIT-0/ETH_B,
+                # the /SYZYGY1.D1 class) failed honestly instead of taking the same
+                # fallback. Rebuild the obstacle maps fresh -- rip-up/restore mutated
+                # pcb_data since the reroute's were built. Returns None when it can't
+                # lay a clean route, so this can't make things worse.
+                if not reroute_succeeded and config.diff_pair_hybrid_escape:
+                    hyb_obstacles, _ = build_diff_pair_obstacles(
+                        diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id, gnd_net_id,
+                        track_proximity_cache, layer_map, diff_pair_extra_clearance,
+                        add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                        ripped_route_layer_costs=state.ripped_route_layer_costs,
+                        ripped_route_via_positions=state.ripped_route_via_positions)
+                    # The hybrid's terminal legs are single-ended, so give them a
+                    # single-ended-clearance map (extra_clearance=0); the diff-pair
+                    # map over-blocks a leg's escape via (watchy USB_D).
+                    leg_obstacles, _ = build_diff_pair_obstacles(
+                        diff_pair_base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                        all_unrouted_net_ids, ripped_pair.p_net_id, ripped_pair.n_net_id, gnd_net_id,
+                        track_proximity_cache, layer_map, 0.0,
+                        add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair,
+                        ripped_route_layer_costs=state.ripped_route_layer_costs,
+                        ripped_route_via_positions=state.ripped_route_via_positions)
+                    hyb = _route_direct_coupled_middle(
+                        pcb_data, ripped_pair, config, hyb_obstacles, config.layers,
+                        leg_obstacles=leg_obstacles)
+                    if hyb and not hyb.get('failed'):
+                        print(f"  {GREEN}HYBRID ESCAPE (reroute): direct coupled middle "
+                              f"+ point-to-point terminal legs{RESET}")
+                        results.append(hyb)
+                        successful += 1
+                        total_iterations += hyb.get('iterations', 0)
+                        rerouted_pairs.add(ripped_pair_name)
+                        record_diff_pair_success(
+                            pcb_data, hyb, ripped_pair, ripped_pair_name, config,
+                            remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
+                            diff_pair_by_net_id, track_proximity_cache, layer_map)
+                        queued_net_ids.discard(ripped_pair.p_net_id)
+                        queued_net_ids.discard(ripped_pair.n_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
+                        invalidate_obstacle_cache(obstacle_cache, ripped_pair.n_net_id)
+                        reroute_succeeded = True
 
                 if not reroute_succeeded:
                     if not ripped_items:
