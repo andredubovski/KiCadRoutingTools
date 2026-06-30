@@ -958,11 +958,22 @@ def build_half_edge_route(
         channels_above = [c for c in h_channels if c.position < inner_y]
         channels_below = [c for c in h_channels if c.position > inner_y]
 
-        # Choose channel direction based on distance to BGA edge
+        # Converge on the side of the edge pad that the inner pad already sits
+        # on, so the inner pad's escape doesn't cross the edge pad's straight
+        # track (#242). Pads sharing the row carry no crossing risk, so fall
+        # back to the nearest-BGA-edge heuristic there.
         dist_to_top = inner_y - grid.min_y
         dist_to_bottom = grid.max_y - inner_y
+        inner_above_edge = inner_y < edge_y
+        inner_below_edge = inner_y > edge_y
 
-        if dist_to_top <= dist_to_bottom and channels_above:
+        if inner_above_edge and channels_above:
+            inner_channel = max(channels_above, key=lambda c: c.position)
+            channel_above = True
+        elif inner_below_edge and channels_below:
+            inner_channel = min(channels_below, key=lambda c: c.position)
+            channel_above = False
+        elif dist_to_top <= dist_to_bottom and channels_above:
             inner_channel = max(channels_above, key=lambda c: c.position)
             channel_above = True
         elif channels_below:
@@ -1040,10 +1051,21 @@ def build_half_edge_route(
         channels_left = [c for c in v_channels if c.position < inner_x]
         channels_right = [c for c in v_channels if c.position > inner_x]
 
+        # Converge on the side of the edge pad that the inner pad already sits
+        # on (#242); fall back to the nearest-BGA-edge heuristic when the pads
+        # share a column or no channel exists on the preferred side.
         dist_to_left = inner_x - grid.min_x
         dist_to_right = grid.max_x - inner_x
+        inner_left_of_edge = inner_x < edge_x
+        inner_right_of_edge = inner_x > edge_x
 
-        if dist_to_left <= dist_to_right and channels_left:
+        if inner_left_of_edge and channels_left:
+            inner_channel = max(channels_left, key=lambda c: c.position)
+            channel_left = True
+        elif inner_right_of_edge and channels_right:
+            inner_channel = min(channels_right, key=lambda c: c.position)
+            channel_left = False
+        elif dist_to_left <= dist_to_right and channels_left:
             inner_channel = max(channels_left, key=lambda c: c.position)
             channel_left = True
         elif channels_right:
