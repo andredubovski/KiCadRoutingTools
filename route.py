@@ -886,9 +886,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # when the grazing segment is removed gets collapsed (the whole appendage goes,
     # not just the one segment). Connectivity-gated, so a load-bearing graze stays.
     _gz_segs, _gz_nets, graze_input_segments = prune_grazing_segments(
-        results, pcb_data, sweep_scope_ids, clearance=config.clearance)
+        results, pcb_data, sweep_scope_ids, clearance=config.clearance,
+        check_foreign_segments=True)
     if _gz_segs:
-        print(f"Graze prune: removed {_gz_segs} foreign-pad-grazing segment(s) across {_gz_nets} net(s)")
+        print(f"Graze prune: removed {_gz_segs} grazing segment(s) across {_gz_nets} net(s)")
 
     # For a grazing segment that is LOAD-BEARING (removal would disconnect the net),
     # re-bend its octolinear jog around the pad instead (#224): the apex poking at the
