@@ -11,8 +11,10 @@ The fix exploits a fact the channel model ignores: SMD pads block only F.Cu, so
 inner-layer copper can run STRAIGHT UNDER the pad field. Each signal ball drops
 a via in its own pad and escapes on an inner layer, mostly as a straight radial
 run beneath the pads, jogging into a between-ball channel only where a via or an
-already-placed track is in the way. Power/plane balls are NOT fanned - they tap
-their plane through a via (an obstacle here, not an escape). Routing the deepest
+already-placed track is in the way. Plane balls (nets the caller excluded from
+the fanout) are NOT fanned - they tap their plane through a via (an obstacle here,
+not an escape); dense power rails the caller still wants fanned ARE escaped like
+any other signal (issue #218). Routing the deepest
 balls first (inside-out) lets the interior claim the scarce central space before
 the outer balls, which have the open rim, consume it.
 
@@ -161,9 +163,11 @@ def generate_underpad_escape(footprint: Footprint,
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
-    Returns (tracks, vias_to_add, failed_net_names). Power/plane balls (>=
-    plane_min_pads in the footprint) are skipped - they tap their plane and act
-    only as via obstacles.
+    Returns (tracks, vias_to_add, failed_net_names). Plane balls - high-pin-count
+    nets the caller excluded from the fanout (or, if no net filter is given, any
+    net with >= plane_min_pads pads) - are skipped: they tap their plane and act
+    only as via obstacles. Dense power rails that pass the net filter are fanned
+    like any signal, so their inner-core balls are not left unescaped (issue #218).
 
     Differential pairs (issue #182): when `diff_pairs` is given (a dict
     base_name -> DiffPairPads, e.g. from find_differential_pairs), each pair
@@ -187,7 +191,18 @@ def generate_underpad_escape(footprint: Footprint,
                 board_net_counts[p.net_id] += 1
 
     def is_plane(p):
-        return fp_net_counts[p.net_name] >= plane_min_pads
+        # A high-pin-count net is only treated as a plane (skip its fanout, keep
+        # its via as an all-layer obstacle) when the caller ALSO excluded it from
+        # the fanout - that exclusion (e.g. --nets '!GND' '!+3V3') is what marks a
+        # net as a real plane at fanout time, before any zone exists. A dense power
+        # rail the caller still wants fanned (e.g. +1V0/+1V8) must have its
+        # inner-core balls escaped, not silently skipped as a phantom plane
+        # (issue #218). With no net filter, fall back to the pad-count heuristic.
+        if fp_net_counts[p.net_name] < plane_min_pads:
+            return False
+        if net_filter_fn is None:
+            return True
+        return not net_filter_fn(p.net_name)
 
     def is_nc(p):
         return board_net_counts[p.net_id] < 2
