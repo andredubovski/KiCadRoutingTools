@@ -681,7 +681,7 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
 
 
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
-                      foreign, clearance: float):
+                      fgrid, fcell: float, fmax_rad: float, clearance: float):
     """Reduce one net's routed copper to a spanning tree (forest if split).
 
     Builds a spanning tree by union-find over the segments, so every segment that
@@ -700,14 +700,25 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     tol = 0.02  # endpoint coincidence tolerance (mm), matching check_connected
 
     def grazes(s):
+        # Query only the foreign copper whose CENTRE could lie within
+        # (rad + hw + clearance) of the segment; fmax_rad bounds the unknown per-item
+        # rad so the exact circle test below still sees every real graze. Formerly an
+        # O(all pads+vias) scan per segment -- the cycle prune's dominant cost.
         hw = s.width / 2.0
-        for cx, cy, rad, n, layers in foreign:
-            if n == net_id:
-                continue
-            if layers is not None and s.layer not in layers:
-                continue
-            if _pt_seg_dist(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y) < rad + hw + clearance:
-                return True
+        margin = fmax_rad + hw + clearance
+        lo_x = int((min(s.start_x, s.end_x) - margin) // fcell)
+        hi_x = int((max(s.start_x, s.end_x) + margin) // fcell)
+        lo_y = int((min(s.start_y, s.end_y) - margin) // fcell)
+        hi_y = int((max(s.start_y, s.end_y) + margin) // fcell)
+        for gx in range(lo_x, hi_x + 1):
+            for gy in range(lo_y, hi_y + 1):
+                for cx, cy, rad, n, layers in fgrid.get((gx, gy), ()):
+                    if n == net_id:
+                        continue
+                    if layers is not None and s.layer not in layers:
+                        continue
+                    if _pt_seg_dist(cx, cy, s.start_x, s.start_y, s.end_x, s.end_y) < rad + hw + clearance:
+                        return True
         return False
 
     # --- Phase 1: cluster segment endpoints into NODES (real connectivity) ---
@@ -910,6 +921,14 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     for v in pcb_data.vias:
         foreign.append((v.x, v.y, v.size / 2.0, v.net_id, None))
 
+    # Spatial index over foreign copper (bucketed by centre cell) so the per-segment
+    # grazing-order test in _prune_net_cycles is local, not O(all pads+vias).
+    _FCELL = 1.0
+    fmax_rad = max((it[2] for it in foreign), default=0.0)
+    fgrid = defaultdict(list)
+    for it in foreign:
+        fgrid[(int(it[0] // _FCELL), int(it[1] // _FCELL))].append(it)
+
     zoned_nets = {z.net_id for z in (getattr(pcb_data, 'zones', []) or [])}
     segs_by_net = defaultdict(list)
     for s in pcb_data.segments:
@@ -930,7 +949,7 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
-                                          net_pads, foreign, clearance)
+                                          net_pads, fgrid, _FCELL, fmax_rad, clearance)
         if not removed:
             continue
         # Safety: the cycle model uses tolerance clustering which can imperfectly
