@@ -2842,7 +2842,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                     pseg, pvia, ppads = _leg_partner_copper(net_id)
                     ls, lv, it = _route_hybrid_leg(
                         pcb_data, net_id, config, leg_obs, layer_names, coord,
-                        mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads)
+                        mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads,
+                        mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id])
                     plan_iters += it
                     if ls is None:
                         good = False
@@ -3039,11 +3040,19 @@ def _collapse_leg_attach_join(leg_segs, attach_xy, config, pcb_data, net_id, par
 
 def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
                       mid_pt, term, partner_segs, partner_vias, pair_vias,
-                      partner_pads=None):
+                      partner_pads=None, mid_vias=None):
     """Route ONE point-to-point single-ended leg joining a terminal to the coupled
     middle's near end (term -> mid_pt), routing around partner copper. Returns
     (segs, vias, iters), ([], [], 0) when the terminal already coincides with the
     middle end (nothing to route), or (None, None, 0) if the leg can't be routed.
+
+    mid_vias: this net's OWN freshly-placed vias (its coupled-middle vias plus any
+    already-committed sibling legs). They are not in pcb_data yet, so without them
+    the leg is blind to the middle's near-end via and drops its own transition via
+    right beside it -- a same-net hole-to-hole bust (schoko /CK_N, 0.3mm apart).
+    They are registered as reuse holes, and when the middle near-end carries a via
+    spanning a layer range the leg may ARRIVE on any layer in that span and reuse
+    the via for its layer change instead of stacking a second, too-close one.
 
     Routing one leg at a time (vs both ends of a net at once) lets the caller
     interleave the two nets' legs PER SIDE and retry the order, so a first leg
@@ -3076,6 +3085,22 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         if _v.net_id == net_id:
             reuse_holes.add(coord.to_grid(_v.x, _v.y))
 
+    # Register the coupled middle's OWN (this-net) vias as reuse holes, and if the
+    # near-end via spans a layer range, let the leg arrive on any layer in that span
+    # (see the mid_vias note in the docstring). This kills the redundant transition
+    # via that otherwise lands beside the middle via a hole-to-hole bust.
+    mid_vias = mid_vias or []
+    mid_target_layers = None
+    for _v in mid_vias:
+        if _v.net_id != net_id:
+            continue
+        reuse_holes.add(coord.to_grid(_v.x, _v.y))
+        if math.hypot(_v.x - mid_pt[0], _v.y - mid_pt[1]) <= own_tol:
+            _sp = [layer_names.index(l) for l in _v.layers if l in layer_names]
+            if len(_sp) >= 2 and (max(_sp) - min(_sp)) >= 1:
+                _lo, _hi = min(_sp), max(_sp)
+                mid_target_layers = [l for l in range(nlayers) if _lo <= l <= _hi]
+
     # The leg endpoint: the terminal's own-net through-via (its access to the middle
     # layer) if one sits at the terminal, else the pad itself.
     ax, ay, alayer, on_via = term[0], term[1], term[2], False
@@ -3106,7 +3131,8 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         # start on the pad's own layer.
         sources = ([(tgx, tgy, l) for l in range(nlayers)] if on_via
                    else [(tgx, tgy, alayer)])
-        targets = [(mgx, mgy, mid_pt[2])]
+        targets = ([(mgx, mgy, l) for l in mid_target_layers] if mid_target_layers
+                   else [(mgx, mgy, mid_pt[2])])
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
         # Mark ONLY the exact endpoint cells as source/target so the A* can start/end
@@ -3118,7 +3144,8 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         # so it can't create a DRC violation; it just declines to route if truly boxed.
         for sgx, sgy, slayer in sources:
             obstacles.add_source_target_cell(sgx, sgy, slayer)
-        obstacles.add_source_target_cell(mgx, mgy, mid_pt[2])
+        for tgt_l in (mid_target_layers or [mid_pt[2]]):
+            obstacles.add_source_target_cell(mgx, mgy, tgt_l)
         path, it = _route_leg(router, obstacles, config, sources, targets, 0, pcb_data, net_id)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
