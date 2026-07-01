@@ -17,7 +17,45 @@ python build_router.py
 
 This builds the Rust module, copies the library to the correct location, and verifies the version. Do not run `cargo build` directly.
 
+**Prefer Python-only solutions; avoid changing the Rust router (`rust_router/`)
+unless clearly necessary and agreed.** A Rust change forces a crate version bump,
+a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-platform
+binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
+change, surface that cost early and check for a Python-only approach first.
+
 **Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+
+## Testing & Verification
+
+Validate routed boards against the *real* spec, with the right checker — most
+"mystery" bugs here turn out to be grading mistakes, not routing bugs:
+
+- **Connectivity is orthogonal to DRC.** A DRC-clean board can be fully
+  disconnected (isolated copper has no clearance conflicts). Always run
+  `check_connected.py` in addition to `check_drc.py` before calling a route clean.
+- **Grade DRC at the clearance the board was actually routed to** — the route
+  step's `--clearance` (recorded in `redo_commands.sh`), or the board's
+  `.kicad_pro`/netclass — never a guessed/round value. Grading stricter than the
+  route used manufactures phantom sub-clearance grazes. `check_drc.py
+  --clearance-margin 0.1` filters ~grid-quantization noise (~8 µm artifacts).
+- **Routing is deterministic, but outputs carry per-run random UUIDs.** Never hash
+  or whole-file-`diff` `.kicad_pcb` outputs to judge determinism — compare
+  `check_drc` / `check_connected` counts (stable run-to-run) instead.
+- **`route.py` reads/writes a sibling `<output>.kicad_pro` DRC floor.** Re-running
+  to the same output path reads it back and silently changes the routing (looks
+  like non-determinism; it isn't). For clean A/B comparisons, route to a FRESH
+  output path each run (or `rm` the `.kicad_pro` first).
+- **Routers can report false success.** A router's own "routed" tally may come from
+  a local/heuristic proxy while pads stay disconnected; re-verify with the
+  authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+
+## Stress testing & A/B replay
+
+Every recorded stress run leaves a `redo_commands.sh` manifest that replays the
+full chain with **no LLM**. To regression-test or A/B an engine change across the
+board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
+connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
+See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
 
 ## Keep CLI and GUI routing in sync
 

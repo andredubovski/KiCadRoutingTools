@@ -382,3 +382,43 @@ board's count at the design clearance), connectivity verdict, the
 compare-to-original highlights (vias/length/width/layer-balance vs original),
 timing (agent_wall_clock_s + tool_exec_s), plus the `issues` and `suggestions`
 lists verbatim. No file dumps.
+
+## Replaying & A/B (no LLM)
+
+Each board's `runs_set*/<board>/redo_commands.sh` records every board-mutating
+command (fully-quoted argv + `# cwd=`), so a run replays deterministically with no
+LLM. Manifests reference tools by **absolute repo path**, so a replay always runs
+whatever is checked out — this is how you A/B an engine change. DRC is always
+graded at each board's own routed `--clearance` (parsed from the manifest); never
+grade stricter or you manufacture phantom grazes.
+
+- **One board:** `python3 tests/stress/redo_stress_test.py
+  runs_set1/<board>/redo_commands.sh --workdir <fresh-dir> --continue-on-error`.
+  `--workdir` runs every command in the fresh dir (relative outputs chain there;
+  the absolute source board still resolves) — prefer it over bare `--remap` so a
+  recorded `# cwd=` can't overwrite the original run. `--skip-checks` drops the
+  `check_*` steps (grade the final yourself); `--verbatim` replays superseded
+  retries too (default prunes to the file-dependency chain).
+
+- **Whole set, graded (full chain):** `python3 tests/stress/ab_replay_grade.py
+  --set ~/Documents/kicad_stress_test/runs_set1 --out <wavedir> --label new
+  [--jobs 4]`. Replays every board in parallel, grades each final for DRC + conn,
+  writes `summary.json` (a JSON list of per-board dicts). Boards within a wave run
+  in parallel; **waves must be sequential** (they share git state). Compare two
+  waves: `ab_replay_grade.py --compare OLD/summary.json NEW/summary.json`.
+  `--regrade <wavedir>` re-grades finals without re-routing.
+  - **Baseline already exists:** `runs_setN/summary.json` is a graded wave from the
+    last stress run (same schema), so to A/B current HEAD vs the last run you only
+    run ONE new wave and `--compare` it against `runs_setN/summary.json` — no need
+    to check out old code.
+
+- **Whole corpus, diff-pair stages only:** `python3 tests/stress/redo_diff_stage.py
+  [boards...] [--jobs 4 --stagger 8] [--out-dir ~/Documents/diff2]`. Auto-detects
+  boards whose manifest has a `route_diff.py` step, replays only fanout +
+  `route_diff` (truncated through the last non-help `route_diff` line), and flags
+  any board with deferred/failed pairs, DRC violations, or no output — copying
+  flagged boards' `kicad_*` to `--out-dir`. Much faster than the full chain; use it
+  when the change only touches fanout / diff-pair routing.
+
+Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
+regressions → `redo_diff_stage.py`.
